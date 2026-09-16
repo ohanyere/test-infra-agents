@@ -61,8 +61,8 @@ export default function PricingPage() {
 
     <header className={`${styles.intro} ${styles.shell}`}>
       <p className={styles.eyebrow}>PRICING</p>
-      <h1>Pricing for real trials.</h1>
-      <p>Plans scale with evaluation usage, environment fidelity, and evidence retention.</p>
+      <h1>Pricing for infrastructure qualification.</h1>
+      <p>Plans scale with controlled trial usage, environment fidelity, and evidence retention.</p>
     </header>
 
     <section className={`${styles.plans} ${styles.shell}`} aria-label="Plans">

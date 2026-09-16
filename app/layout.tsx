@@ -18,7 +18,7 @@ const geistMono = localFont({
 export const metadata: Metadata = {
   title: "Evalplane — Qualify infrastructure agents before production",
   description:
-    "Qualify and compare infrastructure agents using realistic scenarios, repeatable evidence, and deterministic outcomes.",
+    "Determine what an exact infrastructure AgentVersion can be trusted to operate through controlled tasks and inspectable evidence.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
