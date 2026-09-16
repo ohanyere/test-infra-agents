@@ -1,0 +1,7 @@
+.state { min-height: 100svh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; background: #fbfbfa; color: #555; font-size: 13px; }
+.state p { margin: 0; }
+.state button, .signOut { border: 0; padding: 0; background: transparent; color: #555; font: inherit; font-size: 11px; cursor: pointer; text-align: left; }
+.state button { min-height: 36px; padding: 0 13px; border: 1px solid #ccc; border-radius: 5px; color: #111; }
+.state button:focus-visible, .signOut:focus-visible { outline: 2px solid #666; outline-offset: 2px; }
+.signOut { margin-top: 7px; }
+.signOut:disabled { cursor: not-allowed; opacity: .6; }

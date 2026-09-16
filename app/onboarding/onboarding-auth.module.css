@@ -1,0 +1,3 @@
+.signOut { border: 0; padding: 0; background: transparent; color: #555; font: inherit; font-size: 12px; cursor: pointer; }
+.signOut:focus-visible { outline: 2px solid #666; outline-offset: 3px; }
+.signOut:disabled { cursor: not-allowed; opacity: .6; }
