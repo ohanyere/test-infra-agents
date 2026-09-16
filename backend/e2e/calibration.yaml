@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: calibration
+  namespace: evalplane-e2e-harness
+spec:
+  serviceAccountName: qualification
+  restartPolicy: Never
+  activeDeadlineSeconds: 720
+  containers:
+    - name: harness
+      image: evalplane-harness:stage17
+      imagePullPolicy: Never
+      command: [/app/e2equalification]
+      env:
+        - {name: E2E_MODE, value: calibrate}
+        - {name: GOMAXPROCS, value: "2"}
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
