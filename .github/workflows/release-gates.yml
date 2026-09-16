@@ -1,0 +1,181 @@
+name: Release gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOMAXPROCS: "2"
+
+jobs:
+  repository-integrity:
+    name: Repository / static integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Validate migration files
+        run: ./scripts/check-migrations.sh
+      - name: Check Go formatting
+        run: ./scripts/check-gofmt.sh
+      - name: Verify Go module checksums
+        working-directory: backend
+        run: go mod verify
+
+  backend-core:
+    name: Backend core
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Test core execution domains
+        working-directory: backend
+        run: go test -p 1 ./internal/agent ./internal/agentconnection ./internal/evaluationbatch ./internal/evaluationsuite ./internal/execution ./internal/executionworker ./internal/environment
+
+  api-security:
+    name: API / auth / workspace isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Test HTTP, auth, identity, and boundary contracts
+        working-directory: backend
+        run: go test -p 1 ./internal/httpapi ./internal/auth ./internal/identity ./internal/agentgateway ./internal/mcpserver ./internal/incidentsource
+
+  database-migrations:
+    name: PostgreSQL migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: evalplane_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d evalplane_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/evalplane_ci?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Test migration up/down/up round-trip
+        working-directory: backend
+        run: go test -p 1 ./internal/migrationtest
+
+  qualification:
+    name: Qualification contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Test capability coverage and qualification semantics
+        working-directory: backend
+        run: go test -p 1 ./internal/agentcapability ./internal/competency ./internal/coverage ./internal/scenariocertification ./internal/srequal ./internal/gitopsqual ./internal/qualplan ./internal/qualification
+
+  reliability-evidence:
+    name: Reliability / trajectory / evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Test reliability and evidence integrity
+        working-directory: backend
+        run: go test -p 1 ./internal/reliability ./internal/trajectory ./internal/evidence ./internal/evaluator ./internal/failuretaxonomy ./internal/actionexec ./internal/observation
+
+  billing:
+    name: Billing reservation / settlement
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Test billing contracts
+        working-directory: backend
+        run: go test -p 1 ./internal/billing
+
+  frontend:
+    name: Frontend contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Typecheck, route integrity, and production build
+        run: npm run verify:frontend
+
+  release-gate:
+    name: release-gate
+    if: always()
+    needs:
+      - repository-integrity
+      - backend-core
+      - api-security
+      - database-migrations
+      - qualification
+      - reliability-evidence
+      - billing
+      - frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every focused gate
+        env:
+          REPOSITORY_INTEGRITY: ${{ needs.repository-integrity.result }}
+          BACKEND_CORE: ${{ needs.backend-core.result }}
+          API_SECURITY: ${{ needs.api-security.result }}
+          DATABASE_MIGRATIONS: ${{ needs.database-migrations.result }}
+          QUALIFICATION: ${{ needs.qualification.result }}
+          RELIABILITY_EVIDENCE: ${{ needs.reliability-evidence.result }}
+          BILLING: ${{ needs.billing.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+        run: |
+          for result in "$REPOSITORY_INTEGRITY" "$BACKEND_CORE" "$API_SECURITY" "$DATABASE_MIGRATIONS" "$QUALIFICATION" "$RELIABILITY_EVIDENCE" "$BILLING" "$FRONTEND"; do
+            test "$result" = success || { echo "A required release gate did not succeed: $result" >&2; exit 1; }
+          done
+          echo "All focused release gates succeeded."
