@@ -59,3 +59,4 @@
   .plan:first-child { border-top: 0; }
   .credits dl > div { grid-template-columns: 1fr; gap: 6px; }
 }
+.page{background:#f6f5f0;color:#11110f}.intro{padding-top:72px;padding-bottom:48px}.intro h1{font-size:clamp(2.35rem,4.2vw,3.25rem)}.intro>p:last-child{max-width:620px;margin-top:18px;color:#6f6b63;font-size:16px}.plans{border-color:#ddd9d1}.plan{padding-top:24px;padding-bottom:24px;border-color:#ddd9d1}.button,.primaryAction{border-color:#f05a22;background:#f05a22}.credits,.availability{padding-top:72px}.credits h2,.availability h2{font-size:clamp(1.8rem,3vw,2.3rem)}

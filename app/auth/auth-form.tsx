@@ -20,7 +20,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
     {signup && <div className={styles.field}><label htmlFor="organization">Organization / company</label><input id="organization" autoComplete="organization" placeholder="Acme" value={organization} onChange={(e) => setOrganization(e.target.value)} aria-invalid={Boolean(errors.organization)} aria-describedby={errors.organization?"organization-error":undefined}/>{errors.organization&&<span className={styles.error} id="organization-error">{errors.organization}</span>}</div>}
     <button className={styles.primaryButton} type="submit" disabled={submitting}>{submitting?(signup?"Creating account…":"Signing in…"):(signup ? "Create account" : "Sign in")}</button>
     <div className={styles.separator}><span>or</span></div><button className={styles.githubButton} type="button" disabled aria-disabled="true" title="GitHub authentication is not available yet">Continue with GitHub</button>
-    {signup && <p className={styles.legal}>By continuing, you agree to the <a href="#terms">Terms of Service</a> and <a href="#privacy">Privacy Policy</a>.</p>}
+    {signup && <p className={styles.legal}>By continuing, you agree to the service terms and privacy policy.</p>}
     {message && <p className={styles.success} role="alert">{message}</p>}
     <p className={styles.bottomPrompt}>{signup ? "Already have an account?" : "Don't have an account?"} <a href={signup ? "/login" : "/signup"}>{signup ? "Sign in" : "Create one"}</a></p>
   </form>;

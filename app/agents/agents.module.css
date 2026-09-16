@@ -97,3 +97,4 @@
 @media (prefers-reduced-motion: reduce) {
   .agentLink, .navLinks a, .signIn, .filters button { transition-duration: .01ms; }
 }
+.page{background:#f6f5f0;color:#11110f}.intro{padding-top:64px;padding-bottom:44px}.intro h1{font-size:clamp(2.35rem,4.2vw,3.25rem)}.description{margin-top:16px;color:#6f6b63;font-size:16px}.button{border-color:#f05a22;background:#f05a22}.agentRow,.agentList,.directorySummary{border-color:#ddd9d1}
