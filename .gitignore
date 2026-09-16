@@ -1,0 +1,34 @@
+# Frontend dependencies and build output
+/node_modules/
+/.next/
+*.tsbuildinfo
+
+# Local environment files (placeholder examples are source-controlled)
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Local runtime and E2E diagnostics
+/backend/e2e/artifacts/
+/backend/e2e/docker-wrapper/
+*.kubeconfig
+*.log
+*.dump
+
+# Local database state
+/postgres_data/
+/.postgres/
+
+# Go build/test output
+*.test
+*.out
+/coverage/
+
+# Editors and operating systems
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
