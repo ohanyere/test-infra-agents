@@ -9,7 +9,10 @@ Production login rate limiting, email verification, password reset, MFA, and OAu
 ## Prerequisites
 
 - Go 1.25+
-- Docker with Compose
+- PostgreSQL 16, either directly in WSL/Linux or through Docker with Compose
+
+For the lightweight native WSL setup, see
+[`../docs/local-wsl-development.md`](../docs/local-wsl-development.md).
 
 ## Configuration
 
