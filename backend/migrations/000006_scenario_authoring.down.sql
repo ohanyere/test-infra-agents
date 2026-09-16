@@ -1,0 +1,9 @@
+ALTER TABLE scenario_versions
+  DROP COLUMN source_metadata,
+  DROP COLUMN execution_spec,
+  DROP COLUMN ground_truth,
+  DROP COLUMN allowed_resources,
+  DROP COLUMN allowed_actions,
+  DROP COLUMN agent_visible_context,
+  DROP COLUMN agent_task,
+  DROP COLUMN authoring_method;
