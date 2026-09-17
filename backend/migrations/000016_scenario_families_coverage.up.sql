@@ -52,19 +52,18 @@ CREATE INDEX scenario_version_task_family_family_idx
 -- the ScenarioVersion (runs via evaluation_batches, or suite execution links).
 CREATE FUNCTION reject_task_family_reassignment_after_evidence() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE
-    evidence_count INTEGER;
 BEGIN
     IF OLD.task_family_id IS NOT DISTINCT FROM NEW.task_family_id
        AND OLD.case_type IS NOT DISTINCT FROM NEW.case_type THEN
         RETURN NEW;
     END IF;
-    SELECT COUNT(*) INTO evidence_count FROM (
-        SELECT 1 FROM evaluation_batches WHERE scenario_version_id = OLD.scenario_version_id LIMIT 1
-        UNION ALL
-        SELECT 1 FROM suite_execution_batches WHERE scenario_version_id = OLD.scenario_version_id LIMIT 1
-    ) evidence;
-    IF evidence_count > 0 THEN
+    IF EXISTS (
+        SELECT 1 FROM evaluation_batches
+        WHERE scenario_version_id = OLD.scenario_version_id
+    ) OR EXISTS (
+        SELECT 1 FROM suite_execution_batches
+        WHERE scenario_version_id = OLD.scenario_version_id
+    ) THEN
         RAISE EXCEPTION 'task family assignment is immutable once evaluation evidence exists for this ScenarioVersion' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
