@@ -89,7 +89,7 @@ Authenticated routes include:
 - `GET /v1/environment-components` (authenticated; server-owned `environment-component-catalog:v1`)
 - `GET /v1/environment-profiles` (authenticated; server-owned `environment-profile-catalog:v1`; only `kubernetes.namespace:v1` is active, the rest are planned/experimental)
 - `GET /v1/environment-providers` (authenticated; `kind-dev:v1` active development-only, never production; future providers planned with no fake health)
-- `GET /v1/workspaces/{workspaceID}/environments` and `GET /v1/workspaces/{workspaceID}/environments/{environmentID}` (workspace-scoped instances; opaque `provider_ref` only, never kubeconfigs/tokens/credentials)
+- `GET /v1/workspaces/{workspaceID}/environments`, `GET /v1/workspaces/{workspaceID}/environments/{environmentID}`, and `GET /v1/workspaces/{workspaceID}/environments/{environmentID}/components` (workspace-scoped aggregate and child instances; opaque `provider_ref` only, never kubeconfigs/tokens/credentials)
 - `POST /v1/workspaces/{workspaceID}/environment-selection/resolve` (diagnostic scheduler; accepts a ScenarioVersion reference, never arbitrary requirements)
 - `GET|PUT /v1/workspaces/{workspaceID}/scenarios/{scenarioID}/versions/{versionID}/environment` (read: any member with eligible profile; write: owner/admin/member sets server-reviewed requirements)
 - `GET /v1/workspaces/{workspaceID}/runs/{runID}/events` (any member; persisted run events, `event_type|limit|offset`)

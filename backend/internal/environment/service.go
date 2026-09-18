@@ -247,6 +247,21 @@ func (s *Service) GetInstance(ctx context.Context, principal auth.Principal, wor
 	return s.repo.GetInstance(ctx, s.pool, workspaceID, environmentID)
 }
 
+// ListInstanceComponents returns the planned/provisioned children of an
+// aggregate environment. A legacy environment validly returns an empty list.
+func (s *Service) ListInstanceComponents(ctx context.Context, principal auth.Principal, workspaceID, environmentID string) ([]EnvironmentComponentInstance, error) {
+	if _, err := s.role(ctx, principal, workspaceID); err != nil {
+		return nil, err
+	}
+	if identity.ValidateUUID(workspaceID) != nil || identity.ValidateUUID(environmentID) != nil {
+		return nil, validation("workspace_id and environment_id must be valid UUIDs")
+	}
+	if _, err := s.repo.GetInstance(ctx, s.pool, workspaceID, environmentID); err != nil {
+		return nil, err
+	}
+	return s.repo.ListComponentInstances(ctx, s.pool, workspaceID, environmentID)
+}
+
 // ListInstances lists workspace instances newest-first.
 func (s *Service) ListInstances(ctx context.Context, principal auth.Principal, workspaceID string, limit int) ([]EnvironmentInstance, error) {
 	if _, err := s.role(ctx, principal, workspaceID); err != nil {

@@ -48,3 +48,10 @@ execution owner (`run` or `certification`); instances are never shared
 across tenants. `provider_ref` is a safe opaque handle only: no kubeconfigs,
 tokens, or cloud credentials are stored or returned. Agents reach clusters
 only through mediated HTTP/MCP/tool paths.
+
+Stage 39A preserves `EnvironmentInstance` as the trial-owned aggregate world.
+Immutable `world-spec:v1` and `composition-plan:v1` documents sit before it;
+planned/provisioned `environment_component_instances` sit beneath it. Historical
+aggregate rows with no plan and zero child rows remain valid. Environment
+Requirements remain the legacy compiler input and scheduler index; WorldSpec is
+the richer topology/lifecycle authority for newly persisted world contracts.

@@ -323,6 +323,7 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 					protected.Get("/environment-providers", environmentAPI.listProviders)
 					protected.Get("/workspaces/{workspaceID}/environments", environmentAPI.listInstances)
 					protected.Get("/workspaces/{workspaceID}/environments/{environmentID}", environmentAPI.getInstance)
+					protected.Get("/workspaces/{workspaceID}/environments/{environmentID}/components", environmentAPI.listInstanceComponents)
 					protected.Post("/workspaces/{workspaceID}/environment-selection/resolve", environmentAPI.resolveSelection)
 					protected.Get("/workspaces/{workspaceID}/scenarios/{scenarioID}/versions/{versionID}/environment", environmentAPI.getVersionEnvironment)
 					protected.Put("/workspaces/{workspaceID}/scenarios/{scenarioID}/versions/{versionID}/environment", environmentAPI.putVersionRequirements)

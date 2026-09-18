@@ -38,17 +38,17 @@ func TestMigrations(t *testing.T) {
 	if err := migrator.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up: %v", err)
 	}
-	assertVersion(t, migrator, 20)
+	assertVersion(t, migrator, 21)
 	assertCoreTables(t, databaseURL)
 
 	if err := migrator.Steps(-1); err != nil {
 		t.Fatalf("migrate down one version: %v", err)
 	}
-	assertVersion(t, migrator, 19)
+	assertVersion(t, migrator, 20)
 	if err := migrator.Up(); err != nil {
 		t.Fatalf("migrate back up: %v", err)
 	}
-	assertVersion(t, migrator, 20)
+	assertVersion(t, migrator, 21)
 }
 
 func assertVersion(t *testing.T, migrator *migrate.Migrate, want uint) {
@@ -67,7 +67,7 @@ func assertCoreTables(t *testing.T, databaseURL string) {
 	}
 	defer pool.Close()
 
-	tables := []string{"organizations", "workspaces", "users", "workspace_members", "agents", "agent_versions", "agent_version_connections", "agent_version_capability_claims", "mcp_run_grants", "scenarios", "scenario_versions", "scenario_criteria", "task_families", "scenario_version_task_family", "scenario_version_reference_remediations", "scenario_certifications", "evaluation_batches", "evaluation_batch_agents", "runs", "run_events", "agent_actions", "evaluations", "evaluation_criterion_results", "evaluation_findings", "password_credentials", "sessions", "evaluation_suites", "evaluation_suite_versions", "evaluation_suite_version_scenarios", "suite_executions", "suite_execution_agents", "suite_execution_batches", "suite_execution_run_variants", "agent_regression_comparisons", "qualification_policies", "qualification_policy_versions", "qualification_assessments", "qualification_rule_results", "scenario_version_environment_requirements", "environment_instances", "qualification_plans", "qualification_plan_suites", "capability_coverage_assessments", "billing_accounts", "billing_usage_ledger", "billing_provider_events"}
+	tables := []string{"organizations", "workspaces", "users", "workspace_members", "agents", "agent_versions", "agent_version_connections", "agent_version_capability_claims", "mcp_run_grants", "scenarios", "scenario_versions", "scenario_criteria", "task_families", "scenario_version_task_family", "scenario_version_reference_remediations", "scenario_certifications", "evaluation_batches", "evaluation_batch_agents", "runs", "run_events", "agent_actions", "evaluations", "evaluation_criterion_results", "evaluation_findings", "password_credentials", "sessions", "evaluation_suites", "evaluation_suite_versions", "evaluation_suite_version_scenarios", "suite_executions", "suite_execution_agents", "suite_execution_batches", "suite_execution_run_variants", "agent_regression_comparisons", "qualification_policies", "qualification_policy_versions", "qualification_assessments", "qualification_rule_results", "scenario_version_environment_requirements", "environment_instances", "world_specs", "composition_plans", "environment_component_instances", "qualification_plans", "qualification_plan_suites", "capability_coverage_assessments", "billing_accounts", "billing_usage_ledger", "billing_provider_events"}
 	for _, table := range tables {
 		var exists bool
 		query := `SELECT to_regclass($1) IS NOT NULL`

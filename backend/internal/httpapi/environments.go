@@ -24,6 +24,7 @@ type EnvironmentService interface {
 	GetRequirements(context.Context, auth.Principal, string, string, string) (environment.Requirements, bool, error)
 	Resolve(context.Context, auth.Principal, string, environment.ResolveRequest) (environment.SchedulerDecision, environment.Requirements, error)
 	GetInstance(context.Context, auth.Principal, string, string) (environment.EnvironmentInstance, error)
+	ListInstanceComponents(context.Context, auth.Principal, string, string) ([]environment.EnvironmentComponentInstance, error)
 	ListInstances(context.Context, auth.Principal, string, int) ([]environment.EnvironmentInstance, error)
 	TransitionInstance(context.Context, auth.Principal, string, string, string) (environment.EnvironmentInstance, error)
 }
@@ -78,6 +79,26 @@ func (h environmentHandlers) getInstance(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, instance.SafeView())
+}
+
+func (h environmentHandlers) listInstanceComponents(w http.ResponseWriter, r *http.Request) {
+	workspaceID, ok := pathUUID(w, r, "workspaceID")
+	if !ok {
+		return
+	}
+	environmentID, ok := pathUUID(w, r, "environmentID")
+	if !ok {
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(r.Context())
+	items, err := h.service.ListInstanceComponents(r.Context(), principal, workspaceID, environmentID)
+	if handleEnvironmentError(w, h.logger, err) {
+		return
+	}
+	if items == nil {
+		items = []environment.EnvironmentComponentInstance{}
+	}
+	writeJSON(w, http.StatusOK, listResponse[environment.EnvironmentComponentInstance]{Items: items, Pagination: paginationResponse{Limit: len(items), Offset: 0}})
 }
 
 type resolveSelectionRequest struct {
