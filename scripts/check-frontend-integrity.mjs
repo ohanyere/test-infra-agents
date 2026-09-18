@@ -7,6 +7,7 @@ const requiredRoutes = [
   "app/agents/page.tsx", "app/agents/new/page.tsx", "app/agents/[id]/page.tsx",
   "app/qualification/page.tsx", "app/qualification/suites/[id]/page.tsx",
   "app/runs/page.tsx", "app/runs/[id]/page.tsx", "app/runs/[id]/trajectory/page.tsx",
+  "app/verifications/page.tsx", "app/verifications/[id]/page.tsx", "app/integrations/page.tsx",
   "app/suite-executions/[id]/page.tsx", "app/comparisons/[id]/page.tsx",
 ];
 const deletedMockModules = [

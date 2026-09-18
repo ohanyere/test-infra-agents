@@ -57,7 +57,7 @@ const plans = [
 
 export default function PricingPage() {
   return <main className={styles.page}>
-    <PublicNavigation active="pricing" />
+    <PublicNavigation />
 
     <header className={`${styles.intro} ${styles.shell}`}>
       <p className={styles.eyebrow}>PRICING</p>

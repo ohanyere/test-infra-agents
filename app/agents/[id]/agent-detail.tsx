@@ -150,8 +150,8 @@ export function AgentDetail({ agentID }: { agentID: string }) {
 
   return <main className={styles.page}>
     <header className={styles.topNav}><a href="/">evalplane</a><a href="/agents">Agents</a></header>
-    <header className={styles.agentHeader + " " + styles.shell}><p className={styles.label}>AGENT</p><h1>{agent.name}</h1><p className={styles.description}>{agent.description || "No description provided."}</p><div className={styles.actions}><a className={styles.primaryButton} href={"/agents/new?agent=" + agent.id}>Register version</a><a className={styles.secondaryButton} href="/workspace/tasks">View tasks</a></div></header>
-	<section className={styles.section + " " + styles.shell}><div className={styles.sectionIntro}><p className={styles.label}>REGISTERED VERSIONS</p><h2>Exact versions and connections.</h2><p>Behavior changes create a new version. Authentication changes update the existing version credential. Each version carries claimed capabilities; tested capabilities and qualification status (Qualified / Not qualified / Inconclusive) appear only after qualification trials run.</p></div>
+    <header className={styles.agentHeader + " " + styles.shell}><p className={styles.label}>AGENT</p><h1>{agent.name}</h1><p className={styles.description}>{agent.description || "No description provided."}</p><div className={styles.actions}><a className={styles.primaryButton} href={"/agents/new?agent=" + agent.id}>Register version</a><a className={styles.secondaryButton} href="/verifications">Verifications</a></div><nav aria-label="Agent sections"><a href="#versions">Versions</a> · <a href="/verifications">Verifications</a> · <a href="#versions">Connection</a> · <a href="/integrations">CI</a></nav></header>
+	<section id="versions" className={styles.section + " " + styles.shell}><div className={styles.sectionIntro}><p className={styles.label}>VERSIONS · CONNECTION · VERIFICATION</p><h2>Exact versions and their evidence.</h2><p>Behavior changes create a new version. Connection credentials can rotate without changing version identity. Verification outcomes remain attached to the exact version that acted.</p></div>
       <div className={styles.versionList}>{versions.map((version) => { const connection = connections[version.id]; const versionClaims = claimsFor(version); return <article className={styles.versionRow} key={version.id}>
         <div><h3>{version.version_label}</h3><code>{version.id}</code></div><dl><div><dt>Invocation</dt><dd>{version.interface_kind.toUpperCase()}</dd></div><div><dt>Tool access</dt><dd>{version.tool_access_mode === "mcp" ? "MCP" : "Direct"}</dd></div><div><dt>Connection</dt><dd>{statusText[connection?.last_check_status || "untested"]}</dd></div><div><dt>Last checked</dt><dd>{connection?.last_checked_at ? new Date(connection.last_checked_at).toLocaleString() : "Never"}</dd></div><div><dt>Connection &amp; tool access</dt><dd>{version.capabilities.join(" · ") || "None declared"}</dd></div><div><dt>Qualified</dt><dd>—</dd></div></dl>
         <p className={styles.endpoint}>{version.endpoint_url}</p>
@@ -170,7 +170,7 @@ export function AgentDetail({ agentID }: { agentID: string }) {
             </li>;
           })}</ul>}
         </div>
-        <div><h4>Qualification</h4><p className={styles.endpoint}>Evalplane derives what must be tested from this version&apos;s claimed capabilities. READY means an authoritative qualification suite can be constructed — not that the agent passed it.</p>
+        <details><summary>Legacy qualification planning</summary><div><h4>Qualification</h4><p className={styles.endpoint}>This downstream policy workflow remains available for compatibility. It is not the primary verification result.</p>
           {(() => {
             const plan = plans[version.id];
             const failure = planError[version.id];
@@ -195,8 +195,8 @@ export function AgentDetail({ agentID }: { agentID: string }) {
               </> : null}
             </>;
           })()}
-        </div>
-        <div><h4>Reliability</h4><p className={styles.endpoint}>Repeated-trial reliability under reliability-metrics-contract:v1. Consistency (pass^k: all k attempts succeed) is the primary signal; at-least-once (pass@k) is secondary. Platform-invalid trials never count as agent failures.</p>
+        </div></details>
+        <div><h4>Verification history</h4><p className={styles.endpoint}>Repeated verification evidence under reliability-metrics-contract:v1. Consistency (pass^k: all k attempts succeed) is the primary signal; at-least-once (pass@k) is secondary. Platform-invalid trials never count as agent failures.</p>
           {(() => {
             const report = reliability[version.id];
             if (!report) return <p className={styles.endpoint}>No reliability evidence yet.</p>;

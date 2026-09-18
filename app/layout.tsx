@@ -16,15 +16,15 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Evalplane — Qualify infrastructure agents before production",
+  title: "Evalplane — Independent infrastructure agent verification",
   description:
-    "Determine what an exact infrastructure AgentVersion can be trusted to operate through controlled tasks and inspectable evidence.",
+    "Inspect what infrastructure agents change and independently verify outcomes, side effects, stability, and evidence-backed forward risk.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable}`}><Providers>{children}</Providers></body>
+      <body className={`${geistSans.variable} ${geistMono.variable}`}><style>{`a[class*="button"],button[class*="button"],a[class*="primaryAction"],button[class*="primaryAction"]{border-color:#171717!important;background:#171717!important;color:#fff!important}`}</style><Providers>{children}</Providers></body>
     </html>
   );
 }
