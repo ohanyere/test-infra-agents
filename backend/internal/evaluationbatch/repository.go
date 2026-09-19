@@ -2,6 +2,7 @@ package evaluationbatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/evalplane/evalplane/backend/internal/identity"
@@ -46,7 +47,9 @@ func (r *Repository) LoadUsableAgents(ctx context.Context, db DBTX, w string, ve
 }
 func (r *Repository) CreateBatch(ctx context.Context, db DBTX, w, user string, in CreateInput) (Batch, error) {
 	var v Batch
-	e := db.QueryRow(ctx, `INSERT INTO evaluation_batches(workspace_id,scenario_version_id,created_by,status,runs_per_agent,environment_mode,config)VALUES($1,$2,$3,'draft',$4,$5,$6)RETURNING id,workspace_id,status,runs_per_agent,environment_mode,config,created_by,created_at,started_at,completed_at`, w, in.ScenarioVersionID, user, in.RunsPerAgent, in.EnvironmentMode, in.Config).Scan(&v.ID, &v.WorkspaceID, &v.Status, &v.RunsPerAgent, &v.EnvironmentMode, &v.Config, &v.CreatedBy, &v.CreatedAt, &v.StartedAt, &v.CompletedAt)
+	source, _ := json.Marshal(in.SourceMetadata)
+	e := db.QueryRow(ctx, `INSERT INTO evaluation_batches(workspace_id,scenario_version_id,created_by,status,runs_per_agent,environment_mode,config,source_metadata,idempotency_key)VALUES($1,$2,$3,'draft',$4,$5,$6,$7,NULLIF($8,''))RETURNING id,workspace_id,status,runs_per_agent,environment_mode,config,source_metadata,COALESCE(idempotency_key,''),created_by,created_at,started_at,completed_at`, w, in.ScenarioVersionID, user, in.RunsPerAgent, in.EnvironmentMode, in.Config, source, in.IdempotencyKey).Scan(&v.ID, &v.WorkspaceID, &v.Status, &v.RunsPerAgent, &v.EnvironmentMode, &v.Config, &source, &v.IdempotencyKey, &v.CreatedBy, &v.CreatedAt, &v.StartedAt, &v.CompletedAt)
+	_ = json.Unmarshal(source, &v.SourceMetadata)
 	return v, mapDB(e)
 }
 func (r *Repository) AddAgentsAndRuns(ctx context.Context, db DBTX, batchID string, agentVersionIDs []string, repetitions int) error {
@@ -59,7 +62,20 @@ func (r *Repository) AddAgentsAndRuns(ctx context.Context, db DBTX, batchID stri
 	return nil
 }
 
-const batchSelect = `SELECT b.id,b.workspace_id,b.status,b.runs_per_agent,b.environment_mode,b.config,b.created_by,b.created_at,b.started_at,b.completed_at,s.id,sv.id,s.name,sv.version,(SELECT count(*) FROM evaluation_batch_agents ba WHERE ba.batch_id=b.id),(SELECT count(*) FROM runs r WHERE r.batch_id=b.id) FROM evaluation_batches b JOIN scenario_versions sv ON sv.id=b.scenario_version_id JOIN scenarios s ON s.id=sv.scenario_id`
+const batchSelect = `SELECT b.id,b.workspace_id,b.status,b.runs_per_agent,b.environment_mode,b.config,b.source_metadata,COALESCE(b.idempotency_key,''),b.created_by,b.created_at,b.started_at,b.completed_at,s.id,sv.id,s.name,sv.version,(SELECT count(*) FROM evaluation_batch_agents ba WHERE ba.batch_id=b.id),(SELECT count(*) FROM runs r WHERE r.batch_id=b.id) FROM evaluation_batches b JOIN scenario_versions sv ON sv.id=b.scenario_version_id JOIN scenarios s ON s.id=sv.scenario_id`
+
+func (r *Repository) FindByIdempotencyKey(ctx context.Context, db DBTX, workspaceID, key string) (Batch, bool, error) {
+	var id string
+	err := db.QueryRow(ctx, `SELECT id FROM evaluation_batches WHERE workspace_id=$1 AND idempotency_key=$2`, workspaceID, key).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Batch{}, false, nil
+	}
+	if err != nil {
+		return Batch{}, false, mapDB(err)
+	}
+	out, err := r.GetBatch(ctx, db, workspaceID, id)
+	return out, err == nil, err
+}
 
 func (r *Repository) GetBatch(ctx context.Context, db DBTX, w, id string) (Batch, error) {
 	v, e := scanBatch(db.QueryRow(ctx, batchSelect+` WHERE b.id=$1 AND b.workspace_id=$2`, id, w))
@@ -143,7 +159,11 @@ type scanner interface{ Scan(...any) error }
 
 func scanBatch(row scanner) (Batch, error) {
 	var v Batch
-	e := row.Scan(&v.ID, &v.WorkspaceID, &v.Status, &v.RunsPerAgent, &v.EnvironmentMode, &v.Config, &v.CreatedBy, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.Scenario.ScenarioID, &v.Scenario.ScenarioVersionID, &v.Scenario.Name, &v.Scenario.Version, &v.AgentCount, &v.RunCount)
+	var source json.RawMessage
+	e := row.Scan(&v.ID, &v.WorkspaceID, &v.Status, &v.RunsPerAgent, &v.EnvironmentMode, &v.Config, &source, &v.IdempotencyKey, &v.CreatedBy, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.Scenario.ScenarioID, &v.Scenario.ScenarioVersionID, &v.Scenario.Name, &v.Scenario.Version, &v.AgentCount, &v.RunCount)
+	if e == nil {
+		e = json.Unmarshal(source, &v.SourceMetadata)
+	}
 	return v, mapDB(e)
 }
 func scanRun(row scanner) (Run, error) {

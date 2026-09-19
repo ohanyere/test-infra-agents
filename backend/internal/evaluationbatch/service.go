@@ -28,6 +28,14 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, w string, in Cre
 	if in, err = ValidateCreate(in); err != nil {
 		return
 	}
+	if in.IdempotencyKey != "" {
+		if existing, found, findErr := s.repo.FindByIdempotencyKey(ctx, s.pool, w, in.IdempotencyKey); findErr != nil {
+			err = findErr
+			return
+		} else if found {
+			return existing, nil
+		}
+	}
 	tx, e := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if e != nil {
 		err = e

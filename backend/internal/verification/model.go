@@ -1,0 +1,134 @@
+package verification
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+)
+
+const (
+	ContractVersion = "infrastructure-verifier:v1"
+	SnapshotVersion = "kubernetes-snapshot:v1"
+
+	StatusVerified     = "VERIFIED"
+	StatusFailed       = "FAILED"
+	StatusWarning      = "WARNING"
+	StatusInconclusive = "INCONCLUSIVE"
+
+	ValidityValid           = "valid"
+	ValidityInvalidPlatform = "invalid_platform"
+	ValidityInvalidTask     = "invalid_task"
+)
+
+type Snapshot struct {
+	ContractVersion string                   `json:"contract_version"`
+	Reference       string                   `json:"reference"`
+	CapturedAt      time.Time                `json:"captured_at"`
+	Observation     agentgateway.Observation `json:"observation"`
+}
+
+type IntentAssertion struct {
+	Key      string          `json:"key"`
+	Metric   string          `json:"metric"`
+	Operator string          `json:"operator"`
+	Target   json.RawMessage `json:"target"`
+}
+type IntentResult struct {
+	Objective  string            `json:"objective"`
+	Assertions []IntentAssertion `json:"assertions"`
+}
+type InspectedAction struct {
+	ID         string          `json:"id"`
+	ActionType string          `json:"action_type"`
+	Status     string          `json:"status"`
+	TargetType string          `json:"target_type,omitempty"`
+	TargetRef  string          `json:"target_ref,omitempty"`
+	Authorized bool            `json:"authorized"`
+	Requested  json.RawMessage `json:"requested"`
+	Result     json.RawMessage `json:"result"`
+	OccurredAt time.Time       `json:"occurred_at"`
+}
+type ActionInspection struct {
+	Requested  int               `json:"requested_count"`
+	Authorized int               `json:"authorized_count"`
+	Denied     int               `json:"denied_count"`
+	Executed   int               `json:"executed_count"`
+	Failed     int               `json:"failed_count"`
+	Actions    []InspectedAction `json:"actions"`
+}
+type FieldChange struct {
+	Field  string `json:"field"`
+	Before any    `json:"before,omitempty"`
+	After  any    `json:"after,omitempty"`
+}
+type InfrastructureChange struct {
+	Resource          string        `json:"resource"`
+	Classification    string        `json:"classification"`
+	Attribution       string        `json:"attribution"`
+	AttributionReason string        `json:"attribution_reason"`
+	Fields            []FieldChange `json:"fields"`
+}
+type OutcomeResult struct {
+	Status     string   `json:"status"`
+	Reason     string   `json:"reason"`
+	Assertions []string `json:"assertions"`
+}
+type Finding struct {
+	Type     string   `json:"type"`
+	Severity string   `json:"severity"`
+	Summary  string   `json:"summary"`
+	Blocking bool     `json:"blocking"`
+	Evidence []string `json:"evidence"`
+}
+type SideEffectResult struct {
+	Status   string    `json:"status"`
+	Findings []Finding `json:"findings"`
+}
+type StabilityResult struct {
+	Status       string    `json:"status"`
+	Reason       string    `json:"reason"`
+	Observations int       `json:"observations"`
+	StartedAt    time.Time `json:"started_at,omitempty"`
+	CompletedAt  time.Time `json:"completed_at,omitempty"`
+}
+type RiskFinding struct {
+	AnalyzerID        string    `json:"analyzer_id"`
+	AnalyzerVersion   string    `json:"analyzer_version"`
+	Type              string    `json:"type"`
+	Severity          string    `json:"severity"`
+	AffectedResources []string  `json:"affected_resources"`
+	Evidence          []string  `json:"evidence"`
+	Reason            string    `json:"reason"`
+	Trigger           string    `json:"trigger"`
+	EvidenceStrength  string    `json:"evidence_strength"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+type Result struct {
+	ID                      string                 `json:"id"`
+	WorkspaceID             string                 `json:"workspace_id"`
+	RunID                   string                 `json:"run_id"`
+	AgentVersionID          string                 `json:"agent_version_id"`
+	ScenarioVersionID       string                 `json:"scenario_version_id"`
+	EnvironmentInstanceID   string                 `json:"environment_instance_id,omitempty"`
+	CompositionPlanID       string                 `json:"composition_plan_id,omitempty"`
+	CompositionPlanHash     string                 `json:"composition_plan_hash,omitempty"`
+	VerifierContractVersion string                 `json:"verifier_contract_version"`
+	SnapshotContractVersion string                 `json:"snapshot_contract_version"`
+	Baseline                Snapshot               `json:"baseline_snapshot"`
+	Final                   Snapshot               `json:"final_snapshot"`
+	Intent                  IntentResult           `json:"intent"`
+	ActionInspection        ActionInspection       `json:"action_inspection"`
+	InfrastructureDiff      []InfrastructureChange `json:"infrastructure_diff"`
+	Outcome                 OutcomeResult          `json:"outcome"`
+	SideEffects             SideEffectResult       `json:"side_effects"`
+	Stability               StabilityResult        `json:"stability"`
+	ForwardRisks            []RiskFinding          `json:"forward_risks"`
+	Validity                string                 `json:"validity"`
+	OverallStatus           string                 `json:"overall_status"`
+	Reason                  string                 `json:"reason"`
+	SourceMetadata          json.RawMessage        `json:"source_metadata"`
+	EvidenceStartedAt       *time.Time             `json:"evidence_started_at,omitempty"`
+	EvidenceCompletedAt     *time.Time             `json:"evidence_completed_at,omitempty"`
+	CreatedAt               time.Time              `json:"created_at"`
+}

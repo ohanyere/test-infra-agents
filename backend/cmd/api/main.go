@@ -37,6 +37,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/scenarioauthoring"
 	"github.com/evalplane/evalplane/backend/internal/scenariocertification"
 	"github.com/evalplane/evalplane/backend/internal/trajectory"
+	"github.com/evalplane/evalplane/backend/internal/verification"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -106,6 +107,7 @@ func run() error {
 	failureTaxonomyService := failuretaxonomy.NewService(pool, failuretaxonomy.NewRepository(), auth.NewRepository())
 	qualificationService := qualification.NewService(pool, qualification.NewRepository(), auth.NewRepository(), evaluationSuiteService, agentRegressionService, failureTaxonomyService)
 	evidenceService := evidence.NewService(pool, evidence.NewRepository(), auth.NewRepository())
+	verificationService := verification.NewService(pool, verification.NewRepository(), auth.NewRepository())
 	trajectoryService := trajectory.NewService(pool, trajectory.NewRepository(), auth.NewRepository())
 	executionService := execution.NewService(pool, execution.NewRepository(), auth.NewRepository())
 	coverageService := coverage.NewService(pool, coverage.NewRepository(), auth.NewRepository(), &agentClaimAdapter{service: agentService}, &executionMembership{pool: pool})
@@ -116,7 +118,7 @@ func run() error {
 	qualificationPlanService := qualplan.NewService(pool, qualplan.NewRepository(), auth.NewRepository(), agentService, scenarioService, scenario.NewRepository(), coverage.NewRepository(), environment.NewRepository(), environmentService, certificationService, evaluationSuiteService)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
-		Handler:           httpapi.NewRouter(pool, logger, httpapi.WithIdentityService(identityService), httpapi.WithAuthentication(authService, authService, cfg.CookieSecure, cfg.SessionTTL, cfg.AppOrigin), httpapi.WithAgentService(agentService), httpapi.WithAgentConnectionService(agentConnectionService), httpapi.WithScenarioService(scenarioService), httpapi.WithScenarioAuthoringService(scenarioAuthoringService), httpapi.WithIncidentSourceService(incidentSourceService), httpapi.WithEvaluationBatchService(evaluationBatchService), httpapi.WithEvaluationSuiteService(evaluationSuiteService), httpapi.WithAgentRegressionService(agentRegressionService), httpapi.WithQualificationService(qualificationService), httpapi.WithQualificationPlanService(qualificationPlanService), httpapi.WithCoverageService(coverageService), httpapi.WithReliabilityService(reliabilityService), httpapi.WithFailureTaxonomyService(failureTaxonomyService), httpapi.WithEvidenceService(evidenceService), httpapi.WithTrajectoryService(trajectoryService), httpapi.WithExecutionService(executionService), httpapi.WithCertificationService(certificationService), httpapi.WithEnvironmentService(environmentService), httpapi.WithBillingService(billingService)),
+		Handler:           httpapi.NewRouter(pool, logger, httpapi.WithIdentityService(identityService), httpapi.WithAuthentication(authService, authService, cfg.CookieSecure, cfg.SessionTTL, cfg.AppOrigin), httpapi.WithAgentService(agentService), httpapi.WithAgentConnectionService(agentConnectionService), httpapi.WithScenarioService(scenarioService), httpapi.WithScenarioAuthoringService(scenarioAuthoringService), httpapi.WithIncidentSourceService(incidentSourceService), httpapi.WithEvaluationBatchService(evaluationBatchService), httpapi.WithEvaluationSuiteService(evaluationSuiteService), httpapi.WithAgentRegressionService(agentRegressionService), httpapi.WithQualificationService(qualificationService), httpapi.WithQualificationPlanService(qualificationPlanService), httpapi.WithCoverageService(coverageService), httpapi.WithReliabilityService(reliabilityService), httpapi.WithFailureTaxonomyService(failureTaxonomyService), httpapi.WithEvidenceService(evidenceService), httpapi.WithVerificationService(verificationService), httpapi.WithTrajectoryService(trajectoryService), httpapi.WithExecutionService(executionService), httpapi.WithCertificationService(certificationService), httpapi.WithEnvironmentService(environmentService), httpapi.WithBillingService(billingService)),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

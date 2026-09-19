@@ -44,6 +44,18 @@ type WorkloadObservation struct {
 	CPULimit          string `json:"cpu_limit,omitempty"`
 	MemoryRequest     string `json:"memory_request,omitempty"`
 	MemoryLimit       string `json:"memory_limit,omitempty"`
+	Image             string `json:"image,omitempty"`
+	ResourceVersion   string `json:"resource_version,omitempty"`
+}
+type AutoscalerObservation struct {
+	Name            string `json:"name"`
+	Namespace       string `json:"namespace"`
+	TargetKind      string `json:"target_kind"`
+	TargetName      string `json:"target_name"`
+	MinReplicas     int32  `json:"min_replicas"`
+	MaxReplicas     int32  `json:"max_replicas"`
+	CurrentReplicas int32  `json:"current_replicas"`
+	DesiredReplicas int32  `json:"desired_replicas"`
 }
 type RecentEvent struct {
 	Timestamp          time.Time `json:"timestamp"`
@@ -63,11 +75,12 @@ type PodObservation struct {
 	OwningWorkload string `json:"owning_workload,omitempty"`
 }
 type Observation struct {
-	Timestamp    time.Time             `json:"timestamp"`
-	Workloads    []WorkloadObservation `json:"workloads"`
-	Pods         []PodObservation      `json:"pods"`
-	Metrics      map[string]any        `json:"metrics"`
-	RecentEvents []RecentEvent         `json:"recent_events"`
+	Timestamp    time.Time               `json:"timestamp"`
+	Workloads    []WorkloadObservation   `json:"workloads"`
+	Pods         []PodObservation        `json:"pods"`
+	Autoscalers  []AutoscalerObservation `json:"autoscalers,omitempty"`
+	Metrics      map[string]any          `json:"metrics"`
+	RecentEvents []RecentEvent           `json:"recent_events"`
 }
 type Request struct {
 	ProtocolVersion  string          `json:"protocol_version"`

@@ -60,6 +60,8 @@ type fixture struct {
 	desiredReplicas                                     int32
 	preparedVariant                                     execution.HiddenVariant
 	mcpCreated, mcpRevoked                              int
+	verificationEnabled                                 bool
+	verified                                            int
 }
 
 func newFixture() *fixture {
@@ -86,16 +88,28 @@ func testConfig() Config {
 }
 func (f *fixture) worker(t *testing.T, c Config) *Worker {
 	t.Helper()
-	w, e := New(c, Dependencies{Lifecycle: f, Runtime: f, Actions: f, Evidence: f, Evaluator: f, Gateway: f, MCP: f, Connection: func(_ context.Context, w string, av agent.Version) (agentgateway.Connection, error) {
+	deps := Dependencies{Lifecycle: f, Runtime: f, Actions: f, Evidence: f, Evaluator: f, Gateway: f, MCP: f, Connection: func(_ context.Context, w string, av agent.Version) (agentgateway.Connection, error) {
 		if w != workspaceID || av.ID != "agent-pinned" {
 			return agentgateway.Connection{}, errors.New("wrong pinned version")
 		}
 		return agentgateway.Connection{EndpointURL: "https://example.test", BearerToken: "secret-token"}, nil
-	}})
+	}}
+	if f.verificationEnabled {
+		deps.Verification = f
+	}
+	w, e := New(c, deps)
 	if e != nil {
 		t.Fatal(e)
 	}
 	return w
+}
+func (f *fixture) DeriveRun(_ context.Context, workspace, run string) error {
+	if workspace != workspaceID || run != runID {
+		return errors.New("wrong verification scope")
+	}
+	f.verified++
+	f.add("verification")
+	return nil
 }
 func (f *fixture) CreateGrant(_ context.Context, scope mcpserver.Scope) (mcpserver.Access, error) {
 	f.mcpCreated++
@@ -401,6 +415,20 @@ func TestMaxStepsFreshObservationsAndActionLifecycle(t *testing.T) {
 	if !reflect.DeepEqual(f.transitions, want) {
 		t.Fatal(f.transitions)
 	}
+}
+func TestVerificationLifecycleCapturesBaselineStabilityAndProjection(t *testing.T) {
+	f := newFixture()
+	f.verificationEnabled = true
+	c := testConfig()
+	c.StabilityWindow = time.Microsecond
+	c.StabilityInterval = time.Microsecond
+	if err := f.worker(t, c).ExecuteRun(context.Background(), f.run); err != nil {
+		t.Fatal(err)
+	}
+	if f.verified != 1 {
+		t.Fatalf("verified=%d", f.verified)
+	}
+	assertOrder(t, f.trace, "prepare", "verification_baseline_captured", "start", "finish", "stability_observation_collected", "final_observation_collected", "evaluate", "verification")
 }
 func TestDenialPersistsAndReachesEvaluator(t *testing.T) {
 	f := newFixture()

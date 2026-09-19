@@ -28,4 +28,9 @@ func TestEvaluationBatchValidation(t *testing.T) {
 			}
 		})
 	}
+	bad := validInput()
+	bad.SourceMetadata.CommitSHA = "not a sha"
+	if _, err := ValidateCreate(bad); !errors.Is(err, identity.ErrValidation) {
+		t.Fatalf("unsafe source metadata error=%v", err)
+	}
 }

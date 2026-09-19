@@ -76,6 +76,15 @@ func TestEvaluationBatchIntegration(t *testing.T) {
 		t.Fatalf("two=%+v", twoBatch)
 	}
 	assertExactVersions(t, ctx, pool, twoBatch.ID, scenarioVersionID, []string{agent1, agent2})
+	ciInput := CreateInput{ScenarioVersionID: scenarioVersionID, AgentVersionIDs: []string{agent1}, RunsPerAgent: 1, EnvironmentMode: "isolated", IdempotencyKey: "github:org/repo:abc123:suite", SourceMetadata: SourceMetadata{Provider: "github", Repository: "org/repo", CommitSHA: "abc1234", PullRequest: "248", Workflow: "verify"}}
+	ciFirst, e := svc.Create(ctx, p, one.ID, ciInput)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ciAgain, e := svc.Create(ctx, p, one.ID, ciInput)
+	if e != nil || ciAgain.ID != ciFirst.ID || ciAgain.SourceMetadata.CommitSHA != "abc1234" {
+		t.Fatalf("idempotent CI batch first=%+v again=%+v error=%v", ciFirst, ciAgain, e)
+	}
 	runs, e := svc.ListRuns(ctx, p, one.ID, twoBatch.ID, Filters{Pagination: identity.Pagination{Limit: 50}})
 	if e != nil || len(runs) != 6 {
 		t.Fatalf("runs=%d error=%v", len(runs), e)

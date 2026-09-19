@@ -66,11 +66,15 @@ func (p *Provider) Observe(ctx context.Context, env EnvironmentContext) (agentga
 	if err != nil {
 		return agentgateway.Observation{}, fmt.Errorf("list owned pods: %w", err)
 	}
+	autoscalers, err := p.client.AutoscalingV2().HorizontalPodAutoscalers(verified.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels})
+	if err != nil {
+		return agentgateway.Observation{}, fmt.Errorf("list owned autoscalers: %w", err)
+	}
 	events, err := p.client.CoreV1().Events(verified.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return agentgateway.Observation{}, fmt.Errorf("list namespace events: %w", err)
 	}
-	out := agentgateway.Observation{Timestamp: time.Now().UTC(), Workloads: make([]agentgateway.WorkloadObservation, 0, len(deployments.Items)), Pods: make([]agentgateway.PodObservation, 0, len(pods.Items)), Metrics: map[string]any{}, RecentEvents: []agentgateway.RecentEvent{}}
+	out := agentgateway.Observation{Timestamp: time.Now().UTC(), Workloads: make([]agentgateway.WorkloadObservation, 0, len(deployments.Items)), Pods: make([]agentgateway.PodObservation, 0, len(pods.Items)), Autoscalers: make([]agentgateway.AutoscalerObservation, 0, len(autoscalers.Items)), Metrics: map[string]any{}, RecentEvents: []agentgateway.RecentEvent{}}
 	for i := range deployments.Items {
 		if !owned(deployments.Items[i].Labels, env.Identity) {
 			continue
@@ -83,11 +87,23 @@ func (p *Provider) Observe(ctx context.Context, env EnvironmentContext) (agentga
 		}
 		out.Pods = append(out.Pods, pod(&pods.Items[i]))
 	}
+	for i := range autoscalers.Items {
+		h := &autoscalers.Items[i]
+		if !owned(h.Labels, env.Identity) {
+			continue
+		}
+		minimum := int32(1)
+		if h.Spec.MinReplicas != nil {
+			minimum = *h.Spec.MinReplicas
+		}
+		out.Autoscalers = append(out.Autoscalers, agentgateway.AutoscalerObservation{Name: h.Name, Namespace: h.Namespace, TargetKind: h.Spec.ScaleTargetRef.Kind, TargetName: h.Spec.ScaleTargetRef.Name, MinReplicas: minimum, MaxReplicas: h.Spec.MaxReplicas, CurrentReplicas: h.Status.CurrentReplicas, DesiredReplicas: h.Status.DesiredReplicas})
+	}
 	for _, event := range events.Items {
 		out.RecentEvents = append(out.RecentEvents, agentgateway.RecentEvent{Timestamp: eventTime(event), Type: event.Type, Reason: event.Reason, Summary: event.Message, InvolvedObjectKind: event.InvolvedObject.Kind, InvolvedObjectName: event.InvolvedObject.Name})
 	}
 	sort.Slice(out.Workloads, func(i, j int) bool { return out.Workloads[i].Name < out.Workloads[j].Name })
 	sort.Slice(out.Pods, func(i, j int) bool { return out.Pods[i].Name < out.Pods[j].Name })
+	sort.Slice(out.Autoscalers, func(i, j int) bool { return out.Autoscalers[i].Name < out.Autoscalers[j].Name })
 	sort.Slice(out.RecentEvents, func(i, j int) bool { return out.RecentEvents[i].Timestamp.Before(out.RecentEvents[j].Timestamp) })
 	if p.telemetry != nil {
 		out.Metrics["telemetry_available"] = false
@@ -112,11 +128,12 @@ func owned(labels map[string]string, id kubeenv.RunIdentity) bool {
 	return labels[kubeenv.ManagedLabelKey] == "true" && labels[kubeenv.RunIDLabelKey] == id.RunID && labels[kubeenv.BatchIDLabelKey] == id.BatchID && labels[kubeenv.WorkspaceIDLabelKey] == id.WorkspaceID
 }
 func workload(d *appsv1.Deployment) agentgateway.WorkloadObservation {
-	w := agentgateway.WorkloadObservation{Kind: "Deployment", Name: d.Name, Namespace: d.Namespace, DesiredReplicas: d.Status.Replicas, ReadyReplicas: d.Status.ReadyReplicas, AvailableReplicas: d.Status.AvailableReplicas, UpdatedReplicas: d.Status.UpdatedReplicas}
+	w := agentgateway.WorkloadObservation{Kind: "Deployment", Name: d.Name, Namespace: d.Namespace, DesiredReplicas: d.Status.Replicas, ReadyReplicas: d.Status.ReadyReplicas, AvailableReplicas: d.Status.AvailableReplicas, UpdatedReplicas: d.Status.UpdatedReplicas, ResourceVersion: d.ResourceVersion}
 	if d.Spec.Replicas != nil {
 		w.DesiredReplicas = *d.Spec.Replicas
 	}
 	if len(d.Spec.Template.Spec.Containers) > 0 {
+		w.Image = d.Spec.Template.Spec.Containers[0].Image
 		r := d.Spec.Template.Spec.Containers[0].Resources
 		w.CPURequest = r.Requests.Cpu().String()
 		w.CPULimit = r.Limits.Cpu().String()

@@ -35,6 +35,7 @@ type routerConfig struct {
 	certification      CertificationService
 	environment        EnvironmentService
 	billing            BillingService
+	verification       VerificationService
 }
 type RouterOption func(*routerConfig)
 
@@ -97,6 +98,9 @@ func WithTrajectoryService(service TrajectoryService) RouterOption {
 }
 func WithBillingService(service BillingService) RouterOption {
 	return func(config *routerConfig) { config.billing = service }
+}
+func WithVerificationService(service VerificationService) RouterOption {
+	return func(config *routerConfig) { config.verification = service }
 }
 func WithAuthentication(service AuthService, authorization WorkspaceAuthorization, cookieSecure bool, sessionTTL time.Duration, appOrigin string) RouterOption {
 	return func(config *routerConfig) {
@@ -297,6 +301,13 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 					protected.Get("/workspaces/{workspaceID}/runs/{runID}/events", evidenceAPI.listEvents)
 					protected.Get("/workspaces/{workspaceID}/runs/{runID}/actions", evidenceAPI.listActions)
 					protected.Get("/workspaces/{workspaceID}/runs/{runID}/evaluation", evidenceAPI.getEvaluation)
+				}
+				if config.verification != nil {
+					verificationAPI := verificationHandlers{service: config.verification, logger: logger}
+					protected.Get("/workspaces/{workspaceID}/runs/{runID}/verification", verificationAPI.get)
+					protected.Get("/workspaces/{workspaceID}/runs/{runID}/verification/actions", verificationAPI.actions)
+					protected.Get("/workspaces/{workspaceID}/runs/{runID}/verification/snapshots", verificationAPI.snapshots)
+					protected.Get("/workspaces/{workspaceID}/runs/{runID}/verification/forward-risks", verificationAPI.risks)
 				}
 				if config.trajectory != nil {
 					trajectoryAPI := trajectoryHandlers{service: config.trajectory, logger: logger}

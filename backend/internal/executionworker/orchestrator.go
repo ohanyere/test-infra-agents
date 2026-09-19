@@ -8,6 +8,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
+	"time"
 )
 
 // ExecuteRun accepts only an atomically claimed provisioning run. Terminal retries
@@ -168,6 +169,11 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 		return platform("scenario_prepare_failed", err)
 	}
 	ready = true
+	if w.deps.Verification != nil {
+		if err = w.observe(ctx, env, "verification_baseline_captured"); err != nil {
+			return platform("baseline_snapshot_failed", err)
+		}
+	}
 	if err = w.deps.Runtime.Start(ctx, env, sv, run.HiddenVariant); err != nil {
 		return platform("scenario_start_failed", err)
 	}
@@ -180,7 +186,10 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 	if err = w.agentLoop(ctx, run, env, sv.AgentView(), av); err != nil {
 		return err
 	}
-	return platform("scenario_finish_failed", w.deps.Runtime.Finish(ctx, env))
+	if err = w.deps.Runtime.Finish(ctx, env); err != nil {
+		return platform("scenario_finish_failed", err)
+	}
+	return w.observeStability(ctx, env)
 }
 
 func (w *Worker) settleBilling(run execution.ExecutionRun) error {
@@ -217,7 +226,47 @@ func (w *Worker) evaluate(run execution.ExecutionRun) (err error) {
 		defer done()
 		return errors.Join(platform("evaluation_persistence_failed", err), w.event(record, run.RunID, "system", "evaluation_persistence_failed", map[string]any{"classification": "platform"}))
 	}
-	return w.event(ctx, run.RunID, "evaluation", "evaluation_completed", nil)
+	if err := w.event(ctx, run.RunID, "evaluation", "evaluation_completed", nil); err != nil {
+		return err
+	}
+	if w.deps.Verification != nil {
+		if err := w.deps.Verification.DeriveRun(ctx, run.WorkspaceID, run.RunID); err != nil {
+			return platform("verification_persistence_failed", err)
+		}
+		return w.event(ctx, run.RunID, "evaluation", "verification_completed", nil)
+	}
+	return nil
+}
+
+func (w *Worker) observeStability(ctx context.Context, env observation.EnvironmentContext) error {
+	if w.deps.Verification == nil {
+		return nil
+	}
+	now := w.deps.Now
+	if now == nil {
+		now = time.Now
+	}
+	started := now()
+	for {
+		if err := w.observe(ctx, env, "stability_observation_collected"); err != nil {
+			return platform("stability_observation_failed", err)
+		}
+		remaining := w.config.StabilityWindow - now().Sub(started)
+		if remaining <= 0 {
+			return nil
+		}
+		delay := w.config.StabilityInterval
+		if remaining < delay {
+			delay = remaining
+		}
+		waiter := w.deps.Wait
+		if waiter == nil {
+			waiter = wait
+		}
+		if err := waiter(ctx, delay); err != nil {
+			return err
+		}
+	}
 }
 func (w *Worker) cleanup(id kubeenv.RunIdentity) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), w.config.CleanupTimeout)

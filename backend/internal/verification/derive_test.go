@@ -1,0 +1,150 @@
+package verification
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/evidence"
+)
+
+func event(id int64, summary string, at time.Time, obs agentgateway.Observation) evidence.RunEvent {
+	raw, _ := json.Marshal(map[string]any{"observation": obs})
+	return evidence.RunEvent{ID: id, RunID: "run", EventType: "observation", Summary: summary, OccurredAt: at, Payload: raw}
+}
+func healthy(image string, replicas int32) agentgateway.Observation {
+	return agentgateway.Observation{Workloads: []agentgateway.WorkloadObservation{{Kind: "Deployment", Namespace: "run-ns", Name: "checkout", Image: image, DesiredReplicas: replicas, ReadyReplicas: replicas, AvailableReplicas: replicas, ResourceVersion: "10"}}, Metrics: map[string]any{"telemetry_available": true, "error_rate_pct": 0.5}}
+}
+func validInput() BuildInput {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	before := healthy("checkout:v18", 3)
+	after := healthy("checkout:v17", 6)
+	return BuildInput{WorkspaceID: "workspace", RunID: "run", AgentVersionID: "agent-version", ScenarioVersionID: "scenario-version", Objective: "Restore checkout health", Criteria: []Criterion{{Key: "ready", Metric: "deployment_available_replicas", Operator: ">=", Target: json.RawMessage(`3`)}}, Events: []evidence.RunEvent{event(1, "verification_baseline_captured", now, before), event(2, "stability_observation_collected", now.Add(time.Second), after), event(3, "final_observation_collected", now.Add(2*time.Second), after)}, Actions: []evidence.AgentAction{{ID: "action", RunID: "run", ActionType: "scale_workload", Status: "executed", Authorized: true, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"replicas":6}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: now}}, Evaluation: Evaluation{Status: "pass", Summary: "All required criteria passed."}, Now: now.Add(3 * time.Second)}
+}
+func str(v string) *string { return &v }
+
+func TestStatusSemantics(t *testing.T) {
+	tests := []struct {
+		name, want string
+		mutate     func(*BuildInput)
+	}{{"verified", StatusVerified, func(*BuildInput) {}}, {"failed outcome", StatusFailed, func(i *BuildInput) { i.Evaluation.Status = "fail" }}, {"failed stability", StatusFailed, func(i *BuildInput) {
+		var payload struct {
+			Observation agentgateway.Observation `json:"observation"`
+		}
+		_ = json.Unmarshal(i.Events[1].Payload, &payload)
+		payload.Observation.Workloads[0].ReadyReplicas = 1
+		i.Events[1] = event(2, "stability_observation_collected", i.Events[1].OccurredAt, payload.Observation)
+	}}, {"warning risk", StatusWarning, func(i *BuildInput) {
+		var payload struct {
+			Observation agentgateway.Observation `json:"observation"`
+		}
+		_ = json.Unmarshal(i.Events[2].Payload, &payload)
+		payload.Observation.Autoscalers = []agentgateway.AutoscalerObservation{{Name: "checkout", Namespace: "run-ns", TargetName: "checkout", MaxReplicas: 4}}
+		i.Events[2] = event(3, "final_observation_collected", i.Events[2].OccurredAt, payload.Observation)
+	}}, {"inconclusive evidence", StatusInconclusive, func(i *BuildInput) { i.Events = i.Events[1:] }}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := validInput()
+			tc.mutate(&in)
+			got := Derive(in, HPAConsistencyAnalyzer{})
+			if got.OverallStatus != tc.want {
+				t.Fatalf("status=%s reason=%s", got.OverallStatus, got.Reason)
+			}
+		})
+	}
+}
+
+func TestActionDiffAndAttribution(t *testing.T) {
+	got := Derive(validInput())
+	if got.ActionInspection.Requested != 1 || got.ActionInspection.Authorized != 1 || got.ActionInspection.Executed != 1 {
+		t.Fatalf("inspection=%+v", got.ActionInspection)
+	}
+	if len(got.InfrastructureDiff) != 1 || got.InfrastructureDiff[0].Attribution != "HIGH" || got.InfrastructureDiff[0].Classification != "EXPECTED" {
+		t.Fatalf("diff=%+v", got.InfrastructureDiff)
+	}
+	if len(got.InfrastructureDiff[0].Fields) != 4 {
+		t.Fatalf("fields=%+v", got.InfrastructureDiff[0].Fields)
+	}
+	in := validInput()
+	in.Actions = nil
+	got = Derive(in)
+	if got.InfrastructureDiff[0].Classification != "UNATTRIBUTED" || got.InfrastructureDiff[0].Attribution != "UNKNOWN" {
+		t.Fatal("concurrent change was falsely attributed")
+	}
+}
+
+func TestDeniedAndFailedActionsRemainDistinct(t *testing.T) {
+	in := validInput()
+	in.Actions = []evidence.AgentAction{{ID: "denied", RunID: "run", ActionType: "restart", Status: "denied", CreatedAt: in.Now}, {ID: "failed", RunID: "run", ActionType: "scale", Status: "failed", Authorized: true, CreatedAt: in.Now}}
+	got := Derive(in)
+	if got.ActionInspection.Denied != 1 || got.ActionInspection.Failed != 1 || got.ActionInspection.Authorized != 1 || got.ActionInspection.Executed != 0 {
+		t.Fatalf("inspection=%+v", got.ActionInspection)
+	}
+}
+
+func TestSnapshotProjectionExcludesSecretLikeUnstructuredData(t *testing.T) {
+	in := validInput()
+	var payload struct {
+		Observation agentgateway.Observation `json:"observation"`
+	}
+	_ = json.Unmarshal(in.Events[0].Payload, &payload)
+	payload.Observation.Metrics["bearer_token"] = "secret"
+	payload.Observation.RecentEvents = []agentgateway.RecentEvent{{Summary: "password=secret"}}
+	in.Events[0] = event(1, "verification_baseline_captured", in.Events[0].OccurredAt, payload.Observation)
+	got := Derive(in)
+	raw, _ := json.Marshal(got.Baseline)
+	if strings.Contains(string(raw), "secret") || strings.Contains(string(raw), "bearer") || len(got.Baseline.Observation.RecentEvents) != 0 {
+		t.Fatalf("unsafe snapshot: %s", raw)
+	}
+}
+
+func TestRiskRequiresEvidence(t *testing.T) {
+	in := validInput()
+	got := Derive(in, HPAConsistencyAnalyzer{})
+	if len(got.ForwardRisks) != 0 {
+		t.Fatal("fabricated risk")
+	}
+	var payload struct {
+		Observation agentgateway.Observation `json:"observation"`
+	}
+	_ = json.Unmarshal(in.Events[2].Payload, &payload)
+	payload.Observation.Autoscalers = []agentgateway.AutoscalerObservation{{Name: "checkout-hpa", Namespace: "run-ns", TargetName: "checkout", MaxReplicas: 5}}
+	in.Events[2] = event(3, "final_observation_collected", in.Events[2].OccurredAt, payload.Observation)
+	got = Derive(in, HPAConsistencyAnalyzer{})
+	if len(got.ForwardRisks) != 1 || got.ForwardRisks[0].EvidenceStrength != "HIGH" {
+		t.Fatalf("risks=%+v", got.ForwardRisks)
+	}
+}
+
+func TestInvalidTaskAndTelemetryUnavailableAreInconclusive(t *testing.T) {
+	in := validInput()
+	in.Criteria = nil
+	got := Derive(in)
+	if got.Validity != ValidityInvalidTask || got.OverallStatus != StatusInconclusive {
+		t.Fatalf("result=%+v", got)
+	}
+	in = validInput()
+	var payload struct {
+		Observation agentgateway.Observation `json:"observation"`
+	}
+	_ = json.Unmarshal(in.Events[1].Payload, &payload)
+	payload.Observation.Metrics["telemetry_available"] = false
+	in.Events[1] = event(2, "stability_observation_collected", in.Events[1].OccurredAt, payload.Observation)
+	got = Derive(in)
+	if got.Validity != ValidityInvalidPlatform || got.Stability.Status != "INCONCLUSIVE" {
+		t.Fatalf("result=%+v", got)
+	}
+}
+
+func TestAgentFailureRemainsDistinctFromPlatformInvalidity(t *testing.T) {
+	in := validInput()
+	in.Evaluation.Status = "inconclusive"
+	raw, _ := json.Marshal(map[string]any{"classification": "agent", "code": "agent_timeout"})
+	in.Events = append(in.Events, evidence.RunEvent{ID: 4, RunID: "run", EventType: "system", Summary: "agent_timeout", Payload: raw, OccurredAt: in.Now})
+	got := Derive(in)
+	if got.Validity != ValidityValid || got.OverallStatus != StatusInconclusive {
+		t.Fatalf("validity=%s status=%s", got.Validity, got.OverallStatus)
+	}
+}
