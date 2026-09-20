@@ -1,5 +1,8 @@
 # Evalplane Go API
 
+Product decisions in this repository must follow the canonical doctrine in
+[`docs/PRODUCT_DOCTRINE.md`](../docs/PRODUCT_DOCTRINE.md).
+
 Go API for Evalplane. It provides process health, PostgreSQL readiness, and the first identity/workspace domain endpoints.
 
 The API uses Argon2id password credentials and opaque, revocable server-side sessions. Only a SHA-256 digest of each session token is persisted; browsers receive the raw token in an HttpOnly, SameSite=Lax cookie.

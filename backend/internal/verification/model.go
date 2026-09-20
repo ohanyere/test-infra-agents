@@ -5,11 +5,12 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 )
 
 const (
-	ContractVersion = "infrastructure-verifier:v1"
-	SnapshotVersion = "kubernetes-snapshot:v1"
+	ContractVersion = "infrastructure-verifier:v2"
+	SnapshotVersion = "infrastructure-snapshot:v2"
 
 	StatusVerified     = "VERIFIED"
 	StatusFailed       = "FAILED"
@@ -26,6 +27,7 @@ type Snapshot struct {
 	Reference       string                   `json:"reference"`
 	CapturedAt      time.Time                `json:"captured_at"`
 	Observation     agentgateway.Observation `json:"observation"`
+	GitOps          *gitops.Evidence         `json:"gitops,omitempty"`
 }
 
 type IntentAssertion struct {
@@ -92,6 +94,19 @@ type StabilityResult struct {
 	StartedAt    time.Time `json:"started_at,omitempty"`
 	CompletedAt  time.Time `json:"completed_at,omitempty"`
 }
+type InvariantResult struct {
+	ID                      string    `json:"invariant_id"`
+	Type                    string    `json:"invariant_type"`
+	VerifierContractVersion string    `json:"verifier_contract_version"`
+	Status                  string    `json:"status"`
+	Scope                   []string  `json:"scope"`
+	ExpectedCondition       string    `json:"expected_condition"`
+	ObservedEvidence        []string  `json:"observed_evidence"`
+	Reason                  string    `json:"reason"`
+	EvidenceReferences      []string  `json:"evidence_references"`
+	EvidenceStartedAt       time.Time `json:"evidence_started_at,omitempty"`
+	EvidenceCompletedAt     time.Time `json:"evidence_completed_at,omitempty"`
+}
 type RiskFinding struct {
 	AnalyzerID        string    `json:"analyzer_id"`
 	AnalyzerVersion   string    `json:"analyzer_version"`
@@ -121,6 +136,7 @@ type Result struct {
 	ActionInspection        ActionInspection       `json:"action_inspection"`
 	InfrastructureDiff      []InfrastructureChange `json:"infrastructure_diff"`
 	Outcome                 OutcomeResult          `json:"outcome"`
+	Invariants              []InvariantResult      `json:"invariants"`
 	SideEffects             SideEffectResult       `json:"side_effects"`
 	Stability               StabilityResult        `json:"stability"`
 	ForwardRisks            []RiskFinding          `json:"forward_risks"`

@@ -30,6 +30,17 @@ func TestNumericCriterionFails(t *testing.T) {
 	}
 }
 
+func TestCurrentErrorRateUsesLatestObservation(t *testing.T) {
+	result := mustEvaluate(t, evaluationInput(
+		[]scenario.Criterion{criterion("recovered", "current_error_rate", "lte", `1`, "pct")},
+		metricEvent("run-1", 1, map[string]any{"telemetry_available": true, "error_rate_pct": 100}),
+		metricEvent("run-1", 2, map[string]any{"telemetry_available": true, "error_rate_pct": 0}),
+	))
+	if result.Status != StatusPass || string(result.CriterionResults[0].ObservedValue) != "0" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestSupportedCriterionOperators(t *testing.T) {
 	tests := []struct {
 		operator string

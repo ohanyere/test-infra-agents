@@ -339,7 +339,7 @@ func validateCaseType(caseType string, version scenario.Version) error {
 func supportedMetric(key string) bool {
 	switch key {
 	case "request_rate", "request_rate_rps", "application.request_rate_rps",
-		"error_rate", "error_rate_pct", "application.error_rate_pct",
+		"error_rate", "error_rate_pct", "application.error_rate_pct", "current_error_rate",
 		"p95_latency", "p95_latency_ms", "application.p95_latency_ms",
 		"availability", "availability_pct", "application.availability_pct",
 		"deployment_desired_replicas", "deployment.desired_replicas",
@@ -542,7 +542,7 @@ func canonicalMetric(key string) string {
 	switch key {
 	case "request_rate", "request_rate_rps", "application.request_rate_rps":
 		return "request_rate"
-	case "error_rate", "error_rate_pct", "application.error_rate_pct":
+	case "error_rate", "error_rate_pct", "application.error_rate_pct", "current_error_rate":
 		return "error_rate"
 	case "p95_latency", "p95_latency_ms", "application.p95_latency_ms":
 		return "p95_latency"

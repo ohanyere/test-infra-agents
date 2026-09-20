@@ -146,3 +146,28 @@ func TestEvaluateAgentStepScaleAndDeny(t *testing.T) {
 		t.Fatal("denial mutated deployment")
 	}
 }
+
+func TestSetWorkloadImageAuthorizationAndExecution(t *testing.T) {
+	client, _, env, executor := setup(t)
+	d := deployment(env, owned(scenariorunner.ReferenceComponent), 2)
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v18"}}
+	_, _ = client.AppsV1().Deployments(env.Environment.Namespace).Create(context.Background(), d, metav1.CreateOptions{})
+	action := agentgateway.ProposedAction{Type: "set_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName}, Parameters: map[string]any{"image": "evalplane-reference:v17"}}
+	if result := executor.Authorize(context.Background(), env, action); !result.Authorized || result.Executed {
+		t.Fatalf("authorization=%+v", result)
+	}
+	if result := executor.ExecuteAction(context.Background(), env, action); !result.Authorized || !result.Executed {
+		t.Fatalf("execution=%+v", result)
+	}
+	got, err := client.AppsV1().Deployments(env.Environment.Namespace).Get(context.Background(), scenariorunner.ReferenceDeploymentName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Template.Spec.Containers[0].Image != "evalplane-reference:v17" {
+		t.Fatalf("image=%s", got.Spec.Template.Spec.Containers[0].Image)
+	}
+	action.Parameters["image"] = "https://user:token@example.invalid/image"
+	if result := executor.Authorize(context.Background(), env, action); result.Authorized {
+		t.Fatalf("unsafe image authorized: %+v", result)
+	}
+}

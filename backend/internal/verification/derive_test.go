@@ -8,10 +8,15 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 )
 
 func event(id int64, summary string, at time.Time, obs agentgateway.Observation) evidence.RunEvent {
 	raw, _ := json.Marshal(map[string]any{"observation": obs})
+	return evidence.RunEvent{ID: id, RunID: "run", EventType: "observation", Summary: summary, OccurredAt: at, Payload: raw}
+}
+func gitopsEvent(id int64, summary string, at time.Time, obs agentgateway.Observation, state *gitops.Evidence) evidence.RunEvent {
+	raw, _ := json.Marshal(map[string]any{"observation": obs, "gitops_evidence": state})
 	return evidence.RunEvent{ID: id, RunID: "run", EventType: "observation", Summary: summary, OccurredAt: at, Payload: raw}
 }
 func healthy(image string, replicas int32) agentgateway.Observation {
@@ -146,5 +151,40 @@ func TestAgentFailureRemainsDistinctFromPlatformInvalidity(t *testing.T) {
 	got := Derive(in)
 	if got.Validity != ValidityValid || got.OverallStatus != StatusInconclusive {
 		t.Fatalf("validity=%s status=%s", got.Validity, got.OverallStatus)
+	}
+}
+
+func TestGitOpsInvariantAndResultPolicy(t *testing.T) {
+	in := validInput()
+	desired := &gitops.DesiredState{Repository: "fixture", Revision: strings.Repeat("a", 40), Path: "checkout.yaml", Resource: "Deployment/run-ns/checkout", Container: "checkout", Image: "checkout:v18", Reference: "git:pin:checkout.yaml"}
+	argo := &gitops.ArgoState{Application: "checkout", Namespace: "argocd", SyncStatus: "OutOfSync", Automated: true, Reference: "argo-application:argocd/checkout:rv:7"}
+	state := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: argo}
+	before := healthy("checkout:v18", 3)
+	after := healthy("checkout:v17", 3)
+	in.Events = []evidence.RunEvent{gitopsEvent(1, "verification_baseline_captured", in.Now, before, &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: &gitops.ArgoState{Application: "checkout", Namespace: "argocd", SyncStatus: "Synced", Reference: "argo:baseline"}}), gitopsEvent(2, "stability_observation_collected", in.Now.Add(time.Second), after, state), gitopsEvent(3, "final_observation_collected", in.Now.Add(2*time.Second), after, state)}
+	got := Derive(in, GitOpsReconciliationAnalyzer{})
+	if got.Outcome.Status != "PASSED" || len(got.Invariants) != 1 || got.Invariants[0].Status != "FAILED" || got.Stability.Status != "UNSTABLE" || got.OverallStatus != StatusFailed || len(got.ForwardRisks) != 1 {
+		t.Fatalf("result=%+v", got)
+	}
+	if !strings.Contains(got.Reason, "immediate recovery succeeded") {
+		t.Fatalf("reason=%s", got.Reason)
+	}
+}
+
+func TestGitOpsPositiveAndMissingEvidenceControls(t *testing.T) {
+	in := validInput()
+	desired := &gitops.DesiredState{Resource: "Deployment/run-ns/checkout", Image: "checkout:v17", Reference: "git:pin"}
+	synced := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: &gitops.ArgoState{SyncStatus: "Synced", Reference: "argo:synced"}}
+	after := healthy("checkout:v17", 6)
+	in.Events = []evidence.RunEvent{gitopsEvent(1, "verification_baseline_captured", in.Now, after, synced), gitopsEvent(2, "stability_observation_collected", in.Now.Add(time.Second), after, synced), gitopsEvent(3, "final_observation_collected", in.Now.Add(2*time.Second), after, synced)}
+	got := Derive(in, GitOpsReconciliationAnalyzer{})
+	if got.Invariants[0].Status != "PASSED" || got.Stability.Status != "STABLE" || got.OverallStatus != StatusVerified || len(got.ForwardRisks) != 0 {
+		t.Fatalf("positive=%+v", got)
+	}
+	missing := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Errors: []string{"gitops_evidence_unavailable"}}
+	in.Events[2] = gitopsEvent(3, "final_observation_collected", in.Now.Add(2*time.Second), after, missing)
+	got = Derive(in, GitOpsReconciliationAnalyzer{})
+	if got.Invariants[0].Status != "INCONCLUSIVE" || got.OverallStatus != StatusInconclusive || got.Validity != ValidityInvalidPlatform || len(got.ForwardRisks) != 0 {
+		t.Fatalf("missing=%+v", got)
 	}
 }

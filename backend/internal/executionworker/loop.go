@@ -46,7 +46,17 @@ func (w *Worker) observe(ctx context.Context, env observation.EnvironmentContext
 	if err != nil {
 		return err
 	}
-	return w.event(ctx, env.Identity.RunID, "observation", code, map[string]any{"observation": obs})
+	payload := map[string]any{"observation": obs}
+	if observer, ok := w.deps.Runtime.(GitOpsObserver); ok {
+		gitopsEvidence, evidenceErr := observer.ObserveGitOps(ctx, env)
+		if evidenceErr != nil {
+			gitopsEvidence.Errors = []string{"gitops_evidence_unavailable"}
+		}
+		if gitopsEvidence.ContractVersion != "" || evidenceErr != nil {
+			payload["gitops_evidence"] = gitopsEvidence
+		}
+	}
+	return w.event(ctx, env.Identity.RunID, "observation", code, payload)
 }
 func (w *Worker) observeSample(ctx context.Context, env observation.EnvironmentContext) (out agentgateway.Observation, err error) {
 	defer func() {
@@ -259,7 +269,7 @@ func (w *Worker) persistAction(ctx context.Context, runID, actionID string, resu
 }
 func safeActionType(value string) string {
 	switch value {
-	case "inspect", "no_op", "scale_workload", "restart_pod":
+	case "inspect", "no_op", "scale_workload", "restart_pod", "set_workload_image":
 		return value
 	}
 	return "unsupported_action"
@@ -272,6 +282,11 @@ func safeProposal(action agentgateway.ProposedAction) map[string]any {
 			out["replicas"] = n
 		case int:
 			out["replicas"] = n
+		}
+	}
+	if action.Type == "set_workload_image" {
+		if image, ok := action.Parameters["image"].(string); ok && len(image) <= 255 {
+			out["image"] = image
 		}
 	}
 	return out

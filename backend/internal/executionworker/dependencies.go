@@ -11,6 +11,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/evaluator"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/execution"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/mcpserver"
 	"github.com/evalplane/evalplane/backend/internal/observation"
@@ -80,6 +81,9 @@ type Runtime interface {
 	Finish(context.Context, observation.EnvironmentContext) error
 	Observe(context.Context, observation.EnvironmentContext) (agentgateway.Observation, error)
 	Cleanup(context.Context, kubeenv.RunIdentity) error
+}
+type GitOpsObserver interface {
+	ObserveGitOps(context.Context, observation.EnvironmentContext) (gitops.Evidence, error)
 }
 type Actions interface {
 	Authorize(context.Context, observation.EnvironmentContext, agentgateway.ProposedAction) actionexec.ActionResult

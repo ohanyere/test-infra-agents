@@ -5,13 +5,13 @@ export default function WorkspaceTasksPage() {
   return <main className={styles.page}>
     <header className={styles.header}>
       <div>
-        <p className={styles.eyebrow}>SCENARIOS</p>
-        <h1>Infrastructure scenarios</h1>
-        <p>Controlled conditions for independently verifying what happens after an agent acts.</p>
+        <p className={styles.eyebrow}>DEVELOPMENT TESTS</p>
+        <h1>Infrastructure test cases</h1>
+        <p>Supporting fixtures that create controlled autonomous changes whose resulting states can be independently verified.</p>
       </div>
       <div className={styles.actions}>
-        <a href="/scenarios/new">Define scenario</a>
-        <a className={styles.secondary} href="/scenarios">Public catalog</a>
+        <a href="/scenarios/new">Define test case</a>
+        <a className={styles.secondary} href="/scenarios">Browse tests</a>
       </div>
     </header>
     <ScenarioDirectory basePath="/workspace/tasks"/>

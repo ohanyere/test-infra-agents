@@ -1,0 +1,20 @@
+.footer {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 80px;
+  padding-top: 48px;
+  padding-bottom: 48px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.brand > a { color: var(--foreground); font-size: 15px; font-weight: 620; }
+.brand p { max-width: 260px; margin: 12px 0 0; line-height: 1.5; }
+.group, .meta { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.group strong { color: var(--foreground); font-size: 11px; font-weight: 620; text-transform: uppercase; letter-spacing: .08em; }
+.group a, .meta a { color: var(--foreground); }
+.meta span { margin-top: auto; }
+@media (max-width: 760px) {
+  .footer { grid-template-columns: 1fr; gap: 28px; padding-top: 36px; padding-bottom: 36px; }
+  .meta span { margin-top: 8px; }
+}

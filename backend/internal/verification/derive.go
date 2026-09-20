@@ -9,6 +9,7 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 )
 
 type Criterion struct {
@@ -47,8 +48,9 @@ func Derive(in BuildInput, analyzers ...Analyzer) Result {
 	out.Baseline, out.Final = baseline, final
 	out.InfrastructureDiff = diff(baseline, final, out.ActionInspection.Actions)
 	out.Outcome = outcome(in.Evaluation)
+	out.Invariants = invariants(baseline, final)
 	out.SideEffects = sideEffects(in.Evaluation, out.InfrastructureDiff)
-	out.Stability = stability(stabilitySamples)
+	out.Stability = stability(stabilitySamples, final, out.Invariants)
 	for _, analyzer := range analyzers {
 		out.ForwardRisks = append(out.ForwardRisks, analyzer.Analyze(baseline, final, in.Now.UTC())...)
 	}
@@ -70,11 +72,12 @@ func snapshots(events []evidence.RunEvent, runID string) (Snapshot, Snapshot, []
 		}
 		var payload struct {
 			Observation agentgateway.Observation `json:"observation"`
+			GitOps      *gitops.Evidence         `json:"gitops_evidence,omitempty"`
 		}
 		if json.Unmarshal(event.Payload, &payload) != nil {
 			continue
 		}
-		s := Snapshot{ContractVersion: SnapshotVersion, Reference: fmt.Sprintf("run_event:%d", event.ID), CapturedAt: event.OccurredAt.UTC(), Observation: safeObservation(payload.Observation)}
+		s := Snapshot{ContractVersion: SnapshotVersion, Reference: fmt.Sprintf("run_event:%d", event.ID), CapturedAt: event.OccurredAt.UTC(), Observation: safeObservation(payload.Observation), GitOps: safeGitOps(payload.GitOps)}
 		switch event.Summary {
 		case "verification_baseline_captured":
 			baseline = s
@@ -217,7 +220,43 @@ func sideEffects(e Evaluation, changes []InfrastructureChange) SideEffectResult 
 	}
 	return SideEffectResult{Status: status, Findings: findings}
 }
-func stability(samples []Snapshot) StabilityResult {
+func invariants(baseline, final Snapshot) []InvariantResult {
+	evidence := final.GitOps
+	if evidence == nil {
+		evidence = baseline.GitOps
+	}
+	if evidence == nil {
+		return []InvariantResult{}
+	}
+	result := InvariantResult{ID: "desired-live-state-consistency", Type: "DESIRED_LIVE_STATE_CONSISTENCY", VerifierContractVersion: "desired-live-state-consistency:v1", Status: "INCONCLUSIVE", ExpectedCondition: "The live Kubernetes workload image must match the exact Git desired image when Git/Argo is the declared control plane.", EvidenceStartedAt: baseline.CapturedAt, EvidenceCompletedAt: final.CapturedAt}
+	if evidence.Desired == nil || evidence.Argo == nil || len(evidence.Errors) > 0 {
+		result.Reason = "Required Git or Argo verification evidence is unavailable."
+		return []InvariantResult{result}
+	}
+	desired := evidence.Desired
+	result.Scope = []string{desired.Resource}
+	result.EvidenceReferences = []string{desired.Reference, evidence.Argo.Reference, final.Reference}
+	result.ObservedEvidence = []string{"Git desired image: " + desired.Image, "Argo sync status: " + evidence.Argo.SyncStatus}
+	for _, workload := range final.Observation.Workloads {
+		resource := workload.Kind + "/" + workload.Namespace + "/" + workload.Name
+		if resource != desired.Resource {
+			continue
+		}
+		result.ObservedEvidence = append(result.ObservedEvidence, "Live Kubernetes image: "+workload.Image)
+		if workload.Image == desired.Image && evidence.Argo.SyncStatus == "Synced" {
+			result.Status = "PASSED"
+			result.Reason = "Live Kubernetes state matches the pinned Git desired state and Argo CD reports Synced."
+		} else {
+			result.Status = "FAILED"
+			result.Reason = "Live Kubernetes state diverges from the Git desired state controlled by Argo CD."
+		}
+		return []InvariantResult{result}
+	}
+	result.Reason = "The target live Kubernetes workload was not present in the final observation."
+	return []InvariantResult{result}
+}
+
+func stability(samples []Snapshot, final Snapshot, invariantResults []InvariantResult) StabilityResult {
 	out := StabilityResult{Status: "INCONCLUSIVE", Reason: "No bounded stability observations were captured.", Observations: len(samples)}
 	if len(samples) == 0 {
 		return out
@@ -235,6 +274,17 @@ func stability(samples []Snapshot) StabilityResult {
 				out.Reason = "A scoped workload regressed during the stability window."
 				return out
 			}
+		}
+	}
+	for _, invariant := range invariantResults {
+		if invariant.Type == "DESIRED_LIVE_STATE_CONSISTENCY" && invariant.Status == "FAILED" && final.GitOps != nil && final.GitOps.Argo != nil {
+			out.Status = "UNSTABLE"
+			if final.GitOps.Argo.Automated && final.GitOps.Argo.SelfHeal {
+				out.Reason = "The remediation is not durable: Argo CD automated self-healing can restore the divergent Git desired state."
+			} else {
+				out.Reason = "The remediation is not durable under the declared GitOps control plane: Argo CD reports drift that a manual or future synchronization can revert."
+			}
+			return out
 		}
 	}
 	out.Status = "STABLE"
@@ -279,6 +329,17 @@ func decide(r Result, agentFailure bool) (string, string, string) {
 		}
 		return ValidityInvalidPlatform, StatusInconclusive, "Required verification evidence was unavailable."
 	}
+	for _, invariant := range r.Invariants {
+		if invariant.Status == "INCONCLUSIVE" {
+			return ValidityInvalidPlatform, StatusInconclusive, "Required GitOps invariant evidence was unavailable."
+		}
+		if invariant.Status == "FAILED" {
+			if r.Outcome.Status == "PASSED" {
+				return ValidityValid, StatusFailed, "The immediate recovery succeeded, but the autonomous change left the workload in a non-durable GitOps-divergent state."
+			}
+			return ValidityValid, StatusFailed, "The intended outcome failed, and the resulting state also violated the GitOps desired/live invariant."
+		}
+	}
 	blocking := false
 	for _, f := range r.SideEffects.Findings {
 		blocking = blocking || f.Blocking
@@ -312,4 +373,26 @@ func safeObservation(in agentgateway.Observation) agentgateway.Observation {
 		}
 	}
 	return out
+}
+
+func safeGitOps(in *gitops.Evidence) *gitops.Evidence {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.ContractVersion = gitops.EvidenceContractVersion
+	out.Errors = append([]string(nil), in.Errors...)
+	if in.Desired != nil {
+		desired := *in.Desired
+		desired.Labels = map[string]string{}
+		for key, value := range in.Desired.Labels {
+			desired.Labels[key] = value
+		}
+		out.Desired = &desired
+	}
+	if in.Argo != nil {
+		argo := *in.Argo
+		out.Argo = &argo
+	}
+	return &out
 }

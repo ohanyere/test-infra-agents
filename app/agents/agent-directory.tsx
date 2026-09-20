@@ -29,7 +29,7 @@ export function AgentDirectory() {
     {!authLoading && !loading && !authError && !error && agents.length === 0 && <div className={styles.emptyState}><h2>No agents connected yet.</h2><p>Register an exact AgentVersion, connect it securely, and verify what happens when it changes infrastructure.</p><a className={styles.button} href="/agents/new">Connect an agent</a></div>}
     <div className={styles.agentList}>{agents.map((agent) => <article className={styles.agentRow} key={agent.id}>
       <div className={styles.agentIdentity}><h2>{agent.name}</h2><p>{agent.description || "No description"}</p></div>
-      <div className={styles.strongest}><span>Latest registered version · verification connection</span><p>{agent.latest_version?.version_label || "No version"} · {agent.latest_version?.interface_kind || "unconfigured"}</p><p>{agent.latest_version?.capabilities.join(" · ") || "No declared operation scope"}</p><p className={styles.qualificationNote}>Open the agent to inspect exact versions, connection state, verification evidence, and CI readiness.</p></div>
+      <div className={styles.strongest}><span>Latest version · resulting-state verification</span><p>{agent.latest_version?.version_label || "No version"} · {agent.latest_version?.interface_kind || "unconfigured"}</p><p>{agent.latest_version?.capabilities.join(" · ") || "No declared operation scope"}</p><p className={styles.qualificationNote}>Open the agent to inspect exact versions, verification history, supporting tests, and connection state.</p></div>
       <a className={styles.agentLink} href={`/agents/${agent.id}`}>View agent <span aria-hidden="true">→</span></a>
     </article>)}</div>
   </section>;

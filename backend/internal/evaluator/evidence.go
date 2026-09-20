@@ -26,6 +26,7 @@ var metricDefinitions = map[string]metricDefinition{
 	"error_rate":                    {"error_rate", "pct", "maximum", true},
 	"error_rate_pct":                {"error_rate", "pct", "maximum", true},
 	"application.error_rate_pct":    {"error_rate", "pct", "maximum", true},
+	"current_error_rate":            {"current_error_rate", "pct", "latest", true},
 	"p95_latency":                   {"p95_latency", "ms", "maximum", true},
 	"p95_latency_ms":                {"p95_latency", "ms", "maximum", true},
 	"application.p95_latency_ms":    {"p95_latency", "ms", "maximum", true},
@@ -86,6 +87,7 @@ func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 			}
 			addJSONMetric(samples, invalid, "request_rate", metrics["request_rate_rps"], event, ref)
 			addJSONMetric(samples, invalid, "error_rate", metrics["error_rate_pct"], event, ref)
+			addJSONMetric(samples, invalid, "current_error_rate", metrics["error_rate_pct"], event, ref)
 			addJSONMetric(samples, invalid, "p95_latency", metrics["p95_latency_ms"], event, ref)
 			addJSONMetric(samples, invalid, "availability", metrics["availability_pct"], event, ref)
 			var desired, available, ready, notReady, restarts float64
@@ -158,7 +160,7 @@ func addJSONMetric(samples map[string][]metricSample, invalid map[string][]strin
 		return
 	}
 	var value float64
-	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || ((key == "availability" || key == "error_rate") && value > 100) {
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || ((key == "availability" || key == "error_rate" || key == "current_error_rate") && value > 100) {
 		invalid[key] = append(invalid[key], ref)
 		return
 	}

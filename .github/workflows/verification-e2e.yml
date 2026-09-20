@@ -1,0 +1,367 @@
+name: Infrastructure agent verification E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOMAXPROCS: "2"
+  KIND_VERSION: v0.33.0
+  KIND_NODE_IMAGE: kindest/node:v1.35.0
+  ARGO_CD_VERSION: v3.5.3
+  KUBECONFIG: ${{ github.workspace }}/.verification-e2e/kubeconfig
+  ARTIFACT_DIR: /tmp/verification-e2e-artifacts
+  DATABASE_URL: postgres://verification_ci:verification_ci@127.0.0.1:5432/verification_e2e?sslmode=disable
+
+jobs:
+  verification-e2e:
+    name: Real runtime E2E with deterministic reference agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: verification_ci
+          POSTGRES_PASSWORD: verification_ci
+          POSTGRES_DB: verification_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U verification_ci -d verification_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Install pinned Kind
+        uses: helm/kind-action@v1.13.0
+        with:
+          install_only: true
+          version: ${{ env.KIND_VERSION }}
+
+      - name: Verify Docker and PostgreSQL
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARTIFACT_DIR" "$(dirname "$KUBECONFIG")"
+          docker version
+          docker info
+          docker ps
+          pg_isready -h 127.0.0.1 -p 5432 -U verification_ci -d verification_e2e
+
+      - name: Apply database migrations
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go run ./cmd/migrate up
+          migration_state="$(psql "$DATABASE_URL" -Atc 'select version || chr(32) || dirty from schema_migrations')"
+          test "$migration_state" = "23 false"
+          printf 'migration=%s\n' "$migration_state" | tee "$ARTIFACT_DIR/migration.txt"
+
+      - name: Create pinned disposable GitOps source
+        run: |
+          set -euo pipefail
+          source_dir=/tmp/gitops-source
+          mkdir -p "$source_dir/desired" "$source_dir/chart/templates"
+          git -C "$source_dir" init --initial-branch=main
+          git -C "$source_dir" config user.name "Evalplane E2E"
+          git -C "$source_dir" config user.email "e2e@evalplane.local"
+          cat > "$source_dir/desired/checkout.yaml" <<'YAML'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: eval-reference-app
+          spec:
+            replicas: 2
+            template:
+              metadata:
+                labels: {app: checkout}
+              spec:
+                containers:
+                  - {name: reference-app, image: evalplane-reference:v18}
+          YAML
+          cat > "$source_dir/chart/Chart.yaml" <<'YAML'
+          apiVersion: v2
+          name: checkout-proof
+          version: 0.1.0
+          YAML
+          cat > "$source_dir/chart/values.yaml" <<'YAML'
+          runID: required
+          batchID: required
+          workspaceID: required
+          YAML
+          cat > "$source_dir/chart/templates/deployment.yaml" <<'YAML'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: eval-reference-app
+            labels: &labels
+              evalplane.dev/managed: "true"
+              evalplane.dev/run-id: {{ .Values.runID | quote }}
+              evalplane.dev/batch-id: {{ .Values.batchID | quote }}
+              evalplane.dev/workspace-id: {{ .Values.workspaceID | quote }}
+              evalplane.dev/component: reference-app
+          spec:
+            replicas: 2
+            selector:
+              matchLabels: {evalplane.dev/run-id: {{ .Values.runID | quote }}, evalplane.dev/component: reference-app}
+            template:
+              metadata:
+                labels: *labels
+              spec:
+                containers:
+                  - name: reference-app
+                    image: evalplane-reference:v18
+                    imagePullPolicy: Never
+                    ports: [{name: http, containerPort: 8080}]
+                    readinessProbe: {httpGet: {path: /healthz, port: http}}
+                    livenessProbe: {httpGet: {path: /healthz, port: http}}
+          YAML
+          git -C "$source_dir" add desired chart
+          git -C "$source_dir" commit -m "pin checkout v18"
+          git -C "$source_dir" rev-parse HEAD | tee /tmp/gitops-revision
+          git clone --bare "$source_dir" /tmp/repo.git
+          mkdir -p /tmp/git-server
+          cp -R /tmp/repo.git /tmp/git-server/repo.git
+          cat > /tmp/git-server/Dockerfile <<'DOCKER'
+          FROM alpine/git:2.49.1
+          COPY repo.git /srv/repo.git
+          ENTRYPOINT ["git", "daemon", "--reuseaddr", "--base-path=/srv", "--export-all", "--verbose", "/srv/repo.git"]
+          DOCKER
+          docker build -t evalplane-git-fixture:e2e /tmp/git-server
+
+      - name: Build E2E images
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          build_dir="$(mktemp -d)"
+          mkdir -p "$build_dir/bin"
+          cp -R /tmp/gitops-source "$build_dir/git-fixture"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/e2equalification" ./cmd/e2equalification
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceagent" ./cmd/referenceagent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceapp" ./cmd/referenceapp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/verification-e2e-api ./cmd/api
+          docker build -t evalplane-harness:stage17 --build-arg APP_ERROR_RATE=0 -f e2e/Dockerfile "$build_dir"
+          docker tag evalplane-harness:stage17 evalplane-reference:stage17
+          docker build -t evalplane-reference:v17 --build-arg APP_ERROR_RATE=0 -f e2e/Dockerfile "$build_dir"
+          docker build -t evalplane-reference:v18 --build-arg APP_ERROR_RATE=100 -f e2e/Dockerfile "$build_dir"
+
+      - name: Create isolated Kind cluster
+        run: |
+          set -euo pipefail
+          kind create cluster --name evalplane-e2e --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG" --wait 180s
+          test "$(kubectl config current-context)" = "kind-evalplane-e2e"
+          kubectl get nodes -o wide
+          kubectl wait --for=condition=Ready node/evalplane-e2e-control-plane --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-apiserver --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-scheduler --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-controller-manager --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=etcd --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l k8s-app=kube-dns --timeout=180s
+          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e --name evalplane-e2e
+
+      - name: Install pinned minimal Argo CD
+        run: |
+          set -euo pipefail
+          kubectl create namespace argocd
+          kubectl apply --server-side --force-conflicts -n argocd -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGO_CD_VERSION}/manifests/install.yaml"
+          kubectl -n argocd scale deployment argocd-server argocd-dex-server argocd-notifications-controller argocd-applicationset-controller --replicas=0
+          kubectl -n argocd patch configmap argocd-cm --type merge -p '{"data":{"timeout.reconciliation":"5s","timeout.reconciliation.jitter":"0s"}}'
+          kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+          kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=300s
+          kubectl -n argocd rollout status deployment/argocd-redis --timeout=300s
+
+      - name: Run calibration environment gate
+        run: |
+          set -euo pipefail
+          kubectl apply -f backend/e2e/harness-rbac.yaml
+          kubectl apply -f backend/e2e/calibration.yaml
+          if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/calibration --timeout=180s; then
+            echo "ENVIRONMENT FAILURE: calibration pod did not schedule and become ready" >&2
+            exit 1
+          fi
+          if ! kubectl wait -n evalplane-e2e-harness --for=jsonpath='{.status.phase}'=Succeeded pod/calibration --timeout=600s; then
+            kubectl logs -n evalplane-e2e-harness calibration --tail=300 > "$ARTIFACT_DIR/calibration.log" || true
+            echo "ENVIRONMENT FAILURE: calibration did not complete successfully" >&2
+            exit 1
+          fi
+          kubectl logs -n evalplane-e2e-harness calibration > "$ARTIFACT_DIR/calibration.log"
+          jq -Re 'fromjson? | select(.kind == "calibration_environment")' "$ARTIFACT_DIR/calibration.log" >/dev/null
+          jq -Re 'fromjson? | select(.kind == "calibration_action" and .value.authorized == true and .value.executed == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null
+          jq -Re 'fromjson? | select(.kind == "calibration_observation" and .value.metrics.telemetry_available == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null
+          jq -Re 'fromjson? | select(.kind == "calibration_cleanup" and .value == "<nil>")' "$ARTIFACT_DIR/calibration.log" >/dev/null
+          test -z "$(kubectl get namespace -l evalplane.dev/managed=true -o name)"
+
+      - name: Configure qualification inputs
+        run: |
+          set -euo pipefail
+          cat > /tmp/criteria.json <<'JSON'
+          [{"Key":"checkout-recovered","Name":"Current checkout error rate","MetricKey":"current_error_rate","Operator":"lte","TargetValue":1,"Unit":"pct","SortOrder":0}]
+          JSON
+          kubectl create configmap calibrated-criteria -n evalplane-e2e-harness --from-file=criteria.json=/tmp/criteria.json
+          kubectl create configmap gitops-proof -n evalplane-e2e-harness --from-literal=revision="$(cat /tmp/gitops-revision)"
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: {name: git-fixture, namespace: evalplane-e2e-harness}
+          spec:
+            replicas: 1
+            selector: {matchLabels: {app: git-fixture}}
+            template:
+              metadata: {labels: {app: git-fixture}}
+              spec:
+                containers:
+                  - {name: git, image: evalplane-git-fixture:e2e, imagePullPolicy: Never, ports: [{name: git, containerPort: 9418}]}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: {name: git-fixture, namespace: evalplane-e2e-harness}
+          spec: {selector: {app: git-fixture}, ports: [{name: git, port: 9418, targetPort: git}]}
+          YAML
+          kubectl -n evalplane-e2e-harness rollout status deployment/git-fixture --timeout=120s
+          host_gateway="$(docker exec evalplane-e2e-control-plane sh -c "ip route | awk '/default/ {print \$3; exit}'")"
+          test -n "$host_gateway"
+          database_url="postgres://verification_ci:verification_ci@${host_gateway}:5432/verification_e2e?sslmode=disable"
+          echo "::add-mask::$database_url"
+          kubectl create secret generic database -n evalplane-e2e-harness --from-literal=url="$database_url"
+          auth_password="$(openssl rand -base64 24 | tr -d '\n')"
+          echo "::add-mask::$auth_password"
+          printf 'E2E_AUTH_PASSWORD=%s\n' "$auth_password" >> "$GITHUB_ENV"
+          kubectl create secret generic e2e-auth -n evalplane-e2e-harness --from-literal=password="$auth_password"
+
+      - name: Run and assert authoritative verification
+        run: |
+          set -euo pipefail
+          kubectl apply -f backend/e2e/qualification.yaml
+          kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/qualification --timeout=180s
+          kubectl wait -n evalplane-e2e-harness --for=jsonpath='{.status.phase}'=Succeeded pod/qualification --timeout=720s
+          kubectl logs -n evalplane-e2e-harness qualification > "$ARTIFACT_DIR/qualification.log"
+          jq -Rc 'fromjson? | select(.kind == "persisted_verification") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$ARTIFACT_DIR/verification-result.json"
+          jq -e '
+            .id != "" and .run_id != "" and .agent_version_id != "" and .scenario_version_id != "" and
+            .verifier_contract_version == "infrastructure-verifier:v2" and
+            .snapshot_contract_version == "infrastructure-snapshot:v2" and
+            .validity == "valid" and .overall_status == "FAILED" and
+            .intent.objective != "" and (.intent.assertions | length) > 0 and
+            (.baseline_snapshot.observation.workloads | length) > 0 and
+            .final_snapshot.observation.metrics.telemetry_available == true
+          ' "$ARTIFACT_DIR/verification-result.json" >/dev/null
+          jq -e '
+            .action_inspection.requested_count > 0 and
+            .action_inspection.authorized_count > 0 and
+            .action_inspection.executed_count > 0 and
+            any(.action_inspection.actions[]; .action_type == "set_workload_image" and .authorized == true and .status == "executed") and
+            (.infrastructure_diff | length) > 0 and
+            any(.infrastructure_diff[]; .classification == "EXPECTED" and any(.fields[]; .field == "image" and .before == "evalplane-reference:v18" and .after == "evalplane-reference:v17")) and
+            .outcome.status == "PASSED" and
+            .side_effects.status == "NONE" and
+            .outcome.status == "PASSED" and
+            any(.invariants[]; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "FAILED") and
+            .final_snapshot.gitops.desired_state.image == "evalplane-reference:v18" and
+            .final_snapshot.gitops.argo_state.sync_status == "OutOfSync" and
+            any(.final_snapshot.observation.workloads[]; .name == "eval-reference-app" and .image == "evalplane-reference:v17") and
+            .stability.status == "UNSTABLE" and
+            .stability.observations > 1 and
+            any(.forward_risks[]; .analyzer_id == "gitops-reconciliation-reversion" and .severity == "HIGH")
+          ' "$ARTIFACT_DIR/verification-result.json" >/dev/null
+          jq -Re 'fromjson? | select(.kind == "gateway_boundary" and .value.checked == true and .value.requests > 0)' "$ARTIFACT_DIR/qualification.log" >/dev/null
+          jq -Re 'fromjson? | select(.kind == "persisted_action_proposed")' "$ARTIFACT_DIR/qualification.log" >/dev/null
+          jq -Re 'fromjson? | select(.kind == "persisted_action_transition")' "$ARTIFACT_DIR/qualification.log" >/dev/null
+          run_namespace="$(jq -r '.baseline_snapshot.observation.workloads[0].namespace' "$ARTIFACT_DIR/verification-result.json")"
+          test -n "$run_namespace" && test "$run_namespace" != null
+          if kubectl get namespace "$run_namespace" >/dev/null 2>&1; then
+            echo "Product cleanup did not remove run namespace $run_namespace" >&2
+            exit 1
+          fi
+          printf 'product_run_namespace_cleanup=VERIFIED\n' > "$ARTIFACT_DIR/cleanup.txt"
+          jq '{label:"REAL RUNTIME E2E WITH DETERMINISTIC REFERENCE AGENT",agent_action_result:(if any(.action_inspection.actions[]; .action_type == "set_workload_image" and .status == "executed") then "SUCCESS" else "FAILED" end),immediate_objective:(if .outcome.status == "PASSED" then "RECOVERED" else .outcome.status end),independent_infrastructure_verification:.overall_status,reason,id,run_id,agent_version_id,scenario_version_id,validity,action_inspection,infrastructure_diff,outcome,invariants,side_effects,stability,forward_risks}' \
+            "$ARTIFACT_DIR/verification-result.json" > "$ARTIFACT_DIR/verification-proof-summary.json"
+
+      - name: Retrieve the persisted result through the real API
+        run: |
+          set -euo pipefail
+          encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
+          echo "::add-mask::$encryption_key"
+          (
+            export AGENT_CREDENTIAL_ENCRYPTION_KEY="$encryption_key"
+            export APP_ORIGIN=http://localhost:3000
+            export ENVIRONMENT=development
+            export COOKIE_SECURE=false
+            export PORT=18080
+            /tmp/verification-e2e-api
+          ) > "$ARTIFACT_DIR/api.log" 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/readyz >/dev/null; then break; fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          jq -nc --arg email stage17@evalplane.local --arg password "$E2E_AUTH_PASSWORD" '{email:$email,password:$password}' |
+            curl --fail --silent --show-error --cookie-jar /tmp/verification-e2e-cookies.txt --header 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18080/v1/auth/login >/dev/null
+          workspace_id="$(jq -r .workspace_id "$ARTIFACT_DIR/verification-result.json")"
+          run_id="$(jq -r .run_id "$ARTIFACT_DIR/verification-result.json")"
+          curl --fail --silent --show-error --cookie /tmp/verification-e2e-cookies.txt \
+            "http://127.0.0.1:18080/v1/workspaces/${workspace_id}/runs/${run_id}/verification" > "$ARTIFACT_DIR/api-verification-result.json"
+          jq --slurpfile expected "$ARTIFACT_DIR/verification-result.json" -e '
+            .id == $expected[0].id and
+            .run_id == $expected[0].run_id and
+            .overall_status == "FAILED" and
+            .outcome.status == "PASSED" and
+            any(.invariants[]; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "FAILED")
+          ' "$ARTIFACT_DIR/api-verification-result.json" >/dev/null
+
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          set +e
+          mkdir -p "$ARTIFACT_DIR"
+          docker ps -a > "$ARTIFACT_DIR/docker-ps.txt" 2>&1
+          timeout 30s docker stats --no-stream > "$ARTIFACT_DIR/docker-stats.txt" 2>&1
+          timeout 30s kubectl get nodes -o wide > "$ARTIFACT_DIR/nodes.txt" 2>&1
+          timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/pods.txt" 2>&1
+          timeout 30s kubectl get applications -A -o yaml > "$ARTIFACT_DIR/argo-applications.yaml" 2>&1
+          timeout 45s kubectl describe pods -n evalplane-e2e-harness > "$ARTIFACT_DIR/harness-pods-describe.txt" 2>&1
+          for component in kube-apiserver kube-scheduler kube-controller-manager etcd; do
+            pod="${component}-evalplane-e2e-control-plane"
+            timeout 30s kubectl logs -n kube-system "$pod" --tail=200 > "$ARTIFACT_DIR/${component}.log" 2>&1
+          done
+          timeout 30s kubectl logs -n evalplane-e2e-harness calibration --tail=300 > "$ARTIFACT_DIR/calibration.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification --tail=500 > "$ARTIFACT_DIR/qualification.log" 2>&1
+          timeout 30s kubectl logs -n argocd statefulset/argocd-application-controller --tail=300 > "$ARTIFACT_DIR/argocd-controller.log" 2>&1
+
+      - name: Cleanup disposable runtime
+        if: always()
+        run: |
+          set +e
+          timeout 60s kubectl delete -f backend/e2e/qualification.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/calibration.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/harness-rbac.yaml --ignore-not-found --wait=false
+          timeout 120s kind delete cluster --name evalplane-e2e
+          if kind get clusters | grep -Fxq evalplane-e2e; then
+            printf 'kind_cluster_cleanup=FAILED\n' >> "$ARTIFACT_DIR/cleanup.txt"
+            exit 1
+          fi
+          printf 'kind_cluster_cleanup=VERIFIED\n' >> "$ARTIFACT_DIR/cleanup.txt"
+
+      - name: Upload safe E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-e2e-${{ github.run_id }}
+          path: /tmp/verification-e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 14

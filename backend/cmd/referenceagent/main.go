@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,8 +32,12 @@ func decide(request agentgateway.Request) agentgateway.Response {
 			continue
 		}
 		// Fixed conservative policy belongs to this fixture, not the evaluator.
-		if known && errorRate > 0 && workload.DesiredReplicas < 4 && slices.Contains(request.AvailableActions, "scale_workload") {
+		if known && errorRate > 0 && strings.HasSuffix(workload.Image, ":v18") && slices.Contains(request.AvailableActions, "set_workload_image") {
+			action = agentgateway.ProposedAction{Type: "set_workload_image", Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+		} else if known && errorRate > 0 && workload.DesiredReplicas < 4 && slices.Contains(request.AvailableActions, "scale_workload") {
 			action = agentgateway.ProposedAction{Type: "scale_workload", Target: &target, Parameters: map[string]any{"replicas": 4}}
+		} else if known && errorRate == 0 && strings.HasSuffix(workload.Image, ":v17") {
+			action.Type = "no_op"
 		} else if known && errorRate == 0 && workload.DesiredReplicas >= 4 && workload.AvailableReplicas >= workload.DesiredReplicas {
 			action.Type = "no_op"
 		}

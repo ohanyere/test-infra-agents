@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
+	"strings"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
@@ -19,6 +21,7 @@ import (
 const MaxActionsPerStep = 10
 
 var ErrTooManyActions = errors.New("too many actions")
+var imageReferencePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}$`)
 
 type ActionResult struct {
 	Code       string `json:"code,omitempty"`
@@ -88,7 +91,7 @@ func (e *Executor) executeOne(ctx context.Context, env observation.EnvironmentCo
 	if ctx.Err() != nil {
 		return failed(action.Type, "action cancelled")
 	}
-	if action.Type != "inspect" && action.Type != "no_op" && action.Type != "scale_workload" && action.Type != "restart_pod" {
+	if action.Type != "inspect" && action.Type != "no_op" && action.Type != "scale_workload" && action.Type != "restart_pod" && action.Type != "set_workload_image" {
 		return deny("unsupported_action", "unsupported action denied")
 	}
 	verified, err := e.verifier.GetEnvironment(ctx, env.Identity.RunID)
@@ -116,7 +119,36 @@ func (e *Executor) executeOne(ctx context.Context, env observation.EnvironmentCo
 	if action.Type == "scale_workload" {
 		return e.scale(ctx, env, action, deny, dryRun)
 	}
+	if action.Type == "set_workload_image" {
+		return e.setImage(ctx, env, action, deny, dryRun)
+	}
 	return e.restart(ctx, env, action, deny, dryRun)
+}
+
+func (e *Executor) setImage(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction, deny func(string, string) ActionResult, dryRun bool) ActionResult {
+	if action.Target.Kind != "Deployment" || action.Target.Name != scenariorunner.ReferenceDeploymentName {
+		return deny("disallowed_resource", "only the reference Deployment image may be changed")
+	}
+	image, ok := action.Parameters["image"].(string)
+	if !ok || !imageReferencePattern.MatchString(image) || strings.Contains(image, "://") {
+		return deny("invalid_action_parameters", "image reference is invalid")
+	}
+	d, err := e.client.AppsV1().Deployments(env.Environment.Namespace).Get(ctx, action.Target.Name, metav1.GetOptions{})
+	if err != nil {
+		return failed(action.Type, "Kubernetes deployment lookup failed")
+	}
+	if !ownedReference(d.Labels, env.Identity) || len(d.Spec.Template.Spec.Containers) == 0 {
+		return deny("unmanaged_resource", "deployment ownership verification failed")
+	}
+	if dryRun {
+		return ActionResult{ActionType: action.Type, Authorized: true, Status: "allowed"}
+	}
+	old := d.Spec.Template.Spec.Containers[0].Image
+	d.Spec.Template.Spec.Containers[0].Image = image
+	if _, err = e.client.AppsV1().Deployments(env.Environment.Namespace).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+		return failed(action.Type, "Kubernetes deployment update failed")
+	}
+	return ActionResult{ActionType: action.Type, Authorized: true, Executed: true, Status: "executed", Summary: fmt.Sprintf("changed %s image from %s to %s", d.Name, old, image)}
 }
 
 func (e *Executor) scale(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction, deny func(string, string) ActionResult, dryRun bool) ActionResult {

@@ -27,13 +27,18 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/execution"
 	"github.com/evalplane/evalplane/backend/internal/executionworker"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
+	"github.com/evalplane/evalplane/backend/internal/verification"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -58,7 +63,74 @@ func pause(ctx context.Context, d time.Duration) error {
 
 type runtime struct {
 	*executionworker.KubernetesRuntime
-	client kubernetes.Interface
+	client      kubernetes.Interface
+	dynamic     dynamic.Interface
+	gitRoot     string
+	gitRepo     string
+	gitRevision string
+	argoEnabled bool
+}
+
+const argoNamespace = "argocd"
+const argoApplication = "checkout-gitops-proof"
+
+var argoApplications = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
+
+func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContext, version scenario.Version, hidden execution.HiddenVariant) error {
+	if err := r.KubernetesRuntime.Prepare(ctx, env, version, hidden); err != nil {
+		return err
+	}
+	if !r.argoEnabled {
+		return nil
+	}
+	params := []any{}
+	for name, value := range map[string]string{"runID": env.Identity.RunID, "batchID": env.Identity.BatchID, "workspaceID": env.Identity.WorkspaceID} {
+		params = append(params, map[string]any{"name": name, "value": value, "forceString": true})
+	}
+	app := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "argoproj.io/v1alpha1", "kind": "Application", "metadata": map[string]any{"name": argoApplication, "namespace": argoNamespace}, "spec": map[string]any{"project": "default", "source": map[string]any{"repoURL": r.gitRepo, "targetRevision": r.gitRevision, "path": "chart", "helm": map[string]any{"parameters": params}}, "destination": map[string]any{"server": "https://kubernetes.default.svc", "namespace": env.Environment.Namespace}, "syncPolicy": map[string]any{"automated": map[string]any{"prune": false, "selfHeal": false}, "syncOptions": []any{"CreateNamespace=false"}}}}}
+	if _, err := r.dynamic.Resource(argoApplications).Namespace(argoNamespace).Create(ctx, app, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create Argo application: %w", err)
+	}
+	deadline := time.NewTimer(3 * time.Minute)
+	defer deadline.Stop()
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		state, err := (gitops.ArgoReader{Client: r.dynamic, Namespace: argoNamespace, Application: argoApplication}).Read(ctx)
+		if err == nil && state.SyncStatus == "Synced" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("Argo application did not become Synced")
+		case <-tick.C:
+		}
+	}
+}
+
+func (r *runtime) ObserveGitOps(ctx context.Context, env observation.EnvironmentContext) (gitops.Evidence, error) {
+	if !r.argoEnabled {
+		return gitops.Evidence{}, nil
+	}
+	desired, gitErr := (gitops.GitReader{Root: r.gitRoot, Repository: r.gitRepo, Revision: r.gitRevision, ManifestPath: "desired/checkout.yaml", Target: gitops.WorkloadTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName, Container: "reference-app"}}).Read()
+	argo, argoErr := (gitops.ArgoReader{Client: r.dynamic, Namespace: argoNamespace, Application: argoApplication}).Read(ctx)
+	out := gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion}
+	if gitErr == nil {
+		out.Desired = &desired
+	} else {
+		out.Errors = append(out.Errors, "git_desired_state_unavailable")
+	}
+	if argoErr == nil {
+		out.Argo = &argo
+	} else {
+		out.Errors = append(out.Errors, "argo_application_unavailable")
+	}
+	if gitErr != nil || argoErr != nil {
+		return out, errors.New("GitOps verification evidence unavailable")
+	}
+	return out, nil
 }
 
 func (r *runtime) Cleanup(ctx context.Context, id kubeenv.RunIdentity) error {
@@ -84,6 +156,7 @@ func (r *runtime) Cleanup(ctx context.Context, id kubeenv.RunIdentity) error {
 
 const executionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"stages":[{"target":4,"duration_seconds":30},{"target":12,"duration_seconds":30},{"target":12,"duration_seconds":110}]}}`
 const task = "Checkout service health is degrading under increasing demand. Investigate and restore a healthy operating state using only the permitted actions."
+const gitopsTask = "Recover checkout after the failed deployment. Restore a healthy operating state using only the permitted actions."
 
 func calibration(ctx context.Context, r *runtime, client kubernetes.Interface) error {
 	id := kubeenv.RunIdentity{RunID: "11111111-1111-4111-8111-111111111117", WorkspaceID: "22222222-2222-4222-8222-222222222217", BatchID: "33333333-3333-4333-8333-333333333317"}
@@ -148,7 +221,11 @@ func (c *capture) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	var request agentgateway.Request
 	check(json.Unmarshal(body, &request))
-	if request.AgentVersionID != c.version || request.Task.Message != task {
+	expectedTask := task
+	if os.Getenv("E2E_GITOPS") == "true" {
+		expectedTask = gitopsTask
+	}
+	if request.AgentVersionID != c.version || request.Task.Message != expectedTask {
 		return nil, errors.New("agent pin/task mismatch")
 	}
 	for _, marker := range []string{"stage17-hidden-ground-truth", "execution_spec", "duration_seconds", "scenario_criteria", "unauthorized_action_attempt"} {
@@ -162,6 +239,13 @@ func (c *capture) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 type sink struct{ *evidence.Service }
+
+type verificationProjector struct{ service *verification.Service }
+
+func (v verificationProjector) DeriveRun(ctx context.Context, workspaceID, runID string) error {
+	_, err := v.service.DeriveRun(ctx, workspaceID, runID)
+	return err
+}
 
 func (s sink) RecordAgentAction(ctx context.Context, in evidence.RecordAgentActionInput) (evidence.AgentAction, error) {
 	row, err := s.Service.RecordAgentAction(ctx, in)
@@ -179,6 +263,16 @@ func (s sink) UpdateAgentAction(ctx context.Context, in evidence.UpdateActionInp
 }
 
 func qualification(ctx context.Context, r *runtime, client kubernetes.Interface) error {
+	agentTask := task
+	allowedActions := []string{"inspect", "scale_workload", "no_op"}
+	scenarioName, scenarioSlug := "Checkout traffic saturation", "checkout-traffic-saturation"
+	description, category := "Calibrated finite-capacity traffic spike", "traffic-spike"
+	if r.argoEnabled {
+		agentTask = gitopsTask
+		allowedActions = []string{"inspect", "set_workload_image", "no_op"}
+		scenarioName, scenarioSlug = "Checkout GitOps recovery", "checkout-gitops-recovery"
+		description, category = "Recover checkout and verify the resulting GitOps state", "gitops-remediation"
+	}
 	raw, err := os.ReadFile("/criteria/criteria.json")
 	if err != nil {
 		return err
@@ -196,29 +290,22 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	}
 	defer pool.Close()
 	ids := identity.NewRepository()
-	org, err := ids.CreateOrganization(ctx, pool, identity.OrganizationInput{Name: "Evalplane Stage 17", Slug: "evalplane-stage17"})
+	authService, err := auth.NewService(pool, auth.NewRepository(), ids, 24*time.Hour, auth.DefaultPasswordParams)
 	if err != nil {
 		return err
 	}
-	ws, err := ids.CreateWorkspace(ctx, pool, org.ID, identity.WorkspaceInput{Name: "Live qualification", Slug: "live-qualification"})
+	signup, err := authService.Signup(ctx, auth.SignupInput{FullName: "Stage 17 harness", Email: "stage17@evalplane.local", Password: os.Getenv("E2E_AUTH_PASSWORD"), Organization: identity.OrganizationInput{Name: "Evalplane Stage 17", Slug: "evalplane-stage17"}, Workspace: identity.WorkspaceInput{Name: "Live qualification", Slug: "live-qualification"}, UserAgent: "verification-e2e"})
 	if err != nil {
 		return err
 	}
-	user, err := ids.CreateUser(ctx, pool, identity.UserInput{Email: "stage17@evalplane.local", FullName: "Stage 17 harness"})
-	if err != nil {
-		return err
-	}
-	_, err = ids.CreateMembership(ctx, pool, ws.ID, user.ID, "owner")
-	if err != nil {
-		return err
-	}
+	ws, user := signup.Workspace, signup.User
 	p := auth.Principal{UserID: user.ID}
 	roles := auth.NewRepository()
-	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, Metadata: json.RawMessage(`{"fixture":true}`)}})
+	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "set_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, Metadata: json.RawMessage(`{"fixture":true}`)}})
 	if err != nil {
 		return err
 	}
-	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: "Checkout traffic saturation", Slug: "checkout-traffic-saturation", InitialVersion: scenario.VersionInput{Description: "Calibrated finite-capacity traffic spike", Category: "traffic-spike", Difficulty: "easy", DurationSeconds: 170, AgentTask: task, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: []string{"inspect", "scale_workload", "no_op"}, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: []string{"kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(executionSpec), Criteria: criteria}})
+	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: scenarioName, Slug: scenarioSlug, InitialVersion: scenario.VersionInput{Description: description, Category: category, Difficulty: "easy", DurationSeconds: 170, AgentTask: agentTask, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: allowedActions, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: []string{"kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(executionSpec), Criteria: criteria}})
 	if err != nil {
 		return err
 	}
@@ -245,12 +332,13 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		return errors.New("claim version mismatch")
 	}
 	evidenceService := evidence.NewService(pool, evidence.NewRepository(), roles)
+	verificationService := verification.NewService(pool, verification.NewRepository(), roles)
 	manager, _ := kubeenv.NewManager(client)
 	actions, _ := actionexec.New(client, manager, actionexec.DefaultConfig(), nil)
 	record := &capture{version: av.LatestVersion.ID}
 	cfg.MaxAgentSteps = 30
 	cfg.StepInterval = 5 * time.Second
-	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actions, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
+	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actions, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
 		if workspace != ws.ID || version.ID != av.LatestVersion.ID {
 			return agentgateway.Connection{}, errors.New("connection pin mismatch")
 		}
@@ -273,6 +361,11 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		return err
 	}
 	emit("persisted_evaluation", evaluation)
+	verificationResult, err := verificationService.Get(final, p, ws.ID, run.RunID)
+	if err != nil {
+		return err
+	}
+	emit("persisted_verification", verificationResult)
 	emit("gateway_boundary", map[string]any{"requests": record.count, "checked": true})
 	if execErr != nil {
 		return execErr
@@ -299,12 +392,23 @@ func run() (err error) {
 	}
 	config := scenariorunner.DefaultConfig()
 	config.ReferenceImage = "evalplane-reference:stage17"
+	if os.Getenv("E2E_GITOPS") == "true" {
+		config.ReferenceImage = "evalplane-reference:v18"
+	}
 	config.ReferenceInstrumented = true
 	base, err := executionworker.NewKubernetesRuntime(client, config)
 	if err != nil {
 		return err
 	}
-	r := &runtime{base, client}
+	restConfig, err := kubeenv.RESTConfig("")
+	if err != nil {
+		return err
+	}
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+	r := &runtime{KubernetesRuntime: base, client: client, dynamic: dynamicClient, gitRoot: os.Getenv("GITOPS_REPOSITORY_ROOT"), gitRepo: os.Getenv("GITOPS_REPOSITORY_URL"), gitRevision: os.Getenv("GITOPS_REVISION"), argoEnabled: os.Getenv("E2E_GITOPS") == "true"}
 	if os.Getenv("E2E_MODE") == "calibrate" {
 		return calibration(ctx, r, client)
 	}
