@@ -1,0 +1,113 @@
+# Hosted E2E Calibration Fix
+
+## Scope and repository state
+
+- Branch: `infrastructure-agent-verification`
+- Starting HEAD: `e9af6faf58f5e37c8118506c25f94054bdced4e9`
+- Initial worktree: clean
+- Initial `git diff --check`: passed
+- Scope: the GitHub-hosted calibration gate only. No verifier, GitOps evidence, invariant, risk, result-policy, positive-control, or frontend semantics changed.
+- No local Kind cluster was started and no Kubernetes operation was run locally.
+
+Maturity remains **FOCUSED-VERIFIED**. Another successful GitHub-hosted run is required before any E2E claim.
+
+## Hosted failure
+
+The hosted `Infrastructure agent verification E2E` run reached the calibration gate after Kind, the control plane, Argo CD, and harness RBAC were ready. The workflow then observed:
+
+```text
+pod/calibration created
+pod/calibration condition met
+error: timed out waiting for the condition on pods/calibration
+ENVIRONMENT FAILURE: calibration did not complete successfully
+```
+
+The failed command was:
+
+```sh
+kubectl wait -n evalplane-e2e-harness \
+  --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/calibration --timeout=600s
+```
+
+The preceding successful command was:
+
+```sh
+kubectl wait -n evalplane-e2e-harness \
+  --for=condition=Ready pod/calibration --timeout=180s
+```
+
+Therefore, `pod/calibration condition met` meant only that the Pod's `Ready` condition became true while `/app/e2equalification` was running. It did not mean the calibration completed.
+
+## Calibration contract
+
+Calibration is a one-shot Pod, not a long-running service:
+
+- manifest: `backend/e2e/calibration.yaml`;
+- namespace: `evalplane-e2e-harness`;
+- service account: `qualification`;
+- image: `evalplane-harness:stage17`, with `imagePullPolicy: Never`;
+- command: `/app/e2equalification`;
+- mode: `E2E_MODE=calibrate`;
+- restart policy: `Never`;
+- active deadline: 720 seconds;
+- no explicit volumes or kubeconfig; it intentionally uses the in-cluster service-account identity;
+- expected terminal phase: `Succeeded`, after the program returns with exit code zero.
+
+The program provisions an owned namespace, creates the reference workload and Prometheus, starts the pinned k6 traffic workload, performs 32 five-second real observations, executes and verifies a scale action, waits for traffic completion, deletes its owned namespace, and exits. Its inner runtime images are exactly `grafana/k6:0.54.0` and `prom/prometheus:v3.13.3`.
+
+## Root cause and evidence limits
+
+The workflow had a terminal-state contract bug: `kubectl wait --for=jsonpath=...=Succeeded` cannot distinguish a Pod that is still `Running` from one that has already reached `Failed`. In either case it waits for all 600 seconds and reports the same timeout. The supplied hosted log consequently proves that readiness passed and the `Succeeded` predicate did not, but it does **not** preserve the Pod phase, container termination reason, logs, or events needed to reconstruct the inner container's final leaf error.
+
+Source inspection also found a concrete environment nondeterminism at this gate. The workflow preloaded its locally built harness/reference images into Kind, but did not preload the two pinned images that calibration creates dynamically: k6 and Prometheus. Their availability was therefore deferred to node-side registry pulls after the one-shot Pod started. A delayed or failed pull could keep `Prepare` waiting for Prometheus availability or make the traffic Job fail, while the outer Pod remained `Running` or became `Failed`; the old completion observer would render both as the same timeout.
+
+Because the previous workflow discarded the required evidence, it would be inaccurate to name a particular image pull, RBAC request, DNS lookup, or application operation as the historical leaf error. The workflow-level failure is understood and fixed; the next hosted run is required both to prove calibration and, if it still fails, to identify the exact leaf error from retained evidence.
+
+## Minimal fix
+
+Only `.github/workflows/verification-e2e.yml` was changed for runtime behavior:
+
+1. The exact k6 and Prometheus versions already selected by production-shaped runtime defaults are declared once, pulled with bounded 180-second commands, loaded into the disposable Kind node, and verified in the node's container runtime. No image version or calibration assertion was weakened.
+2. The existing Ready check remains, proving the Pod schedules and starts.
+3. A bounded 600-second terminal-phase poll now reads real Pod state and:
+   - proceeds only on `Succeeded`;
+   - fails immediately on `Failed`;
+   - fails on the bounded deadline for a non-terminal Pod.
+4. Before returning from either calibration failure path, the step captures:
+   - Pod wide output;
+   - full Pod YAML;
+   - Pod description;
+   - current all-container logs;
+   - previous all-container logs where available;
+   - all-cluster events sorted by last timestamp;
+   - node state;
+   - all-namespace Pod state.
+5. These files use distinct names in the existing safe artifact directory, so later generic diagnostics cannot overwrite them and the existing always-running artifact upload retains them before cluster cleanup.
+
+The success assertions remain unchanged: real environment evidence, a real authorized/executed action, real telemetry, successful owned-resource cleanup, and a `Succeeded` Pod are all still required before the GitOps verifier proof can begin.
+
+## Files changed
+
+- `.github/workflows/verification-e2e.yml`
+- `prompts/reports/hosted-e2e-calibration-fix.md`
+
+No Go source, Kubernetes manifest, verifier behavior, product assertion, or existing CI workflow was otherwise changed.
+
+## Validation
+
+- `backend/cmd/e2equalification` compiled through focused `go test` with `KUBECONFIG` and `TEST_KUBECONFIG` explicitly empty: passed (`[no test files]`).
+- Broader Kubernetes-client unit-package runs were stopped during unusually slow local compilation; no test failure was reported. No Go source changed in this fix.
+- Workflow YAML parse with Python/PyYAML: passed.
+- Extracted calibration shell block checked with `bash -n`: passed.
+- `git diff --check`: passed.
+- Local Kind E2E: intentionally not run.
+
+## Required next action
+
+Another GitHub-hosted run is required. It should now either:
+
+1. complete the one-shot calibration with phase `Succeeded` and proceed into the real GitOps verifier proof; or
+2. stop promptly on `Failed`/timeout and upload the exact pre-cleanup Pod, log, event, node, and nested-workload evidence.
+
+Do not claim **E2E-PROVEN** until the complete hosted workflow succeeds.

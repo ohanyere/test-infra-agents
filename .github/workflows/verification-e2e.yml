@@ -18,6 +18,8 @@ env:
   KIND_VERSION: v0.33.0
   KIND_NODE_IMAGE: kindest/node:v1.35.0
   ARGO_CD_VERSION: v3.5.3
+  K6_IMAGE: grafana/k6:0.54.0
+  PROMETHEUS_IMAGE: prom/prometheus:v3.13.3
   KUBECONFIG: ${{ github.workspace }}/.verification-e2e/kubeconfig
   ARTIFACT_DIR: /tmp/verification-e2e-artifacts
   DATABASE_URL: postgres://verification_ci:verification_ci@127.0.0.1:5432/verification_e2e?sslmode=disable
@@ -161,6 +163,8 @@ jobs:
           docker tag evalplane-harness:stage17 evalplane-reference:stage17
           docker build -t evalplane-reference:v17 --build-arg APP_ERROR_RATE=0 -f e2e/Dockerfile "$build_dir"
           docker build -t evalplane-reference:v18 --build-arg APP_ERROR_RATE=100 -f e2e/Dockerfile "$build_dir"
+          timeout 180s docker pull "$K6_IMAGE"
+          timeout 180s docker pull "$PROMETHEUS_IMAGE"
 
       - name: Create isolated Kind cluster
         run: |
@@ -174,7 +178,9 @@ jobs:
           kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-controller-manager --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l component=etcd --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l k8s-app=kube-dns --timeout=180s
-          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e --name evalplane-e2e
+          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
+          docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
+          docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
 
       - name: Install pinned minimal Argo CD
         run: |
@@ -190,15 +196,38 @@ jobs:
       - name: Run calibration environment gate
         run: |
           set -euo pipefail
+          collect_calibration_diagnostics() {
+            set +e
+            mkdir -p "$ARTIFACT_DIR"
+            timeout 30s kubectl -n evalplane-e2e-harness get pod calibration -o wide > "$ARTIFACT_DIR/calibration-pod-wide.txt" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness get pod calibration -o yaml > "$ARTIFACT_DIR/calibration-pod.yaml" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness describe pod calibration > "$ARTIFACT_DIR/calibration-pod-describe.txt" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness logs calibration --all-containers=true --tail=500 > "$ARTIFACT_DIR/calibration-current.log" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness logs calibration --all-containers=true --previous --tail=500 > "$ARTIFACT_DIR/calibration-previous.log" 2>&1
+            timeout 30s kubectl get events -A --sort-by=.lastTimestamp > "$ARTIFACT_DIR/kubernetes-events.txt" 2>&1
+            timeout 30s kubectl get nodes -o wide > "$ARTIFACT_DIR/nodes-at-calibration-failure.txt" 2>&1
+            timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/pods-at-calibration-failure.txt" 2>&1
+            set -e
+          }
           kubectl apply -f backend/e2e/harness-rbac.yaml
           kubectl apply -f backend/e2e/calibration.yaml
           if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/calibration --timeout=180s; then
+            collect_calibration_diagnostics
             echo "ENVIRONMENT FAILURE: calibration pod did not schedule and become ready" >&2
             exit 1
           fi
-          if ! kubectl wait -n evalplane-e2e-harness --for=jsonpath='{.status.phase}'=Succeeded pod/calibration --timeout=600s; then
-            kubectl logs -n evalplane-e2e-harness calibration --tail=300 > "$ARTIFACT_DIR/calibration.log" || true
-            echo "ENVIRONMENT FAILURE: calibration did not complete successfully" >&2
+          calibration_deadline=$((SECONDS + 600))
+          calibration_phase=""
+          while (( SECONDS < calibration_deadline )); do
+            calibration_phase="$(kubectl -n evalplane-e2e-harness get pod calibration -o jsonpath='{.status.phase}')"
+            case "$calibration_phase" in
+              Succeeded|Failed) break ;;
+            esac
+            sleep 2
+          done
+          if [[ "$calibration_phase" != Succeeded ]]; then
+            collect_calibration_diagnostics
+            echo "ENVIRONMENT FAILURE: calibration terminal phase was ${calibration_phase:-unknown}; expected Succeeded" >&2
             exit 1
           fi
           kubectl logs -n evalplane-e2e-harness calibration > "$ARTIFACT_DIR/calibration.log"
