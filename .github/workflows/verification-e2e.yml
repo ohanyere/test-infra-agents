@@ -2,6 +2,9 @@ name: Infrastructure agent verification E2E
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - infrastructure-agent-verification
 
 permissions:
   contents: read
