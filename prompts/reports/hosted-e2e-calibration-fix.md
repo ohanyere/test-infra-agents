@@ -211,3 +211,42 @@ Validation for this follow-up:
 - `git diff --check`: passed;
 - local Kind: intentionally not run;
 - maturity remains **FOCUSED-VERIFIED** and another hosted run is required.
+
+## False failure after successful calibration
+
+The latest hosted run proved that calibration itself now succeeds. HPA authorization printed `yes`; the Pod remained `Running` through attempt 90 and then reported:
+
+```text
+calibration phase=Succeeded attempt=91
+calibration terminal phase: Succeeded
+```
+
+The step nevertheless exited 1 before the qualification step. Inspection confirms this was not an attempt-91 boundary error: `Succeeded` sets `calibration_succeeded=true`, breaks the loop, and the subsequent timeout guard accepts that explicit success flag. There is no maximum-attempt comparison.
+
+The post-success path then ran six silent commands under `set -euo pipefail`: capture logs, four `jq -e` evidence assertions, and an immediate namespace-absence assertion. The final command was:
+
+```sh
+test -z "$(kubectl get namespace -l evalplane.dev/managed=true -o name)"
+```
+
+This was a false-failure race. Successful calibration calls `DeleteOwnedEnvironment`, which validates ownership, submits the Kubernetes namespace DELETE request, and returns without waiting for namespace finalization. The Pod can therefore reach `Succeeded` while its owned namespace remains briefly visible in `Terminating`. The immediate `test -z` then returns 1 without a message even though cleanup was successfully requested. This behavior matches the observed successful terminal phase followed by a bare shell exit.
+
+The workflow now treats cleanup request and cleanup completion separately:
+
+1. persisted calibration output must still prove `calibration_cleanup == "<nil>"`;
+2. the workflow then performs a bounded `kubectl wait --for=delete` on the exact deterministic calibration namespace;
+3. failure to finish deletion within 120 seconds emits a specific environment-failure message and captures the existing diagnostics.
+
+This does not increase the calibration timeout or weaken cleanup. It removes the asynchronous deletion race while continuing to require actual deletion before qualification begins.
+
+Concise markers now identify each post-success stage: logs, environment evidence, action evidence, telemetry evidence, cleanup evidence, cleanup completion, and proceeding to qualification. Every command that may legitimately return non-zero is inside an explicit conditional with a specific error and diagnostic path; broad shell tracing was not enabled.
+
+Boundary/control-flow validation covers:
+
+- `Running -> Succeeded` before the limit;
+- `Running -> Succeeded` at attempt 91/boundary, which continues with exit 0;
+- actual timeout, which exits non-zero with no success flag;
+- terminal `Failed`, which takes its explicit failure path;
+- phase-read failure, which takes its explicit diagnostic path.
+
+Workflow shell syntax, workflow YAML, and `git diff --check` pass. No local Kind run was performed. RBAC, Kubernetes resource definitions, Argo installation, calibration binary and timeout, verifier semantics, and GitOps semantics are unchanged. Maturity remains **FOCUSED-VERIFIED**; another hosted run is required.

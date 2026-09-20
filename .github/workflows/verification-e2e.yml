@@ -255,12 +255,43 @@ jobs:
             echo "ENVIRONMENT FAILURE: timed out waiting for calibration to succeed; last phase was ${calibration_phase:-unknown}" >&2
             exit 1
           fi
-          kubectl logs -n evalplane-e2e-harness calibration > "$ARTIFACT_DIR/calibration.log"
-          jq -Re 'fromjson? | select(.kind == "calibration_environment")' "$ARTIFACT_DIR/calibration.log" >/dev/null
-          jq -Re 'fromjson? | select(.kind == "calibration_action" and .value.authorized == true and .value.executed == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null
-          jq -Re 'fromjson? | select(.kind == "calibration_observation" and .value.metrics.telemetry_available == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null
-          jq -Re 'fromjson? | select(.kind == "calibration_cleanup" and .value == "<nil>")' "$ARTIFACT_DIR/calibration.log" >/dev/null
-          test -z "$(kubectl get namespace -l evalplane.dev/managed=true -o name)"
+          echo "calibration post-success: logs"
+          if ! kubectl logs -n evalplane-e2e-harness calibration > "$ARTIFACT_DIR/calibration.log"; then
+            echo "ENVIRONMENT FAILURE: could not capture successful calibration logs" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: environment evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_environment")' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration environment evidence was missing" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: action evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_action" and .value.authorized == true and .value.executed == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration action evidence was missing or unsuccessful" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: telemetry evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_observation" and .value.metrics.telemetry_available == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration telemetry evidence was missing" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: cleanup evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_cleanup" and .value == "<nil>")' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration cleanup request did not succeed" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: cleanup completion"
+          if ! kubectl wait --for=delete namespace/eval-11111111111141118111111111111117 --timeout=120s; then
+            echo "ENVIRONMENT FAILURE: calibration namespace deletion did not complete" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: proceeding to qualification"
 
       - name: Configure qualification inputs
         run: |
