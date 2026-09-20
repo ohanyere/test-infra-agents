@@ -221,16 +221,38 @@ jobs:
           fi
           calibration_deadline=$((SECONDS + 600))
           calibration_phase=""
+          calibration_succeeded=false
+          calibration_attempt=0
           while (( SECONDS < calibration_deadline )); do
-            calibration_phase="$(kubectl -n evalplane-e2e-harness get pod calibration -o jsonpath='{.status.phase}')"
+            calibration_attempt=$((calibration_attempt + 1))
+            if ! calibration_phase="$(kubectl -n evalplane-e2e-harness get pod calibration -o jsonpath='{.status.phase}')"; then
+              echo "ENVIRONMENT FAILURE: could not read calibration pod phase on attempt $calibration_attempt" >&2
+              collect_calibration_diagnostics
+              exit 1
+            fi
+            echo "calibration phase=${calibration_phase:-unknown} attempt=$calibration_attempt"
             case "$calibration_phase" in
-              Succeeded|Failed) break ;;
+              Succeeded)
+                echo "calibration terminal phase: Succeeded"
+                calibration_succeeded=true
+                break
+                ;;
+              Failed)
+                echo "ENVIRONMENT FAILURE: calibration terminal phase was Failed; expected Succeeded" >&2
+                collect_calibration_diagnostics
+                exit 1
+                ;;
+              Pending|Running|"")
+                ;;
+              *)
+                echo "calibration terminal phase not reached: $calibration_phase"
+                ;;
             esac
             sleep 2
           done
-          if [[ "$calibration_phase" != Succeeded ]]; then
+          if [[ "$calibration_succeeded" != true ]]; then
             collect_calibration_diagnostics
-            echo "ENVIRONMENT FAILURE: calibration terminal phase was ${calibration_phase:-unknown}; expected Succeeded" >&2
+            echo "ENVIRONMENT FAILURE: timed out waiting for calibration to succeed; last phase was ${calibration_phase:-unknown}" >&2
             exit 1
           fi
           kubectl logs -n evalplane-e2e-harness calibration > "$ARTIFACT_DIR/calibration.log"

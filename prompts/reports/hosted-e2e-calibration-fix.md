@@ -164,3 +164,50 @@ Validation and maturity:
 - local Kind: intentionally not run;
 - maturity remains **FOCUSED-VERIFIED**;
 - another GitHub-hosted run is required.
+
+## Calibration polling shell control-flow fix
+
+The next hosted run confirmed the HPA authorization correction before starting calibration:
+
+```text
+yes
+```
+
+It then created the calibration Pod and passed the initial Ready wait, but the shell step exited with code 1 immediately after:
+
+```text
+pod/calibration condition met
+```
+
+There was no terminal `Failed` message, timeout message, or `ENVIRONMENT FAILURE` message. The GitOps verifier proof was not reached.
+
+The polling block did not contain `((attempt++))` or another post-increment expression. Its unguarded operation was instead:
+
+```sh
+calibration_phase="$(kubectl ... get pod calibration -o jsonpath='{.status.phase}')"
+```
+
+With `set -euo pipefail`, a non-zero status from that poll terminates the shell immediately. Because the assignment was not in an explicit conditional, that exit bypassed `collect_calibration_diagnostics` and every custom failure message. This exactly matches the bare exit observed after the Ready wait.
+
+The poll now has explicit control flow:
+
+- `calibration_attempt=$((calibration_attempt + 1))` avoids post-increment exit-status semantics;
+- a failed `kubectl get` emits a specific environment-failure message, captures diagnostics, and exits;
+- every successful poll prints one concise `phase` and `attempt` line;
+- `Succeeded` records success and exits the loop;
+- `Failed` emits the exact terminal failure, captures diagnostics, and exits;
+- `Pending`, `Running`, and an empty phase continue polling;
+- any other phase is printed and continues polling;
+- the unchanged 600-second bound emits an explicit timeout with the last observed phase and captures diagnostics.
+
+The HPA `kubectl auth can-i` guard, least-privilege RBAC, calibration behavior, timeout values, verifier semantics, and all pre-cleanup diagnostic artifacts remain unchanged.
+
+Validation for this follow-up:
+
+- extracted calibration shell syntax with `bash -n`: passed;
+- deterministic shell simulation covering `Running -> Succeeded`: passed;
+- deterministic shell simulation covering `Failed`: passed with the explicit failure path;
+- workflow YAML parse: passed;
+- `git diff --check`: passed;
+- local Kind: intentionally not run;
+- maturity remains **FOCUSED-VERIFIED** and another hosted run is required.
