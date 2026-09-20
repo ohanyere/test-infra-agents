@@ -111,3 +111,56 @@ Another GitHub-hosted run is required. It should now either:
 2. stop promptly on `Failed`/timeout and upload the exact pre-cleanup Pod, log, event, node, and nested-workload evidence.
 
 Do not claim **E2E-PROVEN** until the complete hosted workflow succeeds.
+
+## Exact HPA RBAC failure and fix
+
+A subsequent hosted artifact established the calibration leaf failure that the improved diagnostics were designed to retain:
+
+```text
+list owned autoscalers:
+horizontalpodautoscalers.autoscaling is forbidden:
+User "system:serviceaccount:evalplane-e2e-harness:qualification"
+cannot list resource "horizontalpodautoscalers"
+in API group "autoscaling"
+in namespace "eval-11111111111141118111111111111117"
+```
+
+The calibration Pod reached terminal phase `Failed`; `/app/e2equalification` exited with code 1. The artifact also showed that Kind, Argo CD, the reference application, Prometheus, and k6 were healthy. The root cause was therefore the qualification service account's missing HPA read permission, not environment health.
+
+Source inspection found one HPA API operation in the runtime exercised by calibration: `observation.Provider.Observe` calls the autoscaling/v2 `HorizontalPodAutoscalers(...).List(...)` method with the owned-run label selector. No harness/runtime code gets, watches, creates, updates, patches, or deletes HPAs. Kubernetes RBAC authorizes this versioned resource through API group `autoscaling` and resource `horizontalpodautoscalers`.
+
+The existing `evalplane-e2e-qualification` ClusterRole now has exactly:
+
+```yaml
+- apiGroups: [autoscaling]
+  resources: [horizontalpodautoscalers]
+  verbs: [list]
+```
+
+No wildcard, cluster-admin binding, or unused HPA write/read verb was added.
+
+The hosted calibration step now runs a fail-fast authorization regression check after applying the RBAC and before creating the calibration Pod:
+
+```sh
+kubectl auth can-i list horizontalpodautoscalers.autoscaling \
+  --as=system:serviceaccount:evalplane-e2e-harness:qualification \
+  --namespace=eval-11111111111141118111111111111117
+```
+
+The namespace is the actual deterministic owned namespace used by calibration. This check supplements rather than replaces the real calibration. All previously added pre-cleanup diagnostics remain intact.
+
+Files changed for this follow-up:
+
+- `backend/e2e/harness-rbac.yaml`
+- `.github/workflows/verification-e2e.yml`
+- `prompts/reports/hosted-e2e-calibration-fix.md`
+
+Validation and maturity:
+
+- focused static RBAC contract check: required `autoscaling` / `horizontalpodautoscalers` / `list` rule present with no other HPA verbs;
+- workflow YAML parse: passed;
+- calibration shell syntax: passed;
+- `git diff --check`: passed;
+- local Kind: intentionally not run;
+- maturity remains **FOCUSED-VERIFIED**;
+- another GitHub-hosted run is required.

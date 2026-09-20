@@ -210,6 +210,9 @@ jobs:
             set -e
           }
           kubectl apply -f backend/e2e/harness-rbac.yaml
+          kubectl auth can-i list horizontalpodautoscalers.autoscaling \
+            --as=system:serviceaccount:evalplane-e2e-harness:qualification \
+            --namespace=eval-11111111111141118111111111111117 | grep -Fx yes
           kubectl apply -f backend/e2e/calibration.yaml
           if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/calibration --timeout=180s; then
             collect_calibration_diagnostics
