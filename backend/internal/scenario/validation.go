@@ -129,7 +129,7 @@ func validateAllowedActions(values []string) ([]string, error) {
 	}
 	seen := map[string]bool{}
 	for _, v := range values {
-		if v != "inspect" && v != "scale_workload" && v != "restart_pod" && v != "no_op" {
+		if v != "inspect" && v != "scale_workload" && v != "restart_pod" && v != "set_workload_image" && v != "no_op" {
 			return values, invalid("allowed_actions contains an unsupported action")
 		}
 		if seen[v] {

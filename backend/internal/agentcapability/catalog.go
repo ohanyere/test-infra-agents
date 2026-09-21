@@ -21,6 +21,7 @@ var catalog = []Capability{
 	{ID: "availability", Kind: "observation", Label: "Availability", Category: "telemetry"},
 	{ID: "inspect", Kind: "action", Label: "Inspect", Category: "actions"},
 	{ID: "scale_workload", Kind: "action", Label: "Scale workload", Category: "actions"},
+	{ID: "set_workload_image", Kind: "action", Label: "Set workload image", Category: "actions"},
 	{ID: "restart_pod", Kind: "action", Label: "Restart pod", Category: "actions"},
 	{ID: "no_op", Kind: "action", Label: "No operation", Category: "actions"},
 	// Retained as a known coarse legacy declaration for pre-catalog fixtures.

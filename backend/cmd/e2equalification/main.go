@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -34,6 +35,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
 	"github.com/evalplane/evalplane/backend/internal/verification"
+	"github.com/jackc/pgx/v5/pgxpool"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -47,6 +49,22 @@ func emit(kind string, value any) {
 }
 func emitStage(stage, status string) {
 	emit("qualification_stage", map[string]string{"stage": stage, "status": status})
+}
+func safeQualificationError(err error) string {
+	message := strings.TrimSpace(err.Error())
+	for _, secret := range []string{os.Getenv("DATABASE_URL"), os.Getenv("E2E_AUTH_PASSWORD")} {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		if parsed, parseErr := url.Parse(databaseURL); parseErr == nil && parsed.User != nil {
+			if password, ok := parsed.User.Password(); ok && password != "" {
+				message = strings.ReplaceAll(message, password, "[redacted]")
+			}
+		}
+	}
+	return message
 }
 func check(err error) {
 	if err != nil {
@@ -267,34 +285,12 @@ func (s sink) UpdateAgentAction(ctx context.Context, in evidence.UpdateActionInp
 	return err
 }
 
-func qualification(ctx context.Context, r *runtime, client kubernetes.Interface) error {
-	emitStage("qualification_setup", "started")
-	agentTask := task
-	allowedActions := []string{"inspect", "scale_workload", "no_op"}
-	scenarioName, scenarioSlug := "Checkout traffic saturation", "checkout-traffic-saturation"
-	description, category := "Calibrated finite-capacity traffic spike", "traffic-spike"
-	if r.argoEnabled {
-		agentTask = gitopsTask
-		allowedActions = []string{"inspect", "set_workload_image", "no_op"}
-		scenarioName, scenarioSlug = "Checkout GitOps recovery", "checkout-gitops-recovery"
-		description, category = "Recover checkout and verify the resulting GitOps state", "gitops-remediation"
-	}
-	raw, err := os.ReadFile("/criteria/criteria.json")
-	if err != nil {
-		return err
-	}
-	var criteria []scenario.CriterionInput
-	if err = json.Unmarshal(raw, &criteria); err != nil {
-		return err
-	}
-	if len(criteria) == 0 {
-		return errors.New("calibrated criteria required")
-	}
-	pool, err := database.NewPostgresPool(ctx, os.Getenv("DATABASE_URL"))
-	if err != nil {
-		return errors.New("database unavailable")
-	}
+func qualification(ctx context.Context, r *runtime, client kubernetes.Interface) (err error) {
+	var pool *pgxpool.Pool
 	defer func() {
+		if pool == nil {
+			return
+		}
 		emitStage("database_pool_close", "started")
 		closed := make(chan struct{})
 		go func() {
@@ -308,6 +304,47 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 			emitStage("database_pool_close", "timed_out")
 		}
 	}()
+	stage := "qualification_setup"
+	defer func() {
+		if err != nil {
+			safeError := safeQualificationError(err)
+			emit("qualification_stage", map[string]string{"stage": stage, "status": "failed", "error": safeError})
+			emit("qualification_failure", map[string]string{"stage": stage, "error": safeError})
+		}
+	}()
+	startStage := func(name string) { stage = name; emitStage(name, "started") }
+	completeStage := func() { emitStage(stage, "completed") }
+	emitStage("qualification_setup", "started")
+	agentTask := task
+	allowedActions := []string{"inspect", "scale_workload", "no_op"}
+	scenarioName, scenarioSlug := "Checkout traffic saturation", "checkout-traffic-saturation"
+	description, category := "Calibrated finite-capacity traffic spike", "traffic-spike"
+	if r.argoEnabled {
+		agentTask = gitopsTask
+		allowedActions = []string{"inspect", "set_workload_image", "no_op"}
+		scenarioName, scenarioSlug = "Checkout GitOps recovery", "checkout-gitops-recovery"
+		description, category = "Recover checkout and verify the resulting GitOps state", "gitops-remediation"
+	}
+	startStage("qualification_criteria")
+	raw, err := os.ReadFile("/criteria/criteria.json")
+	if err != nil {
+		return err
+	}
+	var criteria []scenario.CriterionInput
+	if err = json.Unmarshal(raw, &criteria); err != nil {
+		return err
+	}
+	if len(criteria) == 0 {
+		return errors.New("calibrated criteria required")
+	}
+	completeStage()
+	startStage("qualification_database")
+	pool, err = database.NewPostgresPool(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return errors.New("database unavailable")
+	}
+	completeStage()
+	startStage("qualification_auth")
 	ids := identity.NewRepository()
 	authService, err := auth.NewService(pool, auth.NewRepository(), ids, 24*time.Hour, auth.DefaultPasswordParams)
 	if err != nil {
@@ -317,28 +354,38 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	if err != nil {
 		return err
 	}
+	completeStage()
 	ws, user := signup.Workspace, signup.User
 	p := auth.Principal{UserID: user.ID}
 	roles := auth.NewRepository()
+	startStage("qualification_agent_registration")
 	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "set_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, Metadata: json.RawMessage(`{"fixture":true}`)}})
 	if err != nil {
 		return err
 	}
+	completeStage()
+	startStage("qualification_scenario")
 	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: scenarioName, Slug: scenarioSlug, InitialVersion: scenario.VersionInput{Description: description, Category: category, Difficulty: "easy", DurationSeconds: 170, AgentTask: agentTask, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: allowedActions, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: []string{"kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(executionSpec), Criteria: criteria}})
 	if err != nil {
 		return err
 	}
+	completeStage()
+	startStage("qualification_batch")
 	batches := evaluationbatch.NewService(pool, evaluationbatch.NewRepository(), roles)
 	batch, err := batches.Create(ctx, p, ws.ID, evaluationbatch.CreateInput{ScenarioVersionID: sv.LatestVersion.ID, AgentVersionIDs: []string{av.LatestVersion.ID}, RunsPerAgent: 1})
 	if err != nil {
 		return err
 	}
+	completeStage()
+	startStage("qualification_run_start")
 	lifecycle := execution.NewService(pool, execution.NewRepository(), roles)
 	queued, err := lifecycle.StartBatch(ctx, p, ws.ID, batch.ID)
 	if err != nil {
 		return err
 	}
 	emit("queued_batch", queued)
+	completeStage()
+	startStage("qualification_run_claim")
 	cfg := executionworker.DefaultConfig()
 	cfg.WorkerID = "stage17-e2e-worker"
 	run, err := lifecycle.ClaimNextRunWithLease(ctx, cfg.WorkerID, cfg.LeaseDuration)
@@ -350,6 +397,8 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	if run.BatchID != batch.ID || run.Agent.VersionID != av.LatestVersion.ID || run.Scenario.VersionID != sv.LatestVersion.ID {
 		return errors.New("claim version mismatch")
 	}
+	completeStage()
+	startStage("qualification_worker_construction")
 	evidenceService := evidence.NewService(pool, evidence.NewRepository(), roles)
 	verificationService := verification.NewService(pool, verification.NewRepository(), roles)
 	manager, _ := kubeenv.NewManager(client)
@@ -366,16 +415,17 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	if err != nil {
 		return err
 	}
+	completeStage()
 	emitStage("qualification_setup", "completed")
-	emitStage("worker_execution", "started")
+	startStage("worker_execution")
 	execErr := w.ExecuteRun(ctx, run)
 	if execErr != nil {
 		emitStage("worker_execution", "failed")
 	} else {
-		emitStage("worker_execution", "completed")
+		completeStage()
 	}
 	emit("worker_error", fmt.Sprint(execErr))
-	emitStage("persisted_proof_fetch", "started")
+	startStage("persisted_proof_fetch")
 	final, done := context.WithTimeout(context.Background(), 30*time.Second)
 	defer done()
 	input, err := evaluator.NewRepository(pool).LoadEvaluationInput(final, ws.ID, run.RunID)
@@ -393,12 +443,14 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		return err
 	}
 	emit("persisted_verification", verificationResult)
-	emitStage("persisted_proof_fetch", "completed")
+	completeStage()
 	emit("gateway_boundary", map[string]any{"requests": record.count, "checked": true})
 	if execErr != nil {
+		stage = "worker_execution"
 		return execErr
 	}
 	if record.count == 0 {
+		stage = "qualification_proof"
 		return errors.New("gateway not invoked")
 	}
 	emitStage("qualification_proof", "completed")
@@ -460,7 +512,7 @@ func run() (err error) {
 }
 func main() {
 	if err := run(); err != nil {
-		emit("harness_error", strings.TrimSpace(err.Error()))
+		emit("harness_error", safeQualificationError(err))
 		os.Exit(1)
 	}
 	emitStage("process_exit", "completed")

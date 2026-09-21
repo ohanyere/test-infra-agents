@@ -397,8 +397,8 @@ jobs:
             timeout 30s kubectl -n argocd get applications -o yaml > "$ARTIFACT_DIR/qualification-argo-applications.yaml" 2>&1 || true
             timeout 30s kubectl get deployments -A -o wide > "$ARTIFACT_DIR/qualification-all-deployments-wide.txt" 2>&1 || true
             timeout 30s kubectl get pods -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,WAITING:.status.containerStatuses[*].state.waiting.reason' > "$ARTIFACT_DIR/qualification-all-pods-status.txt" 2>&1 || true
-            echo "Qualification stage progress:" >&2
-            jq -Rrc 'fromjson? | select(.kind == "qualification_stage")' "$ARTIFACT_DIR/qualification.log" >&2 || true
+            echo "Qualification stage progress and failure:" >&2
+            jq -Rrc 'fromjson? | select(.kind == "qualification_stage" or .kind == "qualification_failure")' "$ARTIFACT_DIR/qualification.log" >&2 || true
           }
           kubectl apply -f backend/e2e/qualification.yaml
           if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/qualification --timeout=180s; then

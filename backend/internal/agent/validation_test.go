@@ -58,6 +58,14 @@ func TestCapabilitiesStoredDeterministically(t *testing.T) {
 	}
 }
 
+func TestGitOpsAgentCanDeclareImageAction(t *testing.T) {
+	value := validCreate()
+	value.InitialVersion.Capabilities = []string{"inspect", "set_workload_image"}
+	if _, err := ValidateCreate(value); err != nil {
+		t.Fatalf("GitOps agent capability rejected: %v", err)
+	}
+}
+
 func TestToolAccessModeDefaultsDirectAndMCPIsImmutableVersionInput(t *testing.T) {
 	value := validCreate()
 	got, err := ValidateCreate(value)

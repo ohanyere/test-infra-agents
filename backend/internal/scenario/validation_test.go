@@ -29,3 +29,11 @@ func TestScenarioEmptyPatch(t *testing.T) {
 		t.Fatalf("error=%v", e)
 	}
 }
+
+func TestScenarioAllowsWorkloadImageAction(t *testing.T) {
+	in := validScenario()
+	in.InitialVersion.AllowedActions = []string{"inspect", "set_workload_image", "no_op"}
+	if _, err := ValidateCreate(in); err != nil {
+		t.Fatalf("GitOps recovery action rejected: %v", err)
+	}
+}
