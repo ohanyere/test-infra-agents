@@ -143,10 +143,31 @@ jobs:
           cp -R /tmp/repo.git /tmp/git-server/repo.git
           cat > /tmp/git-server/Dockerfile <<'DOCKER'
           FROM alpine/git:2.49.1
+          RUN apk add --no-cache git-daemon
           COPY repo.git /srv/repo.git
-          ENTRYPOINT ["git", "daemon", "--reuseaddr", "--base-path=/srv", "--export-all", "--verbose", "/srv/repo.git"]
+          EXPOSE 9418
+          ENTRYPOINT ["git", "daemon", "--listen=0.0.0.0", "--reuseaddr", "--base-path=/srv", "--export-all", "--verbose", "/srv/repo.git"]
           DOCKER
           docker build -t evalplane-git-fixture:e2e /tmp/git-server
+          git_fixture_container="$(docker run --rm -d -p 127.0.0.1::9418 evalplane-git-fixture:e2e)"
+          trap 'docker stop "$git_fixture_container" >/dev/null' EXIT
+          git_fixture_port="$(docker port "$git_fixture_container" 9418/tcp | sed 's/.*://')"
+          test -n "$git_fixture_port"
+          expected_revision="$(cat /tmp/gitops-revision)"
+          served_revision=""
+          for attempt in {1..10}; do
+            served_revision="$(timeout 5s git ls-remote "git://127.0.0.1:${git_fixture_port}/repo.git" HEAD 2>/dev/null | cut -f1)" || true
+            if [[ "$served_revision" = "$expected_revision" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$served_revision" != "$expected_revision" ]]; then
+            docker logs "$git_fixture_container"
+            echo "Git fixture did not serve its pinned revision" >&2
+            exit 1
+          fi
+          echo "Git fixture serves pinned revision $served_revision"
 
       - name: Build E2E images
         working-directory: backend
@@ -296,6 +317,10 @@ jobs:
       - name: Configure qualification inputs
         run: |
           set -euo pipefail
+          if ! docker exec evalplane-e2e-control-plane crictl images | grep -F 'evalplane-git-fixture' | grep -F 'e2e'; then
+            echo "Git fixture image is unavailable in the Kind node" >&2
+            exit 1
+          fi
           cat > /tmp/criteria.json <<'JSON'
           [{"Key":"checkout-recovered","Name":"Current checkout error rate","MetricKey":"current_error_rate","Operator":"lte","TargetValue":1,"Unit":"pct","SortOrder":0}]
           JSON
@@ -312,14 +337,42 @@ jobs:
               metadata: {labels: {app: git-fixture}}
               spec:
                 containers:
-                  - {name: git, image: evalplane-git-fixture:e2e, imagePullPolicy: Never, ports: [{name: git, containerPort: 9418}]}
+                  - name: git
+                    image: evalplane-git-fixture:e2e
+                    imagePullPolicy: Never
+                    ports: [{name: git, containerPort: 9418}]
+                    readinessProbe:
+                      tcpSocket: {port: git}
+                      periodSeconds: 2
           ---
           apiVersion: v1
           kind: Service
           metadata: {name: git-fixture, namespace: evalplane-e2e-harness}
           spec: {selector: {app: git-fixture}, ports: [{name: git, port: 9418, targetPort: git}]}
           YAML
-          kubectl -n evalplane-e2e-harness rollout status deployment/git-fixture --timeout=120s
+          if ! kubectl -n evalplane-e2e-harness rollout status deployment/git-fixture --timeout=120s; then
+            timeout 30s kubectl -n evalplane-e2e-harness get deployment/git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-deployment.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness describe deployment/git-fixture > "$ARTIFACT_DIR/git-fixture-deployment-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get service/git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-service.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get endpoints/git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-endpoints.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get pods -l app=git-fixture -o wide > "$ARTIFACT_DIR/git-fixture-pods-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get pods -l app=git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-pods.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get pods -l app=git-fixture -o json |
+              jq -c '.items[] | {pod: .metadata.name, phase: .status.phase, conditions: [.status.conditions[]? | {type, status, reason, message}], containers: [.status.containerStatuses[]? | {name, ready, restartCount, image, imageID, waiting_reason: .state.waiting.reason, waiting_message: .state.waiting.message, terminated_reason: .state.terminated.reason, terminated_message: .state.terminated.message, exit_code: .state.terminated.exitCode, previous_state: .lastState}]}' |
+              tee "$ARTIFACT_DIR/git-fixture-container-status.jsonl" || true
+            timeout 30s kubectl -n evalplane-e2e-harness describe pods -l app=git-fixture > "$ARTIFACT_DIR/git-fixture-pods-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs -l app=git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs -l app=git-fixture --all-containers=true --previous --tail=200 > "$ARTIFACT_DIR/git-fixture-previous.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/git-fixture-namespace-events.txt" 2>&1 || true
+            echo "Git fixture container logs:" >&2
+            tail -n 80 "$ARTIFACT_DIR/git-fixture.log" >&2 || true
+            echo "Git fixture previous container logs:" >&2
+            tail -n 80 "$ARTIFACT_DIR/git-fixture-previous.log" >&2 || true
+            echo "Git fixture recent namespace events:" >&2
+            tail -n 30 "$ARTIFACT_DIR/git-fixture-namespace-events.txt" >&2 || true
+            echo "Git fixture deployment did not become available" >&2
+            exit 1
+          fi
           host_gateway="$(docker exec evalplane-e2e-control-plane sh -c "ip route | awk '/default/ {print \$3; exit}'")"
           test -n "$host_gateway"
           database_url="postgres://verification_ci:verification_ci@${host_gateway}:5432/verification_e2e?sslmode=disable"
@@ -429,6 +482,7 @@ jobs:
           done
           timeout 30s kubectl logs -n evalplane-e2e-harness calibration --tail=300 > "$ARTIFACT_DIR/calibration.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification --tail=500 > "$ARTIFACT_DIR/qualification.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness deployment/git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1
           timeout 30s kubectl logs -n argocd statefulset/argocd-application-controller --tail=300 > "$ARTIFACT_DIR/argocd-controller.log" 2>&1
 
       - name: Cleanup disposable runtime
