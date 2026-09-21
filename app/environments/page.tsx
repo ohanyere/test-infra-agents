@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import styles from "../scenarios/scenarios.module.css";
 import { PublicNavigation } from "../site-navigation";
 
-export const metadata: Metadata = { title: "Environments — Evalplane", description: "Server-owned execution environment profiles and providers for evaluation tasks." };
+export const metadata: Metadata = { title: "Environments — Realverax", description: "Server-owned execution environment profiles and providers for evaluation tasks." };
 
 // V1 availability truth, mirrored from the server-owned catalogs
 // (environment-component-catalog:v1, environment-profile-catalog:v1,

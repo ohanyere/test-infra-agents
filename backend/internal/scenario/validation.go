@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 )
 
 var kebabPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -100,7 +101,7 @@ func ValidateVersion(in VersionInput) (VersionInput, error) {
 	if err := validateJSONArray(in.Conditions, "conditions"); err != nil {
 		return in, err
 	}
-	if in.Observables, err = validateIdentifiers(in.Observables, "observables", 64); err != nil {
+	if in.Observables, err = validateObservables(in.Observables); err != nil {
 		return in, err
 	}
 	if in.ExpectedBehaviors, err = validateTextItems(in.ExpectedBehaviors, "expected_behaviors", 64); err != nil {
@@ -218,24 +219,30 @@ func validateJSONArray(raw json.RawMessage, label string) error {
 	}
 	return nil
 }
-func validateIdentifiers(values []string, label string, max int) ([]string, error) {
-	seen := map[string]struct{}{}
+func validateObservables(values []string) ([]string, error) {
+	seen := map[observablecatalog.ID]struct{}{}
 	if values == nil {
 		values = []string{}
 	}
-	if len(values) > max {
-		return values, invalid(label + " contains too many values")
+	if len(values) > 64 {
+		return values, invalid("observables contains too many values")
 	}
-	for _, v := range values {
-		if len(v) > 100 || !kebabPattern.MatchString(v) {
-			return values, invalid(label + " must contain lowercase kebab-case values")
+	canonical := make([]string, 0, len(values))
+	for _, value := range values {
+		id, err := observablecatalog.Parse(value)
+		if err != nil {
+			if err == observablecatalog.ErrMalformed {
+				return values, invalid("observables must contain lowercase kebab-case values or known legacy aliases")
+			}
+			return values, invalid("observables contains an unsupported value")
 		}
-		if _, ok := seen[v]; ok {
-			return values, invalid(label + " must not contain duplicates")
+		if _, ok := seen[id]; ok {
+			return values, invalid("observables must not contain duplicates")
 		}
-		seen[v] = struct{}{}
+		seen[id] = struct{}{}
+		canonical = append(canonical, string(id))
 	}
-	return values, nil
+	return canonical, nil
 }
 func validateTextItems(values []string, label string, max int) ([]string, error) {
 	if values == nil {

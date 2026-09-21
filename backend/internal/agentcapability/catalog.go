@@ -1,6 +1,10 @@
 package agentcapability
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
+)
 
 type Capability struct {
 	ID       string `json:"id"`
@@ -9,23 +13,30 @@ type Capability struct {
 	Category string `json:"category"`
 }
 
-var catalog = []Capability{
-	{ID: "kubernetes_workloads", Kind: "observation", Label: "Kubernetes workloads", Category: "infrastructure"},
-	{ID: "kubernetes_pods", Kind: "observation", Label: "Kubernetes pods", Category: "infrastructure"},
-	{ID: "kubernetes_events", Kind: "observation", Label: "Kubernetes events", Category: "infrastructure"},
-	{ID: "pods", Kind: "observation", Label: "Pods", Category: "infrastructure"},
-	{ID: "events", Kind: "observation", Label: "Events", Category: "infrastructure"},
-	{ID: "request_rate", Kind: "observation", Label: "Request rate", Category: "telemetry"},
-	{ID: "error_rate", Kind: "observation", Label: "Error rate", Category: "telemetry"},
-	{ID: "p95_latency", Kind: "observation", Label: "P95 latency", Category: "telemetry"},
-	{ID: "availability", Kind: "observation", Label: "Availability", Category: "telemetry"},
+var actionCatalog = []Capability{
 	{ID: "inspect", Kind: "action", Label: "Inspect", Category: "actions"},
 	{ID: "scale_workload", Kind: "action", Label: "Scale workload", Category: "actions"},
 	{ID: "set_workload_image", Kind: "action", Label: "Set workload image", Category: "actions"},
 	{ID: "restart_pod", Kind: "action", Label: "Restart pod", Category: "actions"},
 	{ID: "no_op", Kind: "action", Label: "No operation", Category: "actions"},
-	// Retained as a known coarse legacy declaration for pre-catalog fixtures.
-	{ID: "kubernetes", Kind: "observation", Label: "Kubernetes (legacy)", Category: "infrastructure"},
+}
+
+// Retained as a known coarse agent declaration, not an observable provider.
+var legacyCatalog = Capability{ID: "kubernetes", Kind: "observation", Label: "Kubernetes (legacy)", Category: "infrastructure"}
+
+var catalog = buildCatalog()
+
+func buildCatalog() []Capability {
+	out := make([]Capability, 0, len(observablecatalog.Definitions())+len(actionCatalog)+3)
+	for _, definition := range observablecatalog.Definitions() {
+		out = append(out, Capability{ID: definition.Capability, Kind: "observation", Label: definition.Label, Category: definition.Category})
+		for _, alias := range definition.CapabilityAliases {
+			out = append(out, Capability{ID: alias, Kind: "observation", Label: definition.Label, Category: definition.Category})
+		}
+	}
+	out = append(out, actionCatalog...)
+	out = append(out, legacyCatalog)
+	return out
 }
 
 func List() []Capability {

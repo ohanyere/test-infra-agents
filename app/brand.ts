@@ -1,1 +1,1 @@
-export const productName = "evalplane";
+export const productName = "Realverax";

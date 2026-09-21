@@ -3,7 +3,7 @@ import { ScenarioDirectory } from "./scenario-directory";
 import { PublicNavigation } from "../site-navigation";
 import styles from "./scenarios.module.css";
 
-export const metadata: Metadata = { title: "Infrastructure Verification Tests — Evalplane", description: "Browse controlled infrastructure test cases for resulting-state verification." };
+export const metadata: Metadata = { title: "Infrastructure Verification Tests — Realverax", description: "Browse controlled infrastructure test cases for resulting-state verification." };
 
 export default function ScenariosPage() {
   return <main className={styles.page}>

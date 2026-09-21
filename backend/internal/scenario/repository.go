@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -159,7 +160,7 @@ func scanScenario(row scanner) (Scenario, error) {
 		return s, mapDB(err)
 	}
 	if id != nil {
-		v := Version{ID: *id, Version: *number, Description: *d, Category: *cat, Difficulty: *diff, DurationSeconds: *dur, Environment: env, Conditions: cond, Observables: obs, ExpectedBehaviors: expected, ForbiddenBehaviors: forbidden, AuthoringMethod: *authoring, AgentTask: *task, AgentVisibleContext: visible, AllowedActions: actions, AllowedResources: resources, GroundTruth: ground, ExecutionSpec: execution, SourceMetadata: metadata, CreatedAt: *created}
+		v := Version{ID: *id, Version: *number, Description: *d, Category: *cat, Difficulty: *diff, DurationSeconds: *dur, Environment: env, Conditions: cond, Observables: observablecatalog.CanonicalizeKnown(obs), ExpectedBehaviors: expected, ForbiddenBehaviors: forbidden, AuthoringMethod: *authoring, AgentTask: *task, AgentVisibleContext: visible, AllowedActions: actions, AllowedResources: resources, GroundTruth: ground, ExecutionSpec: execution, SourceMetadata: metadata, CreatedAt: *created}
 		if familyID != nil {
 			v.TaskFamilyID = *familyID
 		}
@@ -184,6 +185,7 @@ func scanVersion(row scanner) (Version, error) {
 	if err != nil {
 		return v, mapDB(err)
 	}
+	v.Observables = observablecatalog.CanonicalizeKnown(v.Observables)
 	if familyID != nil {
 		v.TaskFamilyID = *familyID
 	}

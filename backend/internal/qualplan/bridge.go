@@ -11,6 +11,7 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/environment"
 	"github.com/evalplane/evalplane/backend/internal/gitopsqual"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 	"github.com/evalplane/evalplane/backend/internal/srequal"
 )
@@ -177,7 +178,7 @@ func ContentHash(task BuiltinTask) string {
 
 // SourceMetadata builds the reproducibility marker stored on materialized
 // versions. It identifies the originating built-in task contract/version
-// without exposing evaluator-only data.
+// and retains public read requirements without exposing evaluator-only truth.
 func SourceMetadata(task BuiltinTask, hash string) json.RawMessage {
 	raw, _ := json.Marshal(map[string]any{
 		"origin":                "builtin-catalog-bridge",
@@ -185,6 +186,7 @@ func SourceMetadata(task BuiltinTask, hash string) json.RawMessage {
 		"builtin_task_contract": BuiltinTaskContractVersion,
 		"content_hash":          hash,
 		"planner_contract":      PlannerContractVersion,
+		"evidence_requirements": append([]string(nil), task.Observables...),
 	})
 	return raw
 }
@@ -224,7 +226,7 @@ func ToVersionInput(task BuiltinTask, hash string) scenario.VersionInput {
 		DurationSeconds:     durationSeconds(task.Duration),
 		Environment:         json.RawMessage(`{}`),
 		Conditions:          cloneRaw(task.Conditions, `[]`),
-		Observables:         append([]string(nil), task.Observables...),
+		Observables:         agentVisibleObservables(task),
 		ExpectedBehaviors:   []string{},
 		ForbiddenBehaviors:  append([]string(nil), task.Forbidden...),
 		Criteria:            criteria,
@@ -237,6 +239,42 @@ func ToVersionInput(task BuiltinTask, hash string) scenario.VersionInput {
 		ExecutionSpec:       executionSpecFor(task),
 		SourceMetadata:      SourceMetadata(task, hash),
 	}
+}
+
+// Built-in task read requirements describe evaluator or mediated-provider
+// evidence. Only the SRE catalog reads backed by this runtime become agent-visible
+// scenario observables. GitOps/delivery reads remain in source metadata until
+// their own mediated providers exist.
+func agentVisibleObservables(task BuiltinTask) []string {
+	if _, supported := srequal.Get(task.ID); !supported {
+		return []string{}
+	}
+	out := []string{}
+	seen := map[observablecatalog.ID]bool{}
+	for _, requirement := range task.Observables {
+		var id observablecatalog.ID
+		switch requirement {
+		case "workloads", "deployments":
+			id = observablecatalog.Workloads
+		case "pods":
+			id = observablecatalog.Pods
+		case "events":
+			id = observablecatalog.Events
+		case "request-rate":
+			id = observablecatalog.RequestRate
+		case "error-rate":
+			id = observablecatalog.ErrorRate
+		case "latency":
+			id = observablecatalog.P95Latency
+		case "availability":
+			id = observablecatalog.Availability
+		}
+		if id != "" && !seen[id] {
+			out = append(out, string(id))
+			seen[id] = true
+		}
+	}
+	return out
 }
 
 // ToCreateInput maps a built-in task onto scenario creation input.

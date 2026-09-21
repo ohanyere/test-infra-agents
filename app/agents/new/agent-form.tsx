@@ -148,7 +148,7 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
   if (authError || !workspace) return <main className={styles.page}><div className={styles.state}><p>{authError || "A workspace is required."}</p><button onClick={retry}>Try again</button></div></main>;
 
   return <main className={styles.page}>
-    <header className={styles.nav}><a href="/">evalplane</a><a href="/agents">Agents</a></header>
+    <header className={styles.nav}><a href="/">Realverax</a><a href="/agents">Agents</a></header>
     <div className={styles.shell}>
 	  <p className={styles.eyebrow}>{existingAgentID ? "REGISTER VERSION" : "CONNECT AN AGENT"}</p>
 	  <h1>{existingAgentID ? "Register a new agent version." : "Connect an infrastructure agent."}</h1>
@@ -175,15 +175,15 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
           <button className={styles.secondary} type="button" onClick={testConnection} disabled={testing || !endpoint || (authType === "bearer" && !token)}>{testing ? "Testing…" : "Test connection"}</button>
           {check && <p className={check.status === "healthy" ? styles.healthy : styles.check}>{checkCopy[check.status] || "Connection check completed."}</p>}
           <div className={styles.methods}>
-            <label><input type="radio" checked={toolAccessMode === "direct"} onChange={() => setToolAccessMode("direct")} /> Direct Evalplane action protocol</label>
+            <label><input type="radio" checked={toolAccessMode === "direct"} onChange={() => setToolAccessMode("direct")} /> Direct Realverax action protocol</label>
             <label><input type="radio" checked={toolAccessMode === "mcp"} onChange={() => setToolAccessMode("mcp")} /> MCP <strong>Available</strong></label>
           </div>
-          {toolAccessMode === "mcp" && <p className={styles.explanation}>Evalplane invokes your agent over its registered endpoint and provides a short-lived MCP connection for evaluation-scoped observations and actions.</p>}
+          {toolAccessMode === "mcp" && <p className={styles.explanation}>Realverax invokes your agent over its registered endpoint and provides a short-lived MCP connection for evaluation-scoped observations and actions.</p>}
           {Object.entries(grouped).map(([group, items]) => <fieldset className={styles.capabilities} key={group}><legend>{group}</legend>{items.map((item) => <label key={item.id}><input type="checkbox" checked={selected.includes(item.id)} onChange={() => toggle(item.id)} /><span>{item.label}</span><code>{item.id}</code></label>)}</fieldset>)}
         </section>
         <section>
           <h2>Claimed capabilities</h2>
-          <p className={styles.explanation}>What can this agent operate? Select what this exact version CLAIMS it can do. Claims are not qualifications. Evalplane must test them before they become qualified. Catalog: <code>{competencyContract}</code>.</p>
+          <p className={styles.explanation}>What can this agent operate? Select what this exact version CLAIMS it can do. Claims are not qualifications. Realverax must test them before they become qualified. Catalog: <code>{competencyContract}</code>.</p>
           {claimedHierarchy.length === 0 && <p className={styles.explanation}>Claimed-capability catalog could not be loaded yet. Runtime capabilities above can still be registered; claims stay empty.</p>}
           {claimedHierarchy.map((domain) => <div key={domain.domain}>
             <h3>{domain.domain}</h3>

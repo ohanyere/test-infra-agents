@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 )
 
@@ -93,7 +94,7 @@ type CapabilityCatalog struct {
 }
 
 func CurrentCapabilities() CapabilityCatalog {
-	return CapabilityCatalog{Platform: []string{"kubernetes"}, ScenarioExecution: []string{"traffic_spike"}, AgentActions: []string{"inspect", "scale_workload", "restart_pod", "no_op"}, Observations: []string{"kubernetes_workloads", "kubernetes_pods", "kubernetes_events", "request_rate", "error_rate", "p95_latency", "availability"}}
+	return CapabilityCatalog{Platform: []string{"kubernetes"}, ScenarioExecution: []string{"traffic_spike"}, AgentActions: []string{"inspect", "scale_workload", "restart_pod", "no_op"}, Observations: observablecatalog.CanonicalIDs()}
 }
 func (d ScenarioDraft) VersionInput(method string) scenario.VersionInput {
 	d = NewSanitizer().SanitizeDraft(d, nil)

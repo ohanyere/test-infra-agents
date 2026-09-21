@@ -1,9 +1,9 @@
 package agentgateway
 
 import (
-	"slices"
 	"strings"
 
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
 	"github.com/evalplane/evalplane/backend/internal/telemetry"
 )
@@ -13,21 +13,22 @@ import (
 // deliberately excluded because they may reveal evaluator-only execution inputs.
 func ProjectObservation(obs Observation, allowed []string) Observation {
 	out := Observation{Timestamp: obs.Timestamp, Metrics: map[string]any{}, RecentEvents: []RecentEvent{}}
-	if slices.Contains(allowed, "kubernetes_workloads") {
+	resolved := observablecatalog.Resolve(allowed)
+	if resolved[observablecatalog.Workloads] {
 		for _, workload := range obs.Workloads {
 			if workload.Name != telemetry.DeploymentName {
 				out.Workloads = append(out.Workloads, workload)
 			}
 		}
 	}
-	if slices.Contains(allowed, "kubernetes_pods") || slices.Contains(allowed, "pods") {
+	if resolved[observablecatalog.Pods] {
 		for _, pod := range obs.Pods {
 			if !strings.HasPrefix(pod.Name, scenariorunner.TrafficJobName+"-") && !strings.HasPrefix(pod.Name, telemetry.DeploymentName+"-") {
 				out.Pods = append(out.Pods, pod)
 			}
 		}
 	}
-	if slices.Contains(allowed, "kubernetes_events") || slices.Contains(allowed, "events") {
+	if resolved[observablecatalog.Events] {
 		for _, event := range obs.RecentEvents {
 			if strings.HasPrefix(event.InvolvedObjectName, scenariorunner.TrafficJobName) || strings.HasPrefix(event.InvolvedObjectName, telemetry.DeploymentName) {
 				continue
@@ -39,10 +40,10 @@ func ProjectObservation(obs Observation, allowed []string) Observation {
 	if available, ok := obs.Metrics["telemetry_available"]; ok {
 		out.Metrics["telemetry_available"] = available
 	}
-	for key, alias := range map[string]string{"request_rate_rps": "request_rate", "error_rate_pct": "error_rate", "p95_latency_ms": "p95_latency", "availability_pct": "availability"} {
-		if slices.Contains(allowed, key) || slices.Contains(allowed, alias) {
-			if value, ok := obs.Metrics[key]; ok {
-				out.Metrics[key] = value
+	for _, definition := range observablecatalog.Definitions() {
+		if definition.MetricKey != "" && resolved[definition.ID] {
+			if value, ok := obs.Metrics[definition.MetricKey]; ok {
+				out.Metrics[definition.MetricKey] = value
 			}
 		}
 	}

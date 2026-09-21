@@ -4,7 +4,7 @@ import { ProductNavigation } from "../site-navigation";
 import styles from "./agents.module.css";
 
 export const metadata: Metadata = {
-  title: "Infrastructure Agents — Evalplane",
+  title: "Infrastructure Agents — Realverax",
   description: "Connect exact infrastructure agent versions and inspect their verification evidence.",
 };
 

@@ -98,6 +98,6 @@ func (h capabilityCatalogHandlers) listClaims(w http.ResponseWriter, r *http.Req
 		"contract":           competency.ContractVersion,
 		"claim_status":       competency.ClaimStatusClaimed,
 		"items":              items,
-		"qualification_note": "Claims are not qualifications. Evalplane must test them before they become qualified.",
+		"qualification_note": "Claims are not qualifications. Realverax must test them before they become qualified.",
 	})
 }

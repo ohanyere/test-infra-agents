@@ -18,7 +18,7 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Evalplane — Independent infrastructure agent verification",
+  title: "Realverax — Independent infrastructure agent verification",
   description:
     "Inspect what infrastructure agents change and independently verify outcomes, side effects, stability, and evidence-backed forward risk.",
 };

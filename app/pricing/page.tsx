@@ -3,7 +3,7 @@ import { PublicNavigation } from "../site-navigation";
 import styles from "./pricing.module.css";
 
 export const metadata: Metadata = {
-  title: "Pricing — Evalplane",
+  title: "Pricing — Realverax",
   description: "Qualification plans and evaluation credits for infrastructure agents.",
 };
 

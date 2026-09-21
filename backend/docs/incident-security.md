@@ -1,6 +1,6 @@
 # Incident security boundary
 
-Evalplane scenario authoring accepts bounded `.yaml`, `.yml`, `.json`, `.txt`,
+Realverax scenario authoring accepts bounded `.yaml`, `.yml`, `.json`, `.txt`,
 `.log`, and `.md` incident inputs. Before any external AI provider is called,
 the server parses supported structured files and applies the deterministic
 `incident-redaction:v1` contract.

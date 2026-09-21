@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 )
 
 type Criterion struct {
@@ -101,7 +102,7 @@ type EvaluatorSpec struct {
 }
 
 func (v Version) AgentView() AgentView {
-	return AgentView{Task: v.AgentTask, VisibleContext: cloneJSON(v.AgentVisibleContext, `{}`), AllowedObservations: append([]string(nil), v.Observables...), AllowedActions: append([]string(nil), v.AllowedActions...), AllowedResources: cloneJSON(v.AllowedResources, `[]`)}
+	return AgentView{Task: v.AgentTask, VisibleContext: cloneJSON(v.AgentVisibleContext, `{}`), AllowedObservations: observablecatalog.KnownOnly(v.Observables), AllowedActions: append([]string(nil), v.AllowedActions...), AllowedResources: cloneJSON(v.AllowedResources, `[]`)}
 }
 func cloneJSON(value json.RawMessage, fallback string) json.RawMessage {
 	if len(value) == 0 {

@@ -31,6 +31,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/gitops"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
@@ -180,6 +181,14 @@ func (r *runtime) Cleanup(ctx context.Context, id kubeenv.RunIdentity) error {
 const executionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"stages":[{"target":4,"duration_seconds":30},{"target":12,"duration_seconds":30},{"target":12,"duration_seconds":110}]}}`
 const task = "Checkout service health is degrading under increasing demand. Investigate and restore a healthy operating state using only the permitted actions."
 const gitopsTask = "Recover checkout after the failed deployment. Restore a healthy operating state using only the permitted actions."
+
+func qualificationObservables() []string {
+	return []string{
+		string(observablecatalog.Workloads), string(observablecatalog.Pods),
+		string(observablecatalog.RequestRate), string(observablecatalog.ErrorRate),
+		string(observablecatalog.P95Latency), string(observablecatalog.Availability),
+	}
+}
 
 func calibration(ctx context.Context, r *runtime, client kubernetes.Interface) error {
 	id := kubeenv.RunIdentity{RunID: "11111111-1111-4111-8111-111111111117", WorkspaceID: "22222222-2222-4222-8222-222222222217", BatchID: "33333333-3333-4333-8333-333333333317"}
@@ -365,7 +374,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	}
 	completeStage()
 	startStage("qualification_scenario")
-	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: scenarioName, Slug: scenarioSlug, InitialVersion: scenario.VersionInput{Description: description, Category: category, Difficulty: "easy", DurationSeconds: 170, AgentTask: agentTask, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: allowedActions, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: []string{"kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(executionSpec), Criteria: criteria}})
+	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: scenarioName, Slug: scenarioSlug, InitialVersion: scenario.VersionInput{Description: description, Category: category, Difficulty: "easy", DurationSeconds: 170, AgentTask: agentTask, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: allowedActions, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: qualificationObservables(), ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(executionSpec), Criteria: criteria}})
 	if err != nil {
 		return err
 	}
