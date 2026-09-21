@@ -134,6 +134,8 @@ type Dependencies struct {
 	Environments RunEnvironments
 	// OnError receives sanitized classification only, never arbitrary remote errors.
 	OnError func(runID string, err error)
+	// OnStage reports coarse execution boundaries without exposing run data.
+	OnStage func(stage, status string)
 }
 
 var ErrStopped = errors.New("run stopped")

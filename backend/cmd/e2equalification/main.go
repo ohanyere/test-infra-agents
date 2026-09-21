@@ -45,6 +45,9 @@ import (
 func emit(kind string, value any) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"kind": kind, "value": value})
 }
+func emitStage(stage, status string) {
+	emit("qualification_stage", map[string]string{"stage": stage, "status": status})
+}
 func check(err error) {
 	if err != nil {
 		panic(err)
@@ -77,34 +80,36 @@ const argoApplication = "checkout-gitops-proof"
 var argoApplications = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
 
 func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContext, version scenario.Version, hidden execution.HiddenVariant) error {
+	emitStage("reference_workload_and_telemetry", "started")
 	if err := r.KubernetesRuntime.Prepare(ctx, env, version, hidden); err != nil {
 		return err
 	}
+	emitStage("reference_workload_and_telemetry", "completed")
 	if !r.argoEnabled {
 		return nil
 	}
+	emitStage("initial_desired_live_convergence", "started")
 	params := []any{}
 	for name, value := range map[string]string{"runID": env.Identity.RunID, "batchID": env.Identity.BatchID, "workspaceID": env.Identity.WorkspaceID} {
 		params = append(params, map[string]any{"name": name, "value": value, "forceString": true})
 	}
 	app := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "argoproj.io/v1alpha1", "kind": "Application", "metadata": map[string]any{"name": argoApplication, "namespace": argoNamespace}, "spec": map[string]any{"project": "default", "source": map[string]any{"repoURL": r.gitRepo, "targetRevision": r.gitRevision, "path": "chart", "helm": map[string]any{"parameters": params}}, "destination": map[string]any{"server": "https://kubernetes.default.svc", "namespace": env.Environment.Namespace}, "syncPolicy": map[string]any{"automated": map[string]any{"prune": false, "selfHeal": false}, "syncOptions": []any{"CreateNamespace=false"}}}}}
-	if _, err := r.dynamic.Resource(argoApplications).Namespace(argoNamespace).Create(ctx, app, metav1.CreateOptions{}); err != nil {
+	syncCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	if _, err := r.dynamic.Resource(argoApplications).Namespace(argoNamespace).Create(syncCtx, app, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create Argo application: %w", err)
 	}
-	deadline := time.NewTimer(3 * time.Minute)
-	defer deadline.Stop()
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
-		state, err := (gitops.ArgoReader{Client: r.dynamic, Namespace: argoNamespace, Application: argoApplication}).Read(ctx)
+		state, err := (gitops.ArgoReader{Client: r.dynamic, Namespace: argoNamespace, Application: argoApplication}).Read(syncCtx)
 		if err == nil && state.SyncStatus == "Synced" {
+			emitStage("initial_desired_live_convergence", "completed")
 			return nil
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return errors.New("Argo application did not become Synced")
+		case <-syncCtx.Done():
+			return fmt.Errorf("Argo application did not become Synced: %w", syncCtx.Err())
 		case <-tick.C:
 		}
 	}
@@ -263,6 +268,7 @@ func (s sink) UpdateAgentAction(ctx context.Context, in evidence.UpdateActionInp
 }
 
 func qualification(ctx context.Context, r *runtime, client kubernetes.Interface) error {
+	emitStage("qualification_setup", "started")
 	agentTask := task
 	allowedActions := []string{"inspect", "scale_workload", "no_op"}
 	scenarioName, scenarioSlug := "Checkout traffic saturation", "checkout-traffic-saturation"
@@ -288,7 +294,20 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	if err != nil {
 		return errors.New("database unavailable")
 	}
-	defer pool.Close()
+	defer func() {
+		emitStage("database_pool_close", "started")
+		closed := make(chan struct{})
+		go func() {
+			pool.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+			emitStage("database_pool_close", "completed")
+		case <-time.After(5 * time.Second):
+			emitStage("database_pool_close", "timed_out")
+		}
+	}()
 	ids := identity.NewRepository()
 	authService, err := auth.NewService(pool, auth.NewRepository(), ids, 24*time.Hour, auth.DefaultPasswordParams)
 	if err != nil {
@@ -338,7 +357,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	record := &capture{version: av.LatestVersion.ID}
 	cfg.MaxAgentSteps = 30
 	cfg.StepInterval = 5 * time.Second
-	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actions, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
+	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actions, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), OnStage: emitStage, Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
 		if workspace != ws.ID || version.ID != av.LatestVersion.ID {
 			return agentgateway.Connection{}, errors.New("connection pin mismatch")
 		}
@@ -347,8 +366,16 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	if err != nil {
 		return err
 	}
+	emitStage("qualification_setup", "completed")
+	emitStage("worker_execution", "started")
 	execErr := w.ExecuteRun(ctx, run)
+	if execErr != nil {
+		emitStage("worker_execution", "failed")
+	} else {
+		emitStage("worker_execution", "completed")
+	}
 	emit("worker_error", fmt.Sprint(execErr))
+	emitStage("persisted_proof_fetch", "started")
 	final, done := context.WithTimeout(context.Background(), 30*time.Second)
 	defer done()
 	input, err := evaluator.NewRepository(pool).LoadEvaluationInput(final, ws.ID, run.RunID)
@@ -366,6 +393,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		return err
 	}
 	emit("persisted_verification", verificationResult)
+	emitStage("persisted_proof_fetch", "completed")
 	emit("gateway_boundary", map[string]any{"requests": record.count, "checked": true})
 	if execErr != nil {
 		return execErr
@@ -373,6 +401,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	if record.count == 0 {
 		return errors.New("gateway not invoked")
 	}
+	emitStage("qualification_proof", "completed")
 	return nil
 }
 
@@ -415,9 +444,15 @@ func run() (err error) {
 	agentCtx, stopAgent := context.WithCancel(ctx)
 	defer stopAgent()
 	cmd := exec.CommandContext(agentCtx, "/app/referenceagent")
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stderr = os.Stderr
 	check(cmd.Start())
-	defer func() { stopAgent(); _ = cmd.Wait() }()
+	defer func() {
+		emitStage("reference_agent_shutdown", "started")
+		stopAgent()
+		_ = cmd.Wait()
+		emitStage("reference_agent_shutdown", "completed")
+	}()
 	if err = pause(ctx, time.Second); err != nil {
 		return err
 	}
@@ -428,4 +463,5 @@ func main() {
 		emit("harness_error", strings.TrimSpace(err.Error()))
 		os.Exit(1)
 	}
+	emitStage("process_exit", "completed")
 }

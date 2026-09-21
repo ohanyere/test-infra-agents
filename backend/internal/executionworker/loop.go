@@ -161,9 +161,11 @@ func (w *Worker) agentLoop(ctx context.Context, run execution.ExecutionRun, env 
 				return err
 			}
 		}
+		w.stage("immediate_outcome_and_post_action_snapshot", "started")
 		if err = w.observe(ctx, env, "post_action_observation_collected"); err != nil {
 			return platform("observation_failed", err)
 		}
+		w.stage("immediate_outcome_and_post_action_snapshot", "completed")
 		if err = w.event(ctx, run.RunID, "system", "agent_step_completed", map[string]any{"step": step}); err != nil {
 			return err
 		}
@@ -240,12 +242,18 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 		defer cancel()
 		return errors.Join(err, w.persistAction(final, run.RunID, row.ID, actionexec.ActionResult{Status: "failed", Authorized: true, Code: "action_cancelled"}))
 	}
+	w.stage("action_execution", "started")
 	result := w.deps.Actions.ExecuteAction(ctx, env, action)
 	// Persist the outcome even when a cancellation races with a Kubernetes request.
 	final, cancel := context.WithTimeout(context.Background(), w.config.FinalizeTimeout)
 	defer cancel()
 	if err = w.persistAction(final, run.RunID, row.ID, result); err != nil {
 		return err
+	}
+	if result.Status == "failed" {
+		w.stage("action_execution", "failed")
+	} else {
+		w.stage("action_execution", "completed")
 	}
 	if result.Status == "failed" {
 		return platform("action_execution_failed", errors.New("controlled action failed"))

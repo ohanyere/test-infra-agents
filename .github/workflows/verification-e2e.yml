@@ -386,9 +386,71 @@ jobs:
       - name: Run and assert authoritative verification
         run: |
           set -euo pipefail
+          collect_qualification_diagnostics() {
+            timeout 30s kubectl -n evalplane-e2e-harness get pod qualification -o yaml > "$ARTIFACT_DIR/qualification-pod.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness describe pod qualification > "$ARTIFACT_DIR/qualification-pod-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs qualification --all-containers=true > "$ARTIFACT_DIR/qualification.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs qualification --all-containers=true --previous > "$ARTIFACT_DIR/qualification-previous.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/qualification-namespace-events.txt" 2>&1 || true
+            timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/qualification-all-pods-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get applications -o wide > "$ARTIFACT_DIR/qualification-argo-applications-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get applications -o yaml > "$ARTIFACT_DIR/qualification-argo-applications.yaml" 2>&1 || true
+            timeout 30s kubectl get deployments -A -o wide > "$ARTIFACT_DIR/qualification-all-deployments-wide.txt" 2>&1 || true
+            timeout 30s kubectl get pods -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,WAITING:.status.containerStatuses[*].state.waiting.reason' > "$ARTIFACT_DIR/qualification-all-pods-status.txt" 2>&1 || true
+            echo "Qualification stage progress:" >&2
+            jq -Rrc 'fromjson? | select(.kind == "qualification_stage")' "$ARTIFACT_DIR/qualification.log" >&2 || true
+          }
           kubectl apply -f backend/e2e/qualification.yaml
-          kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/qualification --timeout=180s
-          kubectl wait -n evalplane-e2e-harness --for=jsonpath='{.status.phase}'=Succeeded pod/qualification --timeout=720s
+          if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/qualification --timeout=180s; then
+            echo "Qualification pod did not become Ready" >&2
+            collect_qualification_diagnostics
+            exit 1
+          fi
+          qualification_deadline=$((SECONDS + 720))
+          qualification_phase=""
+          qualification_last_phase=""
+          qualification_succeeded=false
+          while (( SECONDS < qualification_deadline )); do
+            if ! qualification_phase="$(kubectl -n evalplane-e2e-harness get pod qualification -o jsonpath='{.status.phase}')"; then
+              echo "Could not read qualification pod phase" >&2
+              collect_qualification_diagnostics
+              exit 1
+            fi
+            if [[ "$qualification_phase" != "$qualification_last_phase" ]]; then
+              echo "Qualification pod phase: ${qualification_phase:-empty}"
+              qualification_last_phase="$qualification_phase"
+            fi
+            case "$qualification_phase" in
+              Succeeded)
+                qualification_succeeded=true
+                echo "Qualification terminal phase: Succeeded"
+                break
+                ;;
+              Failed)
+                echo "Qualification terminal phase: Failed" >&2
+                collect_qualification_diagnostics
+                exit 1
+                ;;
+              Unknown)
+                echo "Qualification pod phase: Unknown" >&2
+                collect_qualification_diagnostics
+                exit 1
+                ;;
+              Running|Pending|"")
+                ;;
+              *)
+                echo "Unexpected qualification pod phase: $qualification_phase" >&2
+                collect_qualification_diagnostics
+                exit 1
+                ;;
+            esac
+            sleep 2
+          done
+          if [[ "$qualification_succeeded" != true ]]; then
+            echo "Timed out after 720 seconds waiting for qualification to succeed; last phase: ${qualification_phase:-empty}" >&2
+            collect_qualification_diagnostics
+            exit 1
+          fi
           kubectl logs -n evalplane-e2e-harness qualification > "$ARTIFACT_DIR/qualification.log"
           jq -Rc 'fromjson? | select(.kind == "persisted_verification") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$ARTIFACT_DIR/verification-result.json"
           jq -e '
@@ -481,7 +543,7 @@ jobs:
             timeout 30s kubectl logs -n kube-system "$pod" --tail=200 > "$ARTIFACT_DIR/${component}.log" 2>&1
           done
           timeout 30s kubectl logs -n evalplane-e2e-harness calibration --tail=300 > "$ARTIFACT_DIR/calibration.log" 2>&1
-          timeout 30s kubectl logs -n evalplane-e2e-harness qualification --tail=500 > "$ARTIFACT_DIR/qualification.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification --tail=500 > "$ARTIFACT_DIR/qualification-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness deployment/git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1
           timeout 30s kubectl logs -n argocd statefulset/argocd-application-controller --tail=300 > "$ARTIFACT_DIR/argocd-controller.log" 2>&1
 
