@@ -395,10 +395,19 @@ jobs:
             timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/qualification-all-pods-wide.txt" 2>&1 || true
             timeout 30s kubectl -n argocd get applications -o wide > "$ARTIFACT_DIR/qualification-argo-applications-wide.txt" 2>&1 || true
             timeout 30s kubectl -n argocd get applications -o yaml > "$ARTIFACT_DIR/qualification-argo-applications.yaml" 2>&1 || true
+            timeout 30s kubectl -n argocd logs statefulset/argocd-application-controller --tail=200 > "$ARTIFACT_DIR/qualification-argo-controller.log" 2>&1 || true
+            timeout 30s kubectl -n argocd logs deployment/argocd-repo-server --tail=200 > "$ARTIFACT_DIR/qualification-argo-repo-server.log" 2>&1 || true
+            run_namespace="$(timeout 10s kubectl -n argocd get application checkout-gitops-proof -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)"
+            if [[ "$run_namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+              printf '%s\n' "$run_namespace" > "$ARTIFACT_DIR/qualification-run-namespace.txt"
+              timeout 30s kubectl -n "$run_namespace" get deployment eval-reference-app -o yaml > "$ARTIFACT_DIR/qualification-target-deployment.yaml" 2>&1 || true
+              timeout 30s kubectl -n "$run_namespace" describe deployment eval-reference-app > "$ARTIFACT_DIR/qualification-target-deployment-describe.txt" 2>&1 || true
+              timeout 30s kubectl -n "$run_namespace" get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/qualification-target-events.txt" 2>&1 || true
+            fi
             timeout 30s kubectl get deployments -A -o wide > "$ARTIFACT_DIR/qualification-all-deployments-wide.txt" 2>&1 || true
             timeout 30s kubectl get pods -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,WAITING:.status.containerStatuses[*].state.waiting.reason' > "$ARTIFACT_DIR/qualification-all-pods-status.txt" 2>&1 || true
             echo "Qualification stage progress and failure:" >&2
-            jq -Rrc 'fromjson? | select(.kind == "qualification_stage" or .kind == "qualification_failure")' "$ARTIFACT_DIR/qualification.log" >&2 || true
+            jq -Rrc 'fromjson? | select(.kind == "qualification_stage" or .kind == "qualification_failure" or .kind == "worker_failure" or .kind == "persistence_failure")' "$ARTIFACT_DIR/qualification.log" >&2 || true
           }
           kubectl apply -f backend/e2e/qualification.yaml
           if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/qualification --timeout=180s; then
@@ -546,6 +555,7 @@ jobs:
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification --tail=500 > "$ARTIFACT_DIR/qualification-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness deployment/git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1
           timeout 30s kubectl logs -n argocd statefulset/argocd-application-controller --tail=300 > "$ARTIFACT_DIR/argocd-controller.log" 2>&1
+          timeout 30s kubectl logs -n argocd deployment/argocd-repo-server --tail=200 > "$ARTIFACT_DIR/argocd-repo-server.log" 2>&1
 
       - name: Cleanup disposable runtime
         if: always()

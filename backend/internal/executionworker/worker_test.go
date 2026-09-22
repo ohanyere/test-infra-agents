@@ -551,6 +551,55 @@ func TestProvisionFailureClassifiedAndCleanupPreservesPrimary(t *testing.T) {
 		}
 	}
 }
+func TestPrimaryFailureReportedBeforeSuccessfulFailurePersistence(t *testing.T) {
+	f := newFixture()
+	primary := errors.New("initial convergence unavailable")
+	f.provisionErr = &StageFailure{Stage: "initial_desired_live_convergence", Err: primary}
+	w := f.worker(t, testConfig())
+	var trace []string
+	w.deps.OnStage = func(stage, status string) { trace = append(trace, stage+":"+status) }
+	w.deps.OnFailure = func(kind, stage string, err error) {
+		if !errors.Is(err, primary) {
+			t.Fatalf("diagnostic lost primary error: %v", err)
+		}
+		trace = append(trace, kind+":"+stage)
+	}
+	err := w.ExecuteRun(context.Background(), f.run)
+	if !errors.Is(err, primary) || f.status != "failed" || f.evaluated != 1 {
+		t.Fatalf("err=%v status=%s evaluated=%d", err, f.status, f.evaluated)
+	}
+	assertOrder(t, trace, "worker_failure:initial_desired_live_convergence", "persistence:started", "persistence:completed", "cleanup:started")
+	for _, item := range trace {
+		if strings.HasPrefix(item, "persistence_failure:") || item == "persistence:failed" {
+			t.Fatalf("primary execution error was mislabeled as persistence failure: %v", trace)
+		}
+	}
+}
+
+func TestPersistenceFailureDoesNotOverwritePrimaryDiagnostic(t *testing.T) {
+	f := newFixture()
+	primary := errors.New("initial convergence unavailable")
+	secondary := errors.New("evaluation store unavailable")
+	f.provisionErr = primary
+	f.evaluationErr = secondary
+	w := f.worker(t, testConfig())
+	var trace []string
+	w.deps.OnStage = func(stage, status string) { trace = append(trace, stage+":"+status) }
+	w.deps.OnFailure = func(kind, stage string, err error) {
+		trace = append(trace, kind+":"+stage)
+		if kind == "worker_failure" && !errors.Is(err, primary) {
+			t.Fatalf("primary diagnostic changed: %v", err)
+		}
+		if kind == "persistence_failure" && !errors.Is(err, secondary) {
+			t.Fatalf("secondary diagnostic changed: %v", err)
+		}
+	}
+	err := w.ExecuteRun(context.Background(), f.run)
+	if !errors.Is(err, primary) || !errors.Is(err, secondary) {
+		t.Fatalf("joined error lost primary or secondary failure: %v", err)
+	}
+	assertOrder(t, trace, "worker_failure:environment_setup", "persistence:started", "persistence_failure:evaluation_or_verification", "persistence:failed")
+}
 func TestCancellationCleansAndStops(t *testing.T) {
 	f := newFixture()
 	f.blockAt = "gateway"

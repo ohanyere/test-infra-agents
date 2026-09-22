@@ -136,7 +136,18 @@ type Dependencies struct {
 	OnError func(runID string, err error)
 	// OnStage reports coarse execution boundaries without exposing run data.
 	OnStage func(stage, status string)
+	// OnFailure is for trusted diagnostics. Callers must redact error details before logging.
+	OnFailure func(kind, stage string, err error)
 }
+
+// StageFailure identifies the operation that failed without changing its error.
+type StageFailure struct {
+	Stage string
+	Err   error
+}
+
+func (e *StageFailure) Error() string { return e.Err.Error() }
+func (e *StageFailure) Unwrap() error { return e.Err }
 
 var ErrStopped = errors.New("run stopped")
 var ErrLeaseLost = errors.New("worker lease lost")

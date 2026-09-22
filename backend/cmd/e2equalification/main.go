@@ -67,6 +67,13 @@ func safeQualificationError(err error) string {
 	}
 	return message
 }
+func diagnosticWorkerError(err error) string {
+	var failure *executionworker.Failure
+	if errors.As(err, &failure) {
+		return failure.Error() + ": " + safeQualificationError(failure.Cause)
+	}
+	return safeQualificationError(err)
+}
 func check(err error) {
 	if err != nil {
 		panic(err)
@@ -108,6 +115,10 @@ func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContex
 		return nil
 	}
 	emitStage("initial_desired_live_convergence", "started")
+	failConvergence := func(err error) error {
+		emitStage("initial_desired_live_convergence", "failed")
+		return &executionworker.StageFailure{Stage: "initial_desired_live_convergence", Err: err}
+	}
 	params := []any{}
 	for name, value := range map[string]string{"runID": env.Identity.RunID, "batchID": env.Identity.BatchID, "workspaceID": env.Identity.WorkspaceID} {
 		params = append(params, map[string]any{"name": name, "value": value, "forceString": true})
@@ -116,19 +127,25 @@ func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContex
 	syncCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	if _, err := r.dynamic.Resource(argoApplications).Namespace(argoNamespace).Create(syncCtx, app, metav1.CreateOptions{}); err != nil {
-		return fmt.Errorf("create Argo application: %w", err)
+		return failConvergence(fmt.Errorf("create Argo application: %w", err))
 	}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
+	lastSync, lastHealth, lastReadError := "Unknown", "Unknown", "none"
 	for {
 		state, err := (gitops.ArgoReader{Client: r.dynamic, Namespace: argoNamespace, Application: argoApplication}).Read(syncCtx)
+		if err != nil {
+			lastReadError = err.Error()
+		} else {
+			lastSync, lastHealth, lastReadError = state.SyncStatus, state.HealthStatus, "none"
+		}
 		if err == nil && state.SyncStatus == "Synced" {
 			emitStage("initial_desired_live_convergence", "completed")
 			return nil
 		}
 		select {
 		case <-syncCtx.Done():
-			return fmt.Errorf("Argo application did not become Synced: %w", syncCtx.Err())
+			return failConvergence(fmt.Errorf("Argo application did not become Synced (sync=%s, health=%s, last_read=%s): %w", lastSync, lastHealth, lastReadError, syncCtx.Err()))
 		case <-tick.C:
 		}
 	}
@@ -159,6 +176,17 @@ func (r *runtime) ObserveGitOps(ctx context.Context, env observation.Environment
 
 func (r *runtime) Cleanup(ctx context.Context, id kubeenv.RunIdentity) error {
 	ns, _ := kubeenv.NamespaceForRun(id.RunID)
+	if deployment, err := r.client.AppsV1().Deployments(ns).Get(ctx, scenariorunner.ReferenceDeploymentName, metav1.GetOptions{}); err == nil {
+		conditions := make([]map[string]string, 0, len(deployment.Status.Conditions))
+		for _, condition := range deployment.Status.Conditions {
+			conditions = append(conditions, map[string]string{"type": string(condition.Type), "status": string(condition.Status), "reason": condition.Reason})
+		}
+		images := make([]string, 0, len(deployment.Spec.Template.Spec.Containers))
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			images = append(images, container.Image)
+		}
+		emit("pre_cleanup_workload", map[string]any{"namespace": ns, "deployment": deployment.Name, "images": images, "desired_replicas": deployment.Spec.Replicas, "ready_replicas": deployment.Status.ReadyReplicas, "available_replicas": deployment.Status.AvailableReplicas, "conditions": conditions})
+	}
 	pods, err := r.client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err == nil {
 		emit("pre_cleanup_pods", pods)
@@ -415,7 +443,9 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	record := &capture{version: av.LatestVersion.ID}
 	cfg.MaxAgentSteps = 30
 	cfg.StepInterval = 5 * time.Second
-	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actions, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), OnStage: emitStage, Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
+	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actions, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), OnStage: emitStage, OnFailure: func(kind, failureStage string, failureErr error) {
+		emit(kind, map[string]string{"stage": failureStage, "error": diagnosticWorkerError(failureErr)})
+	}, Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
 		if workspace != ws.ID || version.ID != av.LatestVersion.ID {
 			return agentgateway.Connection{}, errors.New("connection pin mismatch")
 		}
@@ -433,7 +463,10 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	} else {
 		completeStage()
 	}
-	emit("worker_error", fmt.Sprint(execErr))
+	if execErr != nil {
+		emit("worker_error", diagnosticWorkerError(execErr))
+		return execErr
+	}
 	startStage("persisted_proof_fetch")
 	final, done := context.WithTimeout(context.Background(), 30*time.Second)
 	defer done()
@@ -454,10 +487,6 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	emit("persisted_verification", verificationResult)
 	completeStage()
 	emit("gateway_boundary", map[string]any{"requests": record.count, "checked": true})
-	if execErr != nil {
-		stage = "worker_execution"
-		return execErr
-	}
 	if record.count == 0 {
 		stage = "qualification_proof"
 		return errors.New("gateway not invoked")
