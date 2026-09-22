@@ -153,10 +153,83 @@ func (r *runtime) convergeGitOps(ctx context.Context, env observation.Environmen
 		}
 		select {
 		case <-syncCtx.Done():
-			return failConvergence(fmt.Errorf("Argo application did not become Synced (successful_reads=%d, failed_reads=%d, last_read_result=%s, sync=%s, health=%s, last_read_error=%q): %w", successfulReads, failedReads, lastReadResult, lastSync, lastHealth, lastReadError, syncCtx.Err()))
+			return failConvergence(fmt.Errorf("Argo application did not become Synced (successful_reads=%d, failed_reads=%d, last_read_result=%s, sync=%s, health=%s, last_read_error=%q, argo_status=%s): %w", successfulReads, failedReads, lastReadResult, lastSync, lastHealth, lastReadError, r.argoConvergenceStatus(ctx), syncCtx.Err()))
 		case <-tick.C:
 		}
 	}
+}
+
+// argoConvergenceStatus makes an unset controller status distinguishable from a
+// comparison or manifest-generation error. The convergence context has expired
+// by the time this runs, so this diagnostic read gets its own short deadline.
+func (r *runtime) argoConvergenceStatus(ctx context.Context) string {
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	app, err := r.dynamic.Resource(argoApplications).Namespace(argoNamespace).Get(readCtx, argoApplication, metav1.GetOptions{})
+	if err != nil {
+		return `{"read_error":` + quotedDiagnostic(safeQualificationError(err)) + `}`
+	}
+	field := func(path ...string) string {
+		value, found, err := unstructured.NestedString(app.Object, path...)
+		if err != nil {
+			return "invalid"
+		}
+		if !found {
+			return "absent"
+		}
+		if value == "" {
+			return "empty"
+		}
+		return value
+	}
+	conditions := make([]map[string]string, 0)
+	items, found, err := unstructured.NestedSlice(app.Object, "status", "conditions")
+	if err == nil && found {
+		for _, item := range items {
+			condition, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if len(conditions) == 4 {
+				break
+			}
+			message, _ := condition["message"].(string)
+			message = safeQualificationError(errors.New(message))
+			message = strings.Map(func(r rune) rune {
+				if r < 32 || r == 127 {
+					return ' '
+				}
+				return r
+			}, message)
+			if len(message) > 300 {
+				message = message[:300] + "..."
+			}
+			conditionType, _ := condition["type"].(string)
+			conditions = append(conditions, map[string]string{"type": conditionType, "message": message})
+		}
+	}
+	resources, resourcesFound, _ := unstructured.NestedSlice(app.Object, "status", "resources")
+	resourceCount := "absent"
+	if resourcesFound {
+		resourceCount = fmt.Sprint(len(resources))
+	}
+	status := map[string]any{
+		"generation": app.GetGeneration(), "resource_version": app.GetResourceVersion(),
+		"reconciled_at":   field("status", "reconciledAt"),
+		"sync_field":      field("status", "sync", "status"),
+		"health_field":    field("status", "health", "status"),
+		"sync_revision":   field("status", "sync", "revision"),
+		"operation_phase": field("status", "operationState", "phase"),
+		"source_type":     field("status", "sourceType"),
+		"resource_count":  resourceCount, "conditions": conditions,
+	}
+	encoded, _ := json.Marshal(status)
+	return string(encoded)
+}
+
+func quotedDiagnostic(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 func (r *runtime) ObserveGitOps(ctx context.Context, env observation.EnvironmentContext) (gitops.Evidence, error) {

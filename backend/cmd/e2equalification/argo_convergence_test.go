@@ -11,6 +11,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
@@ -61,5 +62,39 @@ func TestConvergenceReturnsApplicationCreateErrorImmediately(t *testing.T) {
 	err := r.convergeGitOps(context.Background(), convergenceTestEnvironment())
 	if err == nil || !strings.Contains(err.Error(), "create Argo application") || !apierrors.IsForbidden(err) {
 		t.Fatalf("Application create error was not returned immediately: %v", err)
+	}
+}
+
+func TestArgoConvergenceStatusDistinguishesUnreconciledAndComparisonError(t *testing.T) {
+	app := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+		"metadata": map[string]any{"name": argoApplication, "namespace": argoNamespace, "resourceVersion": "7", "generation": int64(1)},
+	}}
+	client := fake.NewSimpleDynamicClient(k8sruntime.NewScheme(), app)
+	r := &runtime{dynamic: client}
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	unreconciled := r.argoConvergenceStatus(expired)
+	for _, want := range []string{`"reconciled_at":"absent"`, `"sync_field":"absent"`, `"health_field":"absent"`, `"resource_count":"absent"`} {
+		if !strings.Contains(unreconciled, want) {
+			t.Fatalf("unreconciled status %q lacks %q", unreconciled, want)
+		}
+	}
+	app.Object["status"] = map[string]any{
+		"reconciledAt":   "2026-09-22T00:00:00Z",
+		"sync":           map[string]any{"status": "Unknown", "revision": "abc123"},
+		"health":         map[string]any{"status": "Unknown"},
+		"operationState": map[string]any{"phase": "Error"},
+		"resources":      []any{},
+		"conditions":     []any{map[string]any{"type": "ComparisonError", "message": "repository unavailable"}},
+	}
+	if _, err := client.Resource(argoApplications).Namespace(argoNamespace).Update(context.Background(), app, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	reconciled := r.argoConvergenceStatus(context.Background())
+	for _, want := range []string{`"reconciled_at":"2026-09-22T00:00:00Z"`, `"sync_field":"Unknown"`, `"type":"ComparisonError"`, `"message":"repository unavailable"`, `"operation_phase":"Error"`, `"resource_count":"0"`} {
+		if !strings.Contains(reconciled, want) {
+			t.Fatalf("reconciled status %q lacks %q", reconciled, want)
+		}
 	}
 }
