@@ -213,6 +213,8 @@ jobs:
           kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
           kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=300s
           kubectl -n argocd rollout status deployment/argocd-redis --timeout=300s
+          kubectl apply -f backend/e2e/argocd-project.yaml
+          kubectl -n argocd get appproject evalplane-e2e
 
       - name: Run calibration environment gate
         run: |
@@ -317,6 +319,7 @@ jobs:
       - name: Configure qualification inputs
         run: |
           set -euo pipefail
+          kubectl -n argocd get appproject evalplane-e2e
           if ! docker exec evalplane-e2e-control-plane crictl images | grep -F 'evalplane-git-fixture' | grep -F 'e2e'; then
             echo "Git fixture image is unavailable in the Kind node" >&2
             exit 1
@@ -395,6 +398,7 @@ jobs:
             timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/qualification-all-pods-wide.txt" 2>&1 || true
             timeout 30s kubectl -n argocd get applications -o wide > "$ARTIFACT_DIR/qualification-argo-applications-wide.txt" 2>&1 || true
             timeout 30s kubectl -n argocd get applications -o yaml > "$ARTIFACT_DIR/qualification-argo-applications.yaml" 2>&1 || true
+            timeout 30s kubectl -n argocd get appprojects -o yaml > "$ARTIFACT_DIR/qualification-argo-appprojects.yaml" 2>&1 || true
             timeout 30s kubectl -n argocd logs statefulset/argocd-application-controller --tail=200 > "$ARTIFACT_DIR/qualification-argo-controller.log" 2>&1 || true
             timeout 30s kubectl -n argocd logs deployment/argocd-repo-server --tail=200 > "$ARTIFACT_DIR/qualification-argo-repo-server.log" 2>&1 || true
             run_namespace="$(timeout 10s kubectl -n argocd get application checkout-gitops-proof -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)"

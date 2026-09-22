@@ -1,0 +1,14 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: evalplane-e2e
+  namespace: argocd
+spec:
+  sourceRepos:
+    - git://git-fixture.evalplane-e2e-harness.svc/repo.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: eval-*
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment

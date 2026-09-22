@@ -102,6 +102,7 @@ type runtime struct {
 
 const argoNamespace = "argocd"
 const argoApplication = "checkout-gitops-proof"
+const argoProject = "evalplane-e2e"
 
 var argoApplications = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
 
@@ -123,11 +124,7 @@ func (r *runtime) convergeGitOps(ctx context.Context, env observation.Environmen
 		emitStage("initial_desired_live_convergence", "failed")
 		return &executionworker.StageFailure{Stage: "initial_desired_live_convergence", Err: err}
 	}
-	params := []any{}
-	for name, value := range map[string]string{"runID": env.Identity.RunID, "batchID": env.Identity.BatchID, "workspaceID": env.Identity.WorkspaceID} {
-		params = append(params, map[string]any{"name": name, "value": value, "forceString": true})
-	}
-	app := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "argoproj.io/v1alpha1", "kind": "Application", "metadata": map[string]any{"name": argoApplication, "namespace": argoNamespace}, "spec": map[string]any{"project": "default", "source": map[string]any{"repoURL": r.gitRepo, "targetRevision": r.gitRevision, "path": "chart", "helm": map[string]any{"parameters": params}}, "destination": map[string]any{"server": "https://kubernetes.default.svc", "namespace": env.Environment.Namespace}, "syncPolicy": map[string]any{"automated": map[string]any{"prune": false, "selfHeal": false}, "syncOptions": []any{"CreateNamespace=false"}}}}}
+	app := r.qualificationArgoApplication(env)
 	syncCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	if _, err := r.dynamic.Resource(argoApplications).Namespace(argoNamespace).Create(syncCtx, app, metav1.CreateOptions{}); err != nil {
@@ -157,6 +154,14 @@ func (r *runtime) convergeGitOps(ctx context.Context, env observation.Environmen
 		case <-tick.C:
 		}
 	}
+}
+
+func (r *runtime) qualificationArgoApplication(env observation.EnvironmentContext) *unstructured.Unstructured {
+	params := []any{}
+	for name, value := range map[string]string{"runID": env.Identity.RunID, "batchID": env.Identity.BatchID, "workspaceID": env.Identity.WorkspaceID} {
+		params = append(params, map[string]any{"name": name, "value": value, "forceString": true})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{"apiVersion": "argoproj.io/v1alpha1", "kind": "Application", "metadata": map[string]any{"name": argoApplication, "namespace": argoNamespace}, "spec": map[string]any{"project": argoProject, "source": map[string]any{"repoURL": r.gitRepo, "targetRevision": r.gitRevision, "path": "chart", "helm": map[string]any{"parameters": params}}, "destination": map[string]any{"server": "https://kubernetes.default.svc", "namespace": env.Environment.Namespace}, "syncPolicy": map[string]any{"automated": map[string]any{"prune": false, "selfHeal": false}, "syncOptions": []any{"CreateNamespace=false"}}}}}
 }
 
 // argoConvergenceStatus makes an unset controller status distinguishable from a

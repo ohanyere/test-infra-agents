@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/observation"
+	"gopkg.in/yaml.v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,7 +24,7 @@ import (
 func convergenceTestEnvironment() observation.EnvironmentContext {
 	return observation.EnvironmentContext{
 		Identity:    kubeenv.RunIdentity{RunID: "11111111-1111-4111-8111-111111111111", BatchID: "22222222-2222-4222-8222-222222222222", WorkspaceID: "33333333-3333-4333-8333-333333333333"},
-		Environment: kubeenv.Environment{Namespace: "test-run"},
+		Environment: kubeenv.Environment{Namespace: "eval-11111111111141118111111111111111"},
 	}
 }
 
@@ -62,6 +65,84 @@ func TestConvergenceReturnsApplicationCreateErrorImmediately(t *testing.T) {
 	err := r.convergeGitOps(context.Background(), convergenceTestEnvironment())
 	if err == nil || !strings.Contains(err.Error(), "create Argo application") || !apierrors.IsForbidden(err) {
 		t.Fatalf("Application create error was not returned immediately: %v", err)
+	}
+}
+
+type appProjectManifest struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"metadata"`
+	Spec struct {
+		SourceRepos  []string `yaml:"sourceRepos"`
+		Destinations []struct {
+			Server    string `yaml:"server"`
+			Namespace string `yaml:"namespace"`
+		} `yaml:"destinations"`
+		NamespaceResourceWhitelist []struct {
+			Group string `yaml:"group"`
+			Kind  string `yaml:"kind"`
+		} `yaml:"namespaceResourceWhitelist"`
+		ClusterResourceWhitelist []any `yaml:"clusterResourceWhitelist"`
+	} `yaml:"spec"`
+}
+
+func loadQualificationAppProject(t *testing.T) appProjectManifest {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "e2e", "argocd-project.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var project appProjectManifest
+	if err := yaml.Unmarshal(raw, &project); err != nil {
+		t.Fatal(err)
+	}
+	return project
+}
+
+func TestQualificationApplicationUsesDedicatedRestrictedProject(t *testing.T) {
+	project := loadQualificationAppProject(t)
+	if project.APIVersion != "argoproj.io/v1alpha1" || project.Kind != "AppProject" || project.Metadata.Name != argoProject || project.Metadata.Namespace != argoNamespace {
+		t.Fatalf("unexpected AppProject identity: %+v", project)
+	}
+	if len(project.Spec.SourceRepos) != 1 || project.Spec.SourceRepos[0] != "git://git-fixture.evalplane-e2e-harness.svc/repo.git" {
+		t.Fatalf("AppProject source repositories are not restricted to the fixture: %v", project.Spec.SourceRepos)
+	}
+	if len(project.Spec.Destinations) != 1 || project.Spec.Destinations[0].Server != "https://kubernetes.default.svc" || project.Spec.Destinations[0].Namespace != "eval-*" {
+		t.Fatalf("AppProject destination is not restricted to qualification namespaces: %+v", project.Spec.Destinations)
+	}
+	if len(project.Spec.NamespaceResourceWhitelist) != 1 || project.Spec.NamespaceResourceWhitelist[0].Group != "apps" || project.Spec.NamespaceResourceWhitelist[0].Kind != "Deployment" || len(project.Spec.ClusterResourceWhitelist) != 0 {
+		t.Fatalf("AppProject resource permissions are broader than the fixture requires: namespace=%+v cluster=%+v", project.Spec.NamespaceResourceWhitelist, project.Spec.ClusterResourceWhitelist)
+	}
+
+	r := &runtime{gitRepo: project.Spec.SourceRepos[0], gitRevision: strings.Repeat("a", 40)}
+	app := r.qualificationArgoApplication(convergenceTestEnvironment())
+	applicationProject, _, _ := unstructured.NestedString(app.Object, "spec", "project")
+	repository, _, _ := unstructured.NestedString(app.Object, "spec", "source", "repoURL")
+	destinationServer, _, _ := unstructured.NestedString(app.Object, "spec", "destination", "server")
+	destinationNamespace, _, _ := unstructured.NestedString(app.Object, "spec", "destination", "namespace")
+	if applicationProject != argoProject || applicationProject == "default" || repository != project.Spec.SourceRepos[0] || destinationServer != project.Spec.Destinations[0].Server || !strings.HasPrefix(destinationNamespace, "eval-") {
+		t.Fatalf("Application does not conform to AppProject: project=%q repo=%q destination=%q", applicationProject, repository, destinationServer)
+	}
+}
+
+func TestWorkflowCreatesAndChecksAppProjectBeforeQualification(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "verification-e2e.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(raw)
+	projectApply := strings.Index(workflow, "kubectl apply -f backend/e2e/argocd-project.yaml")
+	qualificationStep := strings.Index(workflow, "- name: Configure qualification inputs")
+	qualificationPod := strings.Index(workflow, "kubectl apply -f backend/e2e/qualification.yaml")
+	if projectApply < 0 || qualificationStep < 0 || qualificationPod < 0 {
+		t.Fatalf("workflow lacks AppProject setup or qualification step: apply=%d step=%d pod=%d", projectApply, qualificationStep, qualificationPod)
+	}
+	projectCheck := strings.Index(workflow[qualificationStep:], "kubectl -n argocd get appproject "+argoProject)
+	if projectCheck < 0 || projectApply >= qualificationStep || qualificationStep >= qualificationPod {
+		t.Fatalf("workflow does not create and check AppProject before qualification: apply=%d step=%d check=%d pod=%d", projectApply, qualificationStep, projectCheck, qualificationPod)
 	}
 }
 
