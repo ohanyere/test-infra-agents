@@ -3,6 +3,7 @@ package gitops
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -21,11 +22,24 @@ type ArgoReader struct {
 }
 
 func (r ArgoReader) Read(ctx context.Context) (ArgoState, error) {
+	return r.read(ctx, false)
+}
+
+// ReadWithDiagnostics preserves the Kubernetes read error for trusted runtime
+// diagnostics. Read keeps its generic verifier-facing error contract.
+func (r ArgoReader) ReadWithDiagnostics(ctx context.Context) (ArgoState, error) {
+	return r.read(ctx, true)
+}
+
+func (r ArgoReader) read(ctx context.Context, diagnostic bool) (ArgoState, error) {
 	if r.Client == nil || strings.TrimSpace(r.Namespace) == "" || strings.TrimSpace(r.Application) == "" {
 		return ArgoState{}, errors.New("Argo application identity is required")
 	}
 	app, err := r.Client.Resource(applications).Namespace(r.Namespace).Get(ctx, r.Application, metav1.GetOptions{})
 	if err != nil {
+		if diagnostic {
+			return ArgoState{}, fmt.Errorf("get Argo Application %s/%s: %w", r.Namespace, r.Application, err)
+		}
 		return ArgoState{}, errors.New("Argo application evidence unavailable")
 	}
 	now := time.Now

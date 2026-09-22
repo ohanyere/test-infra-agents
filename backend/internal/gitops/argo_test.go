@@ -2,9 +2,11 @@ package gitops
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
@@ -36,8 +38,16 @@ func TestArgoReaderUnknown(t *testing.T) {
 
 func TestArgoReaderUnavailable(t *testing.T) {
 	client := fake.NewSimpleDynamicClient(runtime.NewScheme())
-	_, err := (ArgoReader{Client: client, Namespace: "argocd", Application: "missing"}).Read(context.Background())
+	reader := ArgoReader{Client: client, Namespace: "argocd", Application: "missing"}
+	_, err := reader.Read(context.Background())
 	if err == nil {
 		t.Fatal("missing Application was not inconclusive/unavailable")
+	}
+	if apierrors.IsNotFound(err) {
+		t.Fatal("verifier-facing read unexpectedly exposed the Kubernetes error")
+	}
+	_, err = reader.ReadWithDiagnostics(context.Background())
+	if !apierrors.IsNotFound(err) || !strings.Contains(err.Error(), "argocd/missing") {
+		t.Fatalf("diagnostic read did not preserve NotFound and Application identity: %v", err)
 	}
 }

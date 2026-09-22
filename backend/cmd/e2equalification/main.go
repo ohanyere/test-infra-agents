@@ -114,6 +114,10 @@ func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContex
 	if !r.argoEnabled {
 		return nil
 	}
+	return r.convergeGitOps(ctx, env)
+}
+
+func (r *runtime) convergeGitOps(ctx context.Context, env observation.EnvironmentContext) error {
 	emitStage("initial_desired_live_convergence", "started")
 	failConvergence := func(err error) error {
 		emitStage("initial_desired_live_convergence", "failed")
@@ -131,13 +135,17 @@ func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContex
 	}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
-	lastSync, lastHealth, lastReadError := "Unknown", "Unknown", "none"
+	lastSync, lastHealth, lastReadError, lastReadResult := "Unknown", "Unknown", "none", "never"
+	successfulReads, failedReads := 0, 0
 	for {
-		state, err := (gitops.ArgoReader{Client: r.dynamic, Namespace: argoNamespace, Application: argoApplication}).Read(syncCtx)
+		state, err := (gitops.ArgoReader{Client: r.dynamic, Namespace: argoNamespace, Application: argoApplication}).ReadWithDiagnostics(syncCtx)
 		if err != nil {
-			lastReadError = err.Error()
+			failedReads++
+			lastReadError = safeQualificationError(err)
+			lastReadResult = "error"
 		} else {
-			lastSync, lastHealth, lastReadError = state.SyncStatus, state.HealthStatus, "none"
+			successfulReads++
+			lastSync, lastHealth, lastReadResult = state.SyncStatus, state.HealthStatus, "success"
 		}
 		if err == nil && state.SyncStatus == "Synced" {
 			emitStage("initial_desired_live_convergence", "completed")
@@ -145,7 +153,7 @@ func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContex
 		}
 		select {
 		case <-syncCtx.Done():
-			return failConvergence(fmt.Errorf("Argo application did not become Synced (sync=%s, health=%s, last_read=%s): %w", lastSync, lastHealth, lastReadError, syncCtx.Err()))
+			return failConvergence(fmt.Errorf("Argo application did not become Synced (successful_reads=%d, failed_reads=%d, last_read_result=%s, sync=%s, health=%s, last_read_error=%q): %w", successfulReads, failedReads, lastReadResult, lastSync, lastHealth, lastReadError, syncCtx.Err()))
 		case <-tick.C:
 		}
 	}
