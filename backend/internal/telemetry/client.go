@@ -41,7 +41,12 @@ func NewQueryClient(baseURL string, client *http.Client, timeout time.Duration) 
 	return &QueryClient{baseURL: u.String(), client: client, timeout: timeout}, nil
 }
 
-var queries = map[string]string{"request": `sum(rate(http_requests_total{route=~"root|work"}[30s]))`, "error": `100 * sum(rate(http_requests_total{route=~"root|work",status_class="5xx"}[30s])) / sum(rate(http_requests_total{route=~"root|work"}[30s]))`, "latency": `1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route=~"root|work"}[30s])))`, "availability": `100 * sum(rate(http_requests_total{route=~"root|work",status_class!="5xx"}[30s])) / sum(rate(http_requests_total{route=~"root|work"}[30s]))`}
+var queries = map[string]string{
+	"request":      `sum(rate(http_requests_total{route=~"root|work"}[30s]))`,
+	"error":        `100 * (sum(rate(http_requests_total{route=~"root|work",status_class="5xx"}[30s])) or vector(0)) / sum(rate(http_requests_total{route=~"root|work"}[30s]))`,
+	"latency":      `1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route=~"root|work"}[30s])))`,
+	"availability": `100 * (sum(rate(http_requests_total{route=~"root|work",status_class!="5xx"}[30s])) or vector(0)) / sum(rate(http_requests_total{route=~"root|work"}[30s]))`,
+}
 
 func (c *QueryClient) Snapshot(ctx context.Context, _ EnvironmentContext) (Snapshot, error) {
 	out := Snapshot{Timestamp: time.Now().UTC()}

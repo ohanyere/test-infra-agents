@@ -471,6 +471,10 @@ jobs:
             exit 1
           fi
           verification_result="$ARTIFACT_DIR/verification-result.json"
+          evaluation_result="$ARTIFACT_DIR/evaluation-result.json"
+          if ! jq -Rc 'fromjson? | select(.kind == "persisted_evaluation") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$evaluation_result"; then
+            : > "$evaluation_result"
+          fi
           print_proof_diagnostic() {
             if [[ ! -s "$verification_result" ]] || ! jq -e 'type == "object"' "$verification_result" >/dev/null 2>&1; then
               echo "Sanitized proof diagnostic unavailable: persisted verification was not extracted as a JSON object" >&2
@@ -479,18 +483,34 @@ jobs:
             echo "Sanitized proof diagnostic:" >&2
             jq '{
               id, run_id, validity, overall_status,
+              evaluation_window: {started_at: .evidence_started_at, completed_at: .evidence_completed_at},
               action_inspection: {
                 requested_count: .action_inspection.requested_count,
                 authorized_count: .action_inspection.authorized_count,
                 executed_count: .action_inspection.executed_count,
+                action_type_counts: ([.action_inspection.actions[]?.action_type] | sort | group_by(.) | map({action_type: .[0], count: length})),
                 set_workload_image: [.action_inspection.actions[]? | select(.action_type == "set_workload_image") | {authorized, status}]
               },
               infrastructure_diff: [.infrastructure_diff[]? | {
                 classification,
                 image_fields: [.fields[]? | select(.field == "image") | {before, after}]
               }],
-              outcome: {status: .outcome.status},
-              side_effects: {status: .side_effects.status},
+              recovery_criteria: [.intent.assertions[]? | {key, metric, operator, target}],
+              outcome: {
+                status: .outcome.status,
+                reason: .outcome.reason,
+                assertions: .outcome.assertions
+              },
+              side_effects: {
+                status: .side_effects.status,
+                findings: [.side_effects.findings[]? | {type, severity, summary, blocking, evidence}]
+              },
+              recovery_telemetry: {
+                baseline_error_rate_pct: .baseline_snapshot.observation.metrics.error_rate_pct,
+                final_error_rate_pct: .final_snapshot.observation.metrics.error_rate_pct,
+                baseline_telemetry_available: .baseline_snapshot.observation.metrics.telemetry_available,
+                final_telemetry_available: .final_snapshot.observation.metrics.telemetry_available
+              },
               gitops: {
                 desired_image: .final_snapshot.gitops.desired_state.image,
                 argo_sync_status: .final_snapshot.gitops.argo_state.sync_status,
@@ -500,6 +520,26 @@ jobs:
               stability: {status: .stability.status, observations: .stability.observations},
               forward_risks: [.forward_risks[]? | {analyzer_id, severity}]
             }' "$verification_result" >&2 || true
+            if [[ -s "$evaluation_result" ]] && jq -e 'type == "object"' "$evaluation_result" >/dev/null 2>&1; then
+              echo "Sanitized outcome evaluation diagnostic:" >&2
+              jq '{
+                status,
+                criterion_results: [.criterion_results[]? | {
+                  criterion_key,
+                  metric_key,
+                  operator,
+                  expected: .target_value,
+                  actual: .observed_value,
+                  observed_state,
+                  status,
+                  reason,
+                  evidence: .evidence_ids
+                }],
+                findings: [.findings[]? | {code, severity, message, criterion_key, evidence: .evidence_references}]
+              }' "$evaluation_result" >&2 || true
+            else
+              echo "Sanitized outcome evaluation diagnostic unavailable" >&2
+            fi
           }
           fail_proof_assertion() {
             echo "PROOF ASSERTION FAILED: $1" >&2
