@@ -182,8 +182,8 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/verification-e2e-api ./cmd/api
           docker build -t evalplane-harness:stage17 --build-arg APP_ERROR_RATE=0 -f e2e/Dockerfile "$build_dir"
           docker tag evalplane-harness:stage17 evalplane-reference:stage17
-          docker build -t evalplane-reference:v17 --build-arg APP_ERROR_RATE=0 -f e2e/Dockerfile "$build_dir"
-          docker build -t evalplane-reference:v18 --build-arg APP_ERROR_RATE=100 -f e2e/Dockerfile "$build_dir"
+          docker build -t evalplane-reference:v17 --build-arg APP_ERROR_RATE=0 --build-arg MAX_CONCURRENT_WORK=32 -f e2e/Dockerfile "$build_dir"
+          docker build -t evalplane-reference:v18 --build-arg APP_ERROR_RATE=100 --build-arg MAX_CONCURRENT_WORK=32 -f e2e/Dockerfile "$build_dir"
           timeout 180s docker pull "$K6_IMAGE"
           timeout 180s docker pull "$PROMETHEUS_IMAGE"
 
@@ -472,8 +472,12 @@ jobs:
           fi
           verification_result="$ARTIFACT_DIR/verification-result.json"
           evaluation_result="$ARTIFACT_DIR/evaluation-result.json"
+          evaluation_input="$ARTIFACT_DIR/evaluation-input.json"
           if ! jq -Rc 'fromjson? | select(.kind == "persisted_evaluation") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$evaluation_result"; then
             : > "$evaluation_result"
+          fi
+          if ! jq -Rc 'fromjson? | select(.kind == "persisted_input") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$evaluation_input"; then
+            : > "$evaluation_input"
           fi
           print_proof_diagnostic() {
             if [[ ! -s "$verification_result" ]] || ! jq -e 'type == "object"' "$verification_result" >/dev/null 2>&1; then
@@ -523,22 +527,48 @@ jobs:
             if [[ -s "$evaluation_result" ]] && jq -e 'type == "object"' "$evaluation_result" >/dev/null 2>&1; then
               echo "Sanitized outcome evaluation diagnostic:" >&2
               jq '{
-                status,
-                criterion_results: [.criterion_results[]? | {
-                  criterion_key,
+                status: .result,
+                criterion_results: [.criteria[]? | {
+                  criterion_key: .key,
                   metric_key,
                   operator,
                   expected: .target_value,
                   actual: .observed_value,
-                  observed_state,
-                  status,
-                  reason,
-                  evidence: .evidence_ids
+                  observed_state: .evidence.observed_state,
+                  status: .evidence.status,
+                  reason: .evidence.reason,
+                  evidence: .evidence.evidence_references
                 }],
-                findings: [.findings[]? | {code, severity, message, criterion_key, evidence: .evidence_references}]
+                findings: [.findings[]? | {
+                  type: .kind,
+                  code: .evidence.code,
+                  severity: .evidence.severity,
+                  summary,
+                  criterion_key: .evidence.criterion_key,
+                  evidence: .evidence.evidence_references
+                }]
               }' "$evaluation_result" >&2 || true
             else
               echo "Sanitized outcome evaluation diagnostic unavailable" >&2
+            fi
+            if [[ -s "$evaluation_input" ]] && jq -e 'type == "object"' "$evaluation_input" >/dev/null 2>&1; then
+              echo "Sanitized recovery timeline:" >&2
+              jq '{
+                run: {started_at: .Run.started_at, completed_at: .Run.completed_at},
+                actions: [.Actions[]? | {action_type, status, authorized, started_at, completed_at, created_at}],
+                observations: [.Events[]? | select(.event_type == "observation") | {
+                  id,
+                  sequence,
+                  occurred_at,
+                  summary,
+                  request_rate_rps: .payload.observation.metrics.request_rate_rps,
+                  error_rate_pct: .payload.observation.metrics.error_rate_pct,
+                  telemetry_available: .payload.observation.metrics.telemetry_available,
+                  workload_images: [.payload.observation.workloads[]?.image]
+                }]
+              }' "$evaluation_input" >&2 || true
+            else
+              echo "Sanitized recovery timeline unavailable" >&2
             fi
           }
           fail_proof_assertion() {

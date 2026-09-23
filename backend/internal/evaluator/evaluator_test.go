@@ -30,14 +30,38 @@ func TestNumericCriterionFails(t *testing.T) {
 	}
 }
 
-func TestCurrentErrorRateUsesLatestObservation(t *testing.T) {
-	result := mustEvaluate(t, evaluationInput(
-		[]scenario.Criterion{criterion("recovered", "current_error_rate", "lte", `1`, "pct")},
-		metricEvent("run-1", 1, map[string]any{"telemetry_available": true, "error_rate_pct": 100}),
-		metricEvent("run-1", 2, map[string]any{"telemetry_available": true, "error_rate_pct": 0}),
-	))
-	if result.Status != StatusPass || string(result.CriterionResults[0].ObservedValue) != "0" {
-		t.Fatalf("result=%+v", result)
+func TestCurrentErrorRateUsesPostActionTraffic(t *testing.T) {
+	mutatedAt := evaluatorNow.Add(90 * time.Second)
+	tests := []struct {
+		name       string
+		postMetric map[string]any
+		wantStatus string
+		wantValue  string
+	}{
+		{name: "recovered", postMetric: map[string]any{"telemetry_available": true, "request_rate_rps": 12, "error_rate_pct": 0}, wantStatus: StatusPass, wantValue: "0"},
+		{name: "no post-action traffic", postMetric: map[string]any{"telemetry_available": true, "request_rate_rps": 0, "error_rate_pct": 0}, wantStatus: StatusInconclusive, wantValue: "null"},
+		{name: "still unhealthy", postMetric: map[string]any{"telemetry_available": true, "request_rate_rps": 12, "error_rate_pct": 37.8}, wantStatus: StatusFail, wantValue: "37.8"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := evaluationInput(
+				[]scenario.Criterion{criterion("recovered", "current_error_rate", "lte", `1`, "pct")},
+				metricEvent("run-1", 1, map[string]any{"telemetry_available": true, "request_rate_rps": 12, "error_rate_pct": 100}),
+				metricEvent("run-1", 2, test.postMetric),
+			)
+			input.Actions = []evidence.AgentAction{
+				{ID: "rollback", RunID: "run-1", ActionType: "set_workload_image", Status: "executed", Authorized: true, CreatedAt: mutatedAt, CompletedAt: &mutatedAt},
+				{ID: "inspect", RunID: "run-1", ActionType: "inspect", Status: "executed", Authorized: true, CreatedAt: evaluatorNow.Add(3 * time.Minute)},
+				{ID: "stop", RunID: "run-1", ActionType: "no_op", Status: "executed", Authorized: true, CreatedAt: evaluatorNow.Add(4 * time.Minute)},
+			}
+			result := mustEvaluate(t, input)
+			if result.Status != test.wantStatus || string(result.CriterionResults[0].ObservedValue) != test.wantValue {
+				t.Fatalf("result=%+v", result)
+			}
+			if result.PeakErrorRatePct == nil || *result.PeakErrorRatePct != 100 {
+				t.Fatalf("historical bad traffic was not preserved: %+v", result)
+			}
+		})
 	}
 }
 

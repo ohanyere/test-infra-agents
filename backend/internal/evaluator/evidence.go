@@ -10,6 +10,7 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
+	"github.com/evalplane/evalplane/backend/internal/telemetry"
 )
 
 type metricDefinition struct {
@@ -59,6 +60,8 @@ func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 	invalid := map[string][]string{}
 	telemetrySeen := false
 	telemetryUnavailable := false
+	currentErrorBoundary := outcomeEvidenceBoundary(input)
+	currentErrorTrafficSeen := false
 
 	for _, event := range input.Events {
 		if event.RunID != input.Run.ID || !withinRunWindow(input, event.OccurredAt) {
@@ -87,7 +90,12 @@ func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 			}
 			addJSONMetric(samples, invalid, "request_rate", metrics["request_rate_rps"], event, ref)
 			addJSONMetric(samples, invalid, "error_rate", metrics["error_rate_pct"], event, ref)
-			addJSONMetric(samples, invalid, "current_error_rate", metrics["error_rate_pct"], event, ref)
+			if !event.OccurredAt.Before(currentErrorBoundary) {
+				if requestRate, ok := nonnegativeMetric(metrics["request_rate_rps"]); ok && requestRate > 0 {
+					currentErrorTrafficSeen = true
+					addJSONMetric(samples, invalid, "current_error_rate", metrics["error_rate_pct"], event, ref)
+				}
+			}
 			addJSONMetric(samples, invalid, "p95_latency", metrics["p95_latency_ms"], event, ref)
 			addJSONMetric(samples, invalid, "availability", metrics["availability_pct"], event, ref)
 			var desired, available, ready, notReady, restarts float64
@@ -146,6 +154,9 @@ func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 			out.Metrics[definition.Canonical] = MetricValue{State: ValuePresent, Value: &value, Unit: definition.Unit, EvidenceIDs: refs}
 		} else {
 			reason := "no observation contained this metric"
+			if definition.Canonical == "current_error_rate" && !currentErrorTrafficSeen {
+				reason = "no post-action observation contained positive request traffic"
+			}
 			if definition.Telemetry && telemetryUnavailable && !telemetrySeen {
 				reason = "telemetry was unavailable for the evaluation window"
 			}
@@ -153,6 +164,45 @@ func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 		}
 	}
 	return out
+}
+
+// outcomeEvidenceBoundary keeps current-state criteria tied to evidence gathered
+// after the latest executed mutation. Read-only inspect/no_op actions do not move
+// the boundary. Runs without a mutation use their normal start boundary.
+func outcomeEvidenceBoundary(input EvaluationInput) time.Time {
+	boundary := input.Run.CreatedAt
+	if input.Run.StartedAt != nil {
+		boundary = *input.Run.StartedAt
+	}
+	for _, action := range input.Actions {
+		if action.RunID != input.Run.ID || !actionWithinRunWindow(input, action) || action.Status != "executed" || !action.Authorized || action.ActionType == "inspect" || action.ActionType == "no_op" {
+			continue
+		}
+		occurred := action.CreatedAt
+		if action.StartedAt != nil {
+			occurred = *action.StartedAt
+		}
+		if action.CompletedAt != nil {
+			occurred = *action.CompletedAt
+		}
+		if occurred.After(boundary) {
+			boundary = occurred
+		}
+	}
+	// A trailing Prometheus rate is fully post-action only after its complete
+	// lookback has elapsed. Samples before this point remain baseline/history.
+	return boundary.Add(telemetry.RateWindow)
+}
+
+func nonnegativeMetric(raw json.RawMessage) (float64, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var value float64
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0, false
+	}
+	return value, true
 }
 
 func addJSONMetric(samples map[string][]metricSample, invalid map[string][]string, key string, raw json.RawMessage, event evidence.RunEvent, ref string) {

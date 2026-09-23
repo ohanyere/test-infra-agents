@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	defaultWindow = "30s"
-	maxBody       = int64(1 << 20)
+	RateWindow = 30 * time.Second
+	maxBody    = int64(1 << 20)
 )
 
 var ErrUnavailable = errors.New("telemetry unavailable")
@@ -42,10 +42,10 @@ func NewQueryClient(baseURL string, client *http.Client, timeout time.Duration) 
 }
 
 var queries = map[string]string{
-	"request":      `sum(rate(http_requests_total{route=~"root|work"}[30s]))`,
-	"error":        `100 * (sum(rate(http_requests_total{route=~"root|work",status_class="5xx"}[30s])) or vector(0)) / sum(rate(http_requests_total{route=~"root|work"}[30s]))`,
-	"latency":      `1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route=~"root|work"}[30s])))`,
-	"availability": `100 * (sum(rate(http_requests_total{route=~"root|work",status_class!="5xx"}[30s])) or vector(0)) / sum(rate(http_requests_total{route=~"root|work"}[30s]))`,
+	"request":      fmt.Sprintf(`sum(rate(http_requests_total{route=~"root|work"}[%s]))`, RateWindow),
+	"error":        fmt.Sprintf(`100 * (sum(rate(http_requests_total{route=~"root|work",status_class="5xx"}[%s])) or vector(0)) / sum(rate(http_requests_total{route=~"root|work"}[%s]))`, RateWindow, RateWindow),
+	"latency":      fmt.Sprintf(`1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route=~"root|work"}[%s])))`, RateWindow),
+	"availability": fmt.Sprintf(`100 * (sum(rate(http_requests_total{route=~"root|work",status_class!="5xx"}[%s])) or vector(0)) / sum(rate(http_requests_total{route=~"root|work"}[%s]))`, RateWindow, RateWindow),
 }
 
 func (c *QueryClient) Snapshot(ctx context.Context, _ EnvironmentContext) (Snapshot, error) {
