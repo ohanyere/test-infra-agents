@@ -5,11 +5,12 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/gitops"
 )
 
 const (
-	ContractVersion = "infrastructure-verifier:v2"
+	ContractVersion = "infrastructure-verifier:v3"
 	SnapshotVersion = "infrastructure-snapshot:v2"
 
 	StatusVerified     = "VERIFIED"
@@ -94,6 +95,20 @@ type StabilityResult struct {
 	StartedAt    time.Time `json:"started_at,omitempty"`
 	CompletedAt  time.Time `json:"completed_at,omitempty"`
 }
+type EvidenceDimensionAssessment struct {
+	EvidenceType       string   `json:"evidence_type"`
+	Applicability      string   `json:"applicability"`
+	RequirementStatus  string   `json:"requirement_status"`
+	Availability       string   `json:"availability"`
+	SourceProvider     string   `json:"source_provider"`
+	Reason             string   `json:"reason"`
+	EvidenceReferences []string `json:"evidence_references"`
+}
+type EvidenceAssessment struct {
+	ContractVersion string                        `json:"contract_version"`
+	Requirements    evidencecontract.Requirements `json:"requirements"`
+	Dimensions      []EvidenceDimensionAssessment `json:"dimensions"`
+}
 type InvariantResult struct {
 	ID                      string    `json:"invariant_id"`
 	Type                    string    `json:"invariant_type"`
@@ -108,16 +123,18 @@ type InvariantResult struct {
 	EvidenceCompletedAt     time.Time `json:"evidence_completed_at,omitempty"`
 }
 type RiskFinding struct {
-	AnalyzerID        string    `json:"analyzer_id"`
-	AnalyzerVersion   string    `json:"analyzer_version"`
-	Type              string    `json:"type"`
-	Severity          string    `json:"severity"`
-	AffectedResources []string  `json:"affected_resources"`
-	Evidence          []string  `json:"evidence"`
-	Reason            string    `json:"reason"`
-	Trigger           string    `json:"trigger"`
-	EvidenceStrength  string    `json:"evidence_strength"`
-	CreatedAt         time.Time `json:"created_at"`
+	AnalyzerID        string             `json:"analyzer_id"`
+	AnalyzerVersion   string             `json:"analyzer_version"`
+	Type              string             `json:"type"`
+	Severity          string             `json:"severity"`
+	Blocking          bool               `json:"blocking"`
+	AffectedResources []string           `json:"affected_resources"`
+	Evidence          []string           `json:"evidence"`
+	Measurements      map[string]float64 `json:"measurements,omitempty"`
+	Reason            string             `json:"reason"`
+	Trigger           string             `json:"trigger"`
+	EvidenceStrength  string             `json:"evidence_strength"`
+	CreatedAt         time.Time          `json:"created_at"`
 }
 type Result struct {
 	ID                      string                 `json:"id"`
@@ -140,6 +157,7 @@ type Result struct {
 	SideEffects             SideEffectResult       `json:"side_effects"`
 	Stability               StabilityResult        `json:"stability"`
 	ForwardRisks            []RiskFinding          `json:"forward_risks"`
+	EvidenceAssessment      EvidenceAssessment     `json:"evidence_assessment"`
 	Validity                string                 `json:"validity"`
 	OverallStatus           string                 `json:"overall_status"`
 	Reason                  string                 `json:"reason"`

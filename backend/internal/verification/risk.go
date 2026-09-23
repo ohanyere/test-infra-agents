@@ -1,6 +1,9 @@
 package verification
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type Analyzer interface {
 	Analyze(Snapshot, Snapshot, time.Time) []RiskFinding
@@ -21,6 +24,57 @@ func (HPAConsistencyAnalyzer) Analyze(_ Snapshot, final Snapshot, now time.Time)
 				resource := "Deployment/" + w.Namespace + "/" + w.Name
 				out = append(out, RiskFinding{AnalyzerID: "kubernetes-hpa-consistency", AnalyzerVersion: "v1", Type: "controller_reconciliation", Severity: "HIGH", AffectedResources: []string{resource, "HorizontalPodAutoscaler/" + h.Namespace + "/" + h.Name}, Evidence: []string{final.Reference}, Reason: "The deployment replica target exceeds the observed HPA maximum.", Trigger: "The HPA reconciles the scale subresource.", EvidenceStrength: "HIGH", CreatedAt: now})
 			}
+		}
+	}
+	return out
+}
+
+const (
+	acceptableReplicaHeadroom = int32(2)
+	blockingReplicaHeadroom   = int32(0)
+)
+
+// HPACapacityHeadroomAnalyzer evaluates declared deployment capacity against
+// the observed HPA ceiling. One spare replica is a meaningful but non-blocking
+// risk; no spare capacity is blocking. Absence of matching HPA evidence does
+// not create a finding.
+type HPACapacityHeadroomAnalyzer struct{}
+
+func (HPACapacityHeadroomAnalyzer) Analyze(_ Snapshot, final Snapshot, now time.Time) []RiskFinding {
+	out := []RiskFinding{}
+	for _, h := range final.Observation.Autoscalers {
+		for _, w := range final.Observation.Workloads {
+			if w.Namespace != h.Namespace || w.Name != h.TargetName || h.TargetKind != "Deployment" {
+				continue
+			}
+			headroom := h.MaxReplicas - w.DesiredReplicas
+			if headroom >= acceptableReplicaHeadroom {
+				continue
+			}
+			blocking := headroom <= blockingReplicaHeadroom
+			severity := "MEDIUM"
+			if blocking {
+				severity = "HIGH"
+			}
+			resource := "Deployment/" + w.Namespace + "/" + w.Name
+			out = append(out, RiskFinding{
+				AnalyzerID:        "kubernetes-capacity-headroom",
+				AnalyzerVersion:   "v1",
+				Type:              "capacity_headroom",
+				Severity:          severity,
+				Blocking:          blocking,
+				AffectedResources: []string{resource, "HorizontalPodAutoscaler/" + h.Namespace + "/" + h.Name},
+				Evidence:          []string{final.Reference},
+				Measurements: map[string]float64{
+					"observed_headroom_replicas":           float64(headroom),
+					"acceptable_minimum_headroom_replicas": float64(acceptableReplicaHeadroom),
+					"blocking_headroom_replicas":           float64(blockingReplicaHeadroom),
+				},
+				Reason:           fmt.Sprintf("Observed replica headroom is %d; policy requires at least %d spare replicas for acceptable capacity headroom, while %d or fewer is blocking.", headroom, acceptableReplicaHeadroom, blockingReplicaHeadroom),
+				Trigger:          "Demand requires the deployment to use its remaining HPA capacity.",
+				EvidenceStrength: "HIGH",
+				CreatedAt:        now,
+			})
 		}
 	}
 	return out

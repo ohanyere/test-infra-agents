@@ -3,9 +3,11 @@ package scenario
 import (
 	"encoding/json"
 	"errors"
+	"testing"
+
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
-	"testing"
 )
 
 func validScenario() CreateInput {
@@ -14,7 +16,7 @@ func validScenario() CreateInput {
 func TestScenarioValidation(t *testing.T) {
 	tests := map[string]func(*CreateInput){"invalid slug": func(v *CreateInput) { v.Slug = "Bad Slug" }, "public visibility": func(v *CreateInput) { v.Visibility = "public" }, "invalid difficulty": func(v *CreateInput) { v.InitialVersion.Difficulty = "extreme" }, "invalid duration": func(v *CreateInput) { v.InitialVersion.DurationSeconds = 0 }, "malformed category": func(v *CreateInput) { v.InitialVersion.Category = "Traffic Ops" }, "duplicate observable": func(v *CreateInput) { v.InitialVersion.Observables = []string{"availability", "availability"} }, "duplicate criterion": func(v *CreateInput) {
 		v.InitialVersion.Criteria = append(v.InitialVersion.Criteria, v.InitialVersion.Criteria[0])
-	}, "invalid operator": func(v *CreateInput) { v.InitialVersion.Criteria[0].Operator = "approximately" }, "invalid metric": func(v *CreateInput) { v.InitialVersion.Criteria[0].MetricKey = "bad metric" }, "unsupported observable": func(v *CreateInput) { v.InitialVersion.Observables = []string{"cpu"} }, "malformed observable": func(v *CreateInput) { v.InitialVersion.Observables = []string{"Request Rate"} }}
+	}, "invalid operator": func(v *CreateInput) { v.InitialVersion.Criteria[0].Operator = "approximately" }, "invalid metric": func(v *CreateInput) { v.InitialVersion.Criteria[0].MetricKey = "bad metric" }, "unsupported metric": func(v *CreateInput) { v.InitialVersion.Criteria[0].MetricKey = "cpu" }, "unsupported observable": func(v *CreateInput) { v.InitialVersion.Observables = []string{"cpu"} }, "malformed observable": func(v *CreateInput) { v.InitialVersion.Observables = []string{"Request Rate"} }}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			v := validScenario()
@@ -23,6 +25,40 @@ func TestScenarioValidation(t *testing.T) {
 				t.Fatalf("error=%v", e)
 			}
 		})
+	}
+}
+
+func TestScenarioEvidenceRequirementsDefaultAndValidation(t *testing.T) {
+	validated, err := ValidateCreate(validScenario())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := validated.InitialVersion.EvidenceRequirements; got != evidencecontract.DefaultRequirements() {
+		t.Fatalf("default requirements=%+v", got)
+	}
+
+	input := validScenario()
+	input.InitialVersion.EvidenceRequirements = evidencecontract.GitOpsRequirements()
+	validated, err = ValidateCreate(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := validated.InitialVersion.EvidenceRequirements; got != evidencecontract.GitOpsRequirements() {
+		t.Fatalf("GitOps requirements=%+v", got)
+	}
+
+	input = validScenario()
+	input.InitialVersion.EvidenceRequirements = evidencecontract.GitOpsRequirements()
+	input.InitialVersion.EvidenceRequirements.ArgoState = evidencecontract.NotApplicable
+	if _, err = ValidateCreate(input); !errors.Is(err, identity.ErrValidation) {
+		t.Fatalf("split Git/Argo requirement accepted: %v", err)
+	}
+
+	input = validScenario()
+	input.InitialVersion.EvidenceRequirements = evidencecontract.DefaultRequirements()
+	input.InitialVersion.EvidenceRequirements.Telemetry = evidencecontract.NotApplicable
+	if _, err = ValidateCreate(input); !errors.Is(err, identity.ErrValidation) {
+		t.Fatalf("telemetry criterion accepted with telemetry not applicable: %v", err)
 	}
 }
 

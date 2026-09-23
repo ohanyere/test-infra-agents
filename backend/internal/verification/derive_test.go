@@ -2,12 +2,14 @@ package verification
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/gitops"
 )
 
@@ -26,7 +28,7 @@ func validInput() BuildInput {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	before := healthy("checkout:v18", 3)
 	after := healthy("checkout:v17", 6)
-	return BuildInput{WorkspaceID: "workspace", RunID: "run", AgentVersionID: "agent-version", ScenarioVersionID: "scenario-version", Objective: "Restore checkout health", Criteria: []Criterion{{Key: "ready", Metric: "deployment_available_replicas", Operator: ">=", Target: json.RawMessage(`3`)}}, Events: []evidence.RunEvent{event(1, "verification_baseline_captured", now, before), event(2, "stability_observation_collected", now.Add(time.Second), after), event(3, "final_observation_collected", now.Add(2*time.Second), after)}, Actions: []evidence.AgentAction{{ID: "action", RunID: "run", ActionType: "scale_workload", Status: "executed", Authorized: true, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"replicas":6}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: now}}, Evaluation: Evaluation{Status: "pass", Summary: "All required criteria passed."}, Now: now.Add(3 * time.Second)}
+	return BuildInput{WorkspaceID: "workspace", RunID: "run", AgentVersionID: "agent-version", ScenarioVersionID: "scenario-version", Objective: "Restore checkout health", Criteria: []Criterion{{Key: "ready", Metric: "deployment_available_replicas", Operator: ">=", Target: json.RawMessage(`3`)}}, EvidenceRequirements: evidencecontract.DefaultRequirements(), Events: []evidence.RunEvent{event(1, "verification_baseline_captured", now, before), event(2, "stability_observation_collected", now.Add(time.Second), after), event(3, "final_observation_collected", now.Add(2*time.Second), after)}, Actions: []evidence.AgentAction{{ID: "action", RunID: "run", ActionType: "scale_workload", Status: "executed", Authorized: true, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"replicas":6}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: now}}, Evaluation: Evaluation{Status: "pass", Summary: "All required criteria passed."}, Now: now.Add(3 * time.Second)}
 }
 func str(v string) *string { return &v }
 
@@ -156,6 +158,7 @@ func TestAgentFailureRemainsDistinctFromPlatformInvalidity(t *testing.T) {
 
 func TestGitOpsInvariantAndResultPolicy(t *testing.T) {
 	in := validInput()
+	in.EvidenceRequirements = evidencecontract.GitOpsRequirements()
 	desired := &gitops.DesiredState{Repository: "fixture", Revision: strings.Repeat("a", 40), Path: "checkout.yaml", Resource: "Deployment/run-ns/checkout", Container: "checkout", Image: "checkout:v18", Reference: "git:pin:checkout.yaml"}
 	argo := &gitops.ArgoState{Application: "checkout", Namespace: "argocd", SyncStatus: "OutOfSync", Automated: true, Reference: "argo-application:argocd/checkout:rv:7"}
 	state := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: argo}
@@ -173,6 +176,7 @@ func TestGitOpsInvariantAndResultPolicy(t *testing.T) {
 
 func TestGitOpsPositiveAndMissingEvidenceControls(t *testing.T) {
 	in := validInput()
+	in.EvidenceRequirements = evidencecontract.GitOpsRequirements()
 	desired := &gitops.DesiredState{Resource: "Deployment/run-ns/checkout", Image: "checkout:v17", Reference: "git:pin"}
 	synced := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: &gitops.ArgoState{SyncStatus: "Synced", Reference: "argo:synced"}}
 	after := healthy("checkout:v17", 6)
@@ -181,10 +185,103 @@ func TestGitOpsPositiveAndMissingEvidenceControls(t *testing.T) {
 	if got.Invariants[0].Status != "PASSED" || got.Stability.Status != "STABLE" || got.OverallStatus != StatusVerified || len(got.ForwardRisks) != 0 {
 		t.Fatalf("positive=%+v", got)
 	}
-	missing := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Errors: []string{"gitops_evidence_unavailable"}}
+	missing := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Errors: []string{"argo_state_unavailable_after_remediation"}}
 	in.Events[2] = gitopsEvent(3, "final_observation_collected", in.Now.Add(2*time.Second), after, missing)
 	got = Derive(in, GitOpsReconciliationAnalyzer{})
-	if got.Invariants[0].Status != "INCONCLUSIVE" || got.OverallStatus != StatusInconclusive || got.Validity != ValidityInvalidPlatform || len(got.ForwardRisks) != 0 {
+	if got.ActionInspection.Executed != 1 || got.Invariants[0].Status != "INCONCLUSIVE" || got.OverallStatus != StatusInconclusive || got.Validity != ValidityInvalidPlatform || got.Reason != "Required verification evidence was unavailable: argo_state." || got.Final.GitOps == nil || got.Final.GitOps.Argo != nil || !slices.Equal(got.Final.GitOps.Errors, []string{"argo_state_unavailable_after_remediation"}) || len(got.ForwardRisks) != 0 {
 		t.Fatalf("missing=%+v", got)
 	}
+}
+
+func TestEvidenceApplicabilityAndCompleteness(t *testing.T) {
+	desired := &gitops.DesiredState{Resource: "Deployment/run-ns/checkout", Image: "checkout:v17", Reference: "git:final"}
+	argo := &gitops.ArgoState{SyncStatus: "Synced", Reference: "argo:final"}
+	complete := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: argo}
+
+	t.Run("required GitOps present evaluates normally", func(t *testing.T) {
+		in := validInput()
+		in.EvidenceRequirements = evidencecontract.GitOpsRequirements()
+		in.Events[0] = gitopsEvent(1, "verification_baseline_captured", in.Events[0].OccurredAt, healthy("checkout:v18", 3), complete)
+		in.Events[1] = gitopsEvent(2, "stability_observation_collected", in.Events[1].OccurredAt, healthy("checkout:v17", 6), complete)
+		in.Events[2] = gitopsEvent(3, "final_observation_collected", in.Events[2].OccurredAt, healthy("checkout:v17", 6), complete)
+		got := Derive(in)
+		if len(got.Invariants) != 1 || got.Invariants[0].Status != "PASSED" || got.OverallStatus != StatusVerified {
+			t.Fatalf("result=%+v", got)
+		}
+	})
+
+	t.Run("GitOps not applicable does not require an invariant", func(t *testing.T) {
+		got := Derive(validInput())
+		if len(got.Invariants) != 0 || got.OverallStatus != StatusVerified {
+			t.Fatalf("result=%+v", got)
+		}
+		for _, dimension := range got.EvidenceAssessment.Dimensions {
+			if (dimension.EvidenceType == "git_desired_state" || dimension.EvidenceType == "argo_state") && (dimension.Applicability != notApplicable || dimension.Availability != notApplicable) {
+				t.Fatalf("dimension=%+v", dimension)
+			}
+		}
+	})
+
+	t.Run("non-applicable telemetry absence does not cause inconclusive", func(t *testing.T) {
+		in := validInput()
+		in.EvidenceRequirements.Telemetry = evidencecontract.NotApplicable
+		for index, source := range in.Events {
+			var payload struct {
+				Observation agentgateway.Observation `json:"observation"`
+			}
+			if err := json.Unmarshal(source.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			payload.Observation.Metrics = map[string]any{}
+			in.Events[index] = event(source.ID, source.Summary, source.OccurredAt, payload.Observation)
+		}
+		got := Derive(in)
+		if got.OverallStatus != StatusVerified || got.Validity != ValidityValid {
+			t.Fatalf("result=%+v", got)
+		}
+		for _, dimension := range got.EvidenceAssessment.Dimensions {
+			if dimension.EvidenceType == "telemetry" && (dimension.Applicability != notApplicable || dimension.Availability != notApplicable) {
+				t.Fatalf("dimension=%+v", dimension)
+			}
+		}
+	})
+
+	t.Run("baseline GitOps never substitutes for missing final GitOps", func(t *testing.T) {
+		in := validInput()
+		in.EvidenceRequirements = evidencecontract.GitOpsRequirements()
+		in.Events[0] = gitopsEvent(1, "verification_baseline_captured", in.Events[0].OccurredAt, healthy("checkout:v18", 3), complete)
+		got := Derive(in)
+		if got.OverallStatus != StatusInconclusive || got.Validity != ValidityInvalidPlatform || len(got.Invariants) != 1 || got.Invariants[0].Status != "INCONCLUSIVE" {
+			t.Fatalf("result=%+v", got)
+		}
+		if strings.Contains(strings.Join(got.Invariants[0].ObservedEvidence, " "), "git:final") {
+			t.Fatalf("baseline evidence leaked into final invariant: %+v", got.Invariants[0])
+		}
+		if got.Reason != "Required verification evidence was unavailable: git_desired_state, argo_state." {
+			t.Fatalf("reason=%q", got.Reason)
+		}
+	})
+}
+
+func TestRequiredStabilityCompleteness(t *testing.T) {
+	t.Run("empty required workload scope is inconclusive", func(t *testing.T) {
+		in := validInput()
+		empty := agentgateway.Observation{Metrics: map[string]any{"telemetry_available": true}}
+		in.Events = []evidence.RunEvent{
+			event(1, "verification_baseline_captured", in.Now, empty),
+			event(2, "stability_observation_collected", in.Now.Add(time.Second), empty),
+			event(3, "final_observation_collected", in.Now.Add(2*time.Second), empty),
+		}
+		got := Derive(in)
+		if got.Stability.Status != "INCONCLUSIVE" || got.OverallStatus != StatusInconclusive || got.Validity != ValidityInvalidPlatform {
+			t.Fatalf("result=%+v", got)
+		}
+	})
+
+	t.Run("required healthy scoped evidence is stable", func(t *testing.T) {
+		got := Derive(validInput())
+		if got.Stability.Status != "STABLE" || got.OverallStatus != StatusVerified {
+			t.Fatalf("result=%+v", got)
+		}
+	})
 }

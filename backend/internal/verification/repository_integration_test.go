@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -32,6 +33,7 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 		baseline_snapshot jsonb, final_snapshot jsonb, intent_result jsonb, action_inspection jsonb,
 		infrastructure_diff jsonb, outcome_result jsonb, invariant_results jsonb,
 		side_effect_result jsonb, stability_result jsonb, forward_risk_findings jsonb,
+		evidence_assessment jsonb,
 		platform_validity text, overall_status text, reason text, source_metadata jsonb,
 		evidence_started_at timestamptz, evidence_completed_at timestamptz
 	)`)
@@ -56,13 +58,19 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 				CompositionPlanID: tc.planID, VerifierContractVersion: ContractVersion,
 				SnapshotContractVersion: SnapshotVersion, Validity: ValidityInvalidPlatform,
 				OverallStatus: StatusInconclusive, Reason: "test", SourceMetadata: json.RawMessage(`{}`),
+				EvidenceAssessment: EvidenceAssessment{ContractVersion: evidencecontract.ContractV1, Requirements: evidencecontract.DefaultRequirements(), Dimensions: []EvidenceDimensionAssessment{{EvidenceType: "workload_state", Applicability: applicable, RequirementStatus: string(evidencecontract.Required), Availability: available, SourceProvider: "kubernetes-api", Reason: "test", EvidenceReferences: []string{"run_event:1"}}}},
 			})
 			if err != nil {
 				t.Fatalf("verification insert failed for UUID values: %v", err)
 			}
 			var persistedEnvironment, persistedPlan *string
-			if err := conn.QueryRow(ctx, `SELECT environment_instance_id::text, composition_plan_id::text FROM verification_results WHERE run_id=$1`, tc.runID).Scan(&persistedEnvironment, &persistedPlan); err != nil {
+			var assessmentJSON []byte
+			if err := conn.QueryRow(ctx, `SELECT environment_instance_id::text, composition_plan_id::text, evidence_assessment FROM verification_results WHERE run_id=$1`, tc.runID).Scan(&persistedEnvironment, &persistedPlan, &assessmentJSON); err != nil {
 				t.Fatal(err)
+			}
+			var assessment EvidenceAssessment
+			if err := json.Unmarshal(assessmentJSON, &assessment); err != nil || assessment.ContractVersion != evidencecontract.ContractV1 || len(assessment.Dimensions) != 1 {
+				t.Fatalf("evidence assessment did not round trip: assessment=%+v err=%v", assessment, err)
 			}
 			if tc.environmentID == "" {
 				if persistedEnvironment != nil || persistedPlan != nil {

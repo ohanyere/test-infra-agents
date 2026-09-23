@@ -22,7 +22,7 @@ type Service struct {
 }
 
 func NewService(pool *pgxpool.Pool, repo *Repository, roles roleRepository) *Service {
-	return &Service{pool: pool, repo: repo, roles: roles, now: time.Now, analyzers: []Analyzer{HPAConsistencyAnalyzer{}, GitOpsReconciliationAnalyzer{}}}
+	return &Service{pool: pool, repo: repo, roles: roles, now: time.Now, analyzers: []Analyzer{HPAConsistencyAnalyzer{}, HPACapacityHeadroomAnalyzer{}, GitOpsReconciliationAnalyzer{}}}
 }
 func (s *Service) DeriveRun(ctx context.Context, workspaceID, runID string) (Result, error) {
 	in, err := s.repo.LoadInput(ctx, s.pool, workspaceID, runID)

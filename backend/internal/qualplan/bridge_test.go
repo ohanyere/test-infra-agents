@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 )
 
@@ -93,6 +94,9 @@ func TestBuiltinEvidenceRequirementsStaySeparateFromAgentObservables(t *testing.
 		t.Fatal("missing SRE task")
 	}
 	version := ToVersionInput(sre, ContentHash(sre))
+	if version.EvidenceRequirements != evidencecontract.DefaultRequirements() {
+		t.Fatalf("SRE task evidence requirements=%+v", version.EvidenceRequirements)
+	}
 	if len(version.Observables) == 0 {
 		t.Fatal("SRE task lost supported agent-visible observations")
 	}
@@ -111,6 +115,9 @@ func TestBuiltinEvidenceRequirementsStaySeparateFromAgentObservables(t *testing.
 		t.Fatal("missing GitOps task")
 	}
 	version = ToVersionInput(gitops, ContentHash(gitops))
+	if version.EvidenceRequirements != evidencecontract.GitOpsRequirements() {
+		t.Fatalf("GitOps task evidence requirements=%+v", version.EvidenceRequirements)
+	}
 	if len(version.Observables) != 0 {
 		t.Fatalf("GitOps read requirements were advertised without an agent-visible provider: %v", version.Observables)
 	}

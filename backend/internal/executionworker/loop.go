@@ -11,6 +11,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/execution"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 	"github.com/evalplane/evalplane/backend/internal/mcpserver"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
@@ -49,14 +50,19 @@ func (w *Worker) observe(ctx context.Context, env observation.EnvironmentContext
 	payload := map[string]any{"observation": obs}
 	if observer, ok := w.deps.Runtime.(GitOpsObserver); ok {
 		gitopsEvidence, evidenceErr := observer.ObserveGitOps(ctx, env)
-		if evidenceErr != nil {
-			gitopsEvidence.Errors = []string{"gitops_evidence_unavailable"}
-		}
+		gitopsEvidence = evidenceForEvent(gitopsEvidence, evidenceErr)
 		if gitopsEvidence.ContractVersion != "" || evidenceErr != nil {
 			payload["gitops_evidence"] = gitopsEvidence
 		}
 	}
 	return w.event(ctx, env.Identity.RunID, "observation", code, payload)
+}
+
+func evidenceForEvent(value gitops.Evidence, err error) gitops.Evidence {
+	if err != nil && len(value.Errors) == 0 {
+		value.Errors = []string{"gitops_evidence_unavailable"}
+	}
+	return value
 }
 func (w *Worker) observeSample(ctx context.Context, env observation.EnvironmentContext) (out agentgateway.Observation, err error) {
 	defer func() {

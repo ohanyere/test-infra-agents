@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 )
@@ -105,5 +106,5 @@ func (d ScenarioDraft) VersionInput(method string) scenario.VersionInput {
 		}
 		criteria = append(criteria, scenario.CriterionInput{Key: c.Key, Name: c.Name, MetricKey: c.MetricKey, Operator: c.Operator, TargetValue: c.TargetValue, Unit: c.Unit, SortOrder: i})
 	}
-	return scenario.VersionInput{Description: d.Description, Category: d.Category, Difficulty: d.Difficulty, DurationSeconds: d.DurationSeconds, Environment: d.Environment, Conditions: d.Conditions, Observables: d.AgentSpec.AvailableObservations, ExpectedBehaviors: d.ExpectedBehaviors, ForbiddenBehaviors: d.ForbiddenBehaviors, Criteria: criteria, AuthoringMethod: method, AgentTask: d.AgentSpec.Task, AgentVisibleContext: d.AgentSpec.VisibleContext, AllowedActions: d.AgentSpec.AllowedActions, AllowedResources: d.AgentSpec.AllowedResources, GroundTruth: d.GroundTruth, ExecutionSpec: d.ExecutionSpec, SourceMetadata: d.SourceMetadata}
+	return scenario.VersionInput{Description: d.Description, Category: d.Category, Difficulty: d.Difficulty, DurationSeconds: d.DurationSeconds, Environment: d.Environment, Conditions: d.Conditions, Observables: d.AgentSpec.AvailableObservations, ExpectedBehaviors: d.ExpectedBehaviors, ForbiddenBehaviors: d.ForbiddenBehaviors, Criteria: criteria, AuthoringMethod: method, AgentTask: d.AgentSpec.Task, AgentVisibleContext: d.AgentSpec.VisibleContext, AllowedActions: d.AgentSpec.AllowedActions, AllowedResources: d.AgentSpec.AllowedResources, GroundTruth: d.GroundTruth, ExecutionSpec: d.ExecutionSpec, SourceMetadata: d.SourceMetadata, EvidenceRequirements: evidencecontract.DefaultRequirements()}
 }

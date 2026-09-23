@@ -4,19 +4,23 @@ import (
 	"testing"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 )
 
 func TestQualificationObservablesValidateAndExposeRequiredEvidence(t *testing.T) {
 	version, err := scenario.ValidateVersion(scenario.VersionInput{
 		Category: "gitops-remediation", Difficulty: "easy", DurationSeconds: 170,
-		Observables: qualificationObservables(),
+		Observables: qualificationObservables(), EvidenceRequirements: evidencecontract.GitOpsRequirements(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(version.Observables) != len(qualificationObservables()) {
 		t.Fatalf("qualification observables changed: %v", version.Observables)
+	}
+	if version.EvidenceRequirements != evidencecontract.GitOpsRequirements() {
+		t.Fatalf("qualification evidence requirements changed: %+v", version.EvidenceRequirements)
 	}
 	observation := agentgateway.Observation{
 		Workloads: []agentgateway.WorkloadObservation{{Name: "checkout", Image: "evalplane-reference:v18"}},

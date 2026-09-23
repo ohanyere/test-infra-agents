@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/evalplane/evalplane/backend/internal/evaluationmetric"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 )
@@ -92,6 +94,12 @@ func ValidateVersion(in VersionInput) (VersionInput, error) {
 	if err := validateJSONObject(in.SourceMetadata, "source_metadata"); err != nil {
 		return in, err
 	}
+	if in.EvidenceRequirements.IsZero() {
+		in.EvidenceRequirements = evidencecontract.DefaultRequirements()
+	}
+	if err := in.EvidenceRequirements.Validate(); err != nil {
+		return in, invalid(err.Error())
+	}
 	if in.AllowedActions, err = validateAllowedActions(in.AllowedActions); err != nil {
 		return in, err
 	}
@@ -118,6 +126,10 @@ func ValidateVersion(in VersionInput) (VersionInput, error) {
 		}
 		if _, exists := keys[criterion.Key]; exists {
 			return in, invalid("criteria keys must be unique")
+		}
+		definition, _ := evaluationmetric.Lookup(criterion.MetricKey)
+		if definition.Telemetry && in.EvidenceRequirements.Telemetry != evidencecontract.Required {
+			return in, invalid("telemetry evidence must be REQUIRED when a criterion uses a telemetry metric")
 		}
 		keys[criterion.Key] = struct{}{}
 		in.Criteria[i] = criterion
@@ -185,6 +197,9 @@ func validateCriterion(in CriterionInput) (CriterionInput, error) {
 	}
 	if len(in.MetricKey) > 200 || !metricPattern.MatchString(in.MetricKey) {
 		return in, invalid("criterion metric_key is invalid")
+	}
+	if _, supported := evaluationmetric.Lookup(in.MetricKey); !supported {
+		return in, invalid("criterion metric_key is unsupported by the deterministic evaluator")
 	}
 	switch in.Operator {
 	case "gt", "gte", "lt", "lte", "eq", "neq", "required":

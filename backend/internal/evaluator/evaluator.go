@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/evalplane/evalplane/backend/internal/evaluationmetric"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 )
 
@@ -60,7 +61,7 @@ func Evaluate(input EvaluationInput) (EvaluationResult, error) {
 		case CriterionInconclusive:
 			inconclusive = true
 			code := "criterion_inconclusive"
-			if definition, ok := metricDefinitions[criterion.MetricKey]; ok && definition.Telemetry && normalized.Metrics[definition.Canonical].State == ValueUnavailable {
+			if definition, ok := evaluationmetric.Lookup(criterion.MetricKey); ok && definition.Telemetry && normalized.Metrics[definition.Canonical].State == ValueUnavailable {
 				code = "telemetry_unavailable"
 			}
 			result.Findings = append(result.Findings, Finding{Code: code, Severity: "warning", Message: criterionResult.Reason, CriterionKey: criterion.Key, EvidenceReferences: criterionResult.EvidenceIDs})

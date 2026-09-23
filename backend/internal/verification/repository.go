@@ -25,11 +25,15 @@ func (r *Repository) LoadInput(ctx context.Context, db DBTX, workspaceID, runID 
 	var in BuildInput
 	var evaluationID, evaluationStatus, evaluationSummary string
 	var environmentID, planID, planHash *string
-	err := db.QueryRow(ctx, `SELECT b.workspace_id,r.id,r.agent_version_id,b.scenario_version_id,r.environment_instance_id,r.composition_plan_id,cp.plan_hash,sv.agent_task,b.source_metadata,r.started_at,r.completed_at,e.id,e.result,e.summary,e.safety_violation_count
+	var requirements json.RawMessage
+	err := db.QueryRow(ctx, `SELECT b.workspace_id,r.id,r.agent_version_id,b.scenario_version_id,r.environment_instance_id,r.composition_plan_id,cp.plan_hash,sv.agent_task,sv.evidence_requirements,b.source_metadata,r.started_at,r.completed_at,e.id,e.result,e.summary,e.safety_violation_count
 		FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN scenario_versions sv ON sv.id=b.scenario_version_id JOIN evaluations e ON e.run_id=r.id LEFT JOIN composition_plans cp ON cp.id=r.composition_plan_id
-		WHERE b.workspace_id=$1 AND r.id=$2`, workspaceID, runID).Scan(&in.WorkspaceID, &in.RunID, &in.AgentVersionID, &in.ScenarioVersionID, &environmentID, &planID, &planHash, &in.Objective, &in.SourceMetadata, &in.RunStartedAt, &in.RunCompletedAt, &evaluationID, &evaluationStatus, &evaluationSummary, &in.Evaluation.SafetyViolations)
+		WHERE b.workspace_id=$1 AND r.id=$2`, workspaceID, runID).Scan(&in.WorkspaceID, &in.RunID, &in.AgentVersionID, &in.ScenarioVersionID, &environmentID, &planID, &planHash, &in.Objective, &requirements, &in.SourceMetadata, &in.RunStartedAt, &in.RunCompletedAt, &evaluationID, &evaluationStatus, &evaluationSummary, &in.Evaluation.SafetyViolations)
 	if err != nil {
 		return in, mapError(err)
+	}
+	if err = json.Unmarshal(requirements, &in.EvidenceRequirements); err != nil {
+		return in, fmt.Errorf("decode evidence requirements: %w", err)
 	}
 	if environmentID != nil {
 		in.EnvironmentInstanceID = *environmentID
@@ -132,8 +136,9 @@ func (r *Repository) Insert(ctx context.Context, db DBTX, v Result) (Result, err
 	side, _ := json.Marshal(v.SideEffects)
 	stability, _ := json.Marshal(v.Stability)
 	risks, _ := json.Marshal(v.ForwardRisks)
-	err := db.QueryRow(ctx, `INSERT INTO verification_results(workspace_id,run_id,agent_version_id,scenario_version_id,environment_instance_id,composition_plan_id,composition_plan_hash,verifier_contract_version,snapshot_contract_version,baseline_snapshot,final_snapshot,intent_result,action_inspection,infrastructure_diff,outcome_result,invariant_results,side_effect_result,stability_result,forward_risk_findings,platform_validity,overall_status,reason,source_metadata,evidence_started_at,evidence_completed_at)
-		VALUES($1,$2,$3,$4,NULLIF($5::text,'')::uuid,NULLIF($6::text,'')::uuid,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) ON CONFLICT(run_id) DO NOTHING RETURNING id,created_at`, v.WorkspaceID, v.RunID, v.AgentVersionID, v.ScenarioVersionID, v.EnvironmentInstanceID, v.CompositionPlanID, v.CompositionPlanHash, v.VerifierContractVersion, v.SnapshotContractVersion, b, f, intent, actions, diff, outcome, invariants, side, stability, risks, v.Validity, v.OverallStatus, v.Reason, v.SourceMetadata, v.EvidenceStartedAt, v.EvidenceCompletedAt).Scan(&v.ID, &v.CreatedAt)
+	assessment, _ := json.Marshal(v.EvidenceAssessment)
+	err := db.QueryRow(ctx, `INSERT INTO verification_results(workspace_id,run_id,agent_version_id,scenario_version_id,environment_instance_id,composition_plan_id,composition_plan_hash,verifier_contract_version,snapshot_contract_version,baseline_snapshot,final_snapshot,intent_result,action_inspection,infrastructure_diff,outcome_result,invariant_results,side_effect_result,stability_result,forward_risk_findings,evidence_assessment,platform_validity,overall_status,reason,source_metadata,evidence_started_at,evidence_completed_at)
+		VALUES($1,$2,$3,$4,NULLIF($5::text,'')::uuid,NULLIF($6::text,'')::uuid,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) ON CONFLICT(run_id) DO NOTHING RETURNING id,created_at`, v.WorkspaceID, v.RunID, v.AgentVersionID, v.ScenarioVersionID, v.EnvironmentInstanceID, v.CompositionPlanID, v.CompositionPlanHash, v.VerifierContractVersion, v.SnapshotContractVersion, b, f, intent, actions, diff, outcome, invariants, side, stability, risks, assessment, v.Validity, v.OverallStatus, v.Reason, v.SourceMetadata, v.EvidenceStartedAt, v.EvidenceCompletedAt).Scan(&v.ID, &v.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r.Get(ctx, db, v.WorkspaceID, v.RunID)
 	}
@@ -142,8 +147,8 @@ func (r *Repository) Insert(ctx context.Context, db DBTX, v Result) (Result, err
 func (r *Repository) Get(ctx context.Context, db DBTX, workspaceID, runID string) (Result, error) {
 	var v Result
 	var env, plan, hash *string
-	var b, f, i, a, d, o, inv, s, st, risks json.RawMessage
-	err := db.QueryRow(ctx, `SELECT id,workspace_id,run_id,agent_version_id,scenario_version_id,environment_instance_id,composition_plan_id,composition_plan_hash,verifier_contract_version,snapshot_contract_version,baseline_snapshot,final_snapshot,intent_result,action_inspection,infrastructure_diff,outcome_result,invariant_results,side_effect_result,stability_result,forward_risk_findings,platform_validity,overall_status,reason,source_metadata,evidence_started_at,evidence_completed_at,created_at FROM verification_results WHERE workspace_id=$1 AND run_id=$2`, workspaceID, runID).Scan(&v.ID, &v.WorkspaceID, &v.RunID, &v.AgentVersionID, &v.ScenarioVersionID, &env, &plan, &hash, &v.VerifierContractVersion, &v.SnapshotContractVersion, &b, &f, &i, &a, &d, &o, &inv, &s, &st, &risks, &v.Validity, &v.OverallStatus, &v.Reason, &v.SourceMetadata, &v.EvidenceStartedAt, &v.EvidenceCompletedAt, &v.CreatedAt)
+	var b, f, i, a, d, o, inv, s, st, risks, assessment json.RawMessage
+	err := db.QueryRow(ctx, `SELECT id,workspace_id,run_id,agent_version_id,scenario_version_id,environment_instance_id,composition_plan_id,composition_plan_hash,verifier_contract_version,snapshot_contract_version,baseline_snapshot,final_snapshot,intent_result,action_inspection,infrastructure_diff,outcome_result,invariant_results,side_effect_result,stability_result,forward_risk_findings,COALESCE(evidence_assessment,'{}'::jsonb),platform_validity,overall_status,reason,source_metadata,evidence_started_at,evidence_completed_at,created_at FROM verification_results WHERE workspace_id=$1 AND run_id=$2`, workspaceID, runID).Scan(&v.ID, &v.WorkspaceID, &v.RunID, &v.AgentVersionID, &v.ScenarioVersionID, &env, &plan, &hash, &v.VerifierContractVersion, &v.SnapshotContractVersion, &b, &f, &i, &a, &d, &o, &inv, &s, &st, &risks, &assessment, &v.Validity, &v.OverallStatus, &v.Reason, &v.SourceMetadata, &v.EvidenceStartedAt, &v.EvidenceCompletedAt, &v.CreatedAt)
 	if err != nil {
 		return v, mapError(err)
 	}
@@ -159,7 +164,7 @@ func (r *Repository) Get(ctx context.Context, db DBTX, workspaceID, runID string
 	for _, pair := range []struct {
 		raw json.RawMessage
 		dst any
-	}{{b, &v.Baseline}, {f, &v.Final}, {i, &v.Intent}, {a, &v.ActionInspection}, {d, &v.InfrastructureDiff}, {o, &v.Outcome}, {inv, &v.Invariants}, {s, &v.SideEffects}, {st, &v.Stability}, {risks, &v.ForwardRisks}} {
+	}{{b, &v.Baseline}, {f, &v.Final}, {i, &v.Intent}, {a, &v.ActionInspection}, {d, &v.InfrastructureDiff}, {o, &v.Outcome}, {inv, &v.Invariants}, {s, &v.SideEffects}, {st, &v.Stability}, {risks, &v.ForwardRisks}, {assessment, &v.EvidenceAssessment}} {
 		if err = json.Unmarshal(pair.raw, pair.dst); err != nil {
 			return v, fmt.Errorf("decode verification result: %w", err)
 		}

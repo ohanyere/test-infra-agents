@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/evalplane/evalplane/backend/internal/environment"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/gitopsqual"
 	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
@@ -156,21 +157,22 @@ func ContentHash(task BuiltinTask) string {
 	capabilities := append([]string(nil), task.Capabilities...)
 	sort.Strings(capabilities)
 	canonical, _ := json.Marshal(map[string]any{
-		"builtin_task_contract": BuiltinTaskContractVersion,
-		"builtin_task_id":       task.ID,
-		"agent_task":            task.AgentTask,
-		"visible_context":       json.RawMessage(cloneRaw(task.VisibleContext, `{}`)),
-		"observables":           observables,
-		"allowed_actions":       actions,
-		"allowed_resources":     json.RawMessage(cloneRaw(task.AllowedResources, `[]`)),
-		"conditions":            json.RawMessage(cloneRaw(task.Conditions, `[]`)),
-		"criteria":              task.Criteria,
-		"forbidden_behaviors":   task.Forbidden,
-		"ground_truth":          json.RawMessage(cloneRaw(task.GroundTruth, `{}`)),
-		"task_family":           task.Family,
-		"case_type":             task.CaseType,
-		"requirements":          task.Requirements,
-		"capabilities":          capabilities,
+		"builtin_task_contract":              BuiltinTaskContractVersion,
+		"builtin_task_id":                    task.ID,
+		"agent_task":                         task.AgentTask,
+		"visible_context":                    json.RawMessage(cloneRaw(task.VisibleContext, `{}`)),
+		"observables":                        observables,
+		"allowed_actions":                    actions,
+		"allowed_resources":                  json.RawMessage(cloneRaw(task.AllowedResources, `[]`)),
+		"conditions":                         json.RawMessage(cloneRaw(task.Conditions, `[]`)),
+		"criteria":                           task.Criteria,
+		"forbidden_behaviors":                task.Forbidden,
+		"ground_truth":                       json.RawMessage(cloneRaw(task.GroundTruth, `{}`)),
+		"task_family":                        task.Family,
+		"case_type":                          task.CaseType,
+		"requirements":                       task.Requirements,
+		"verification_evidence_requirements": evidenceRequirementsFor(task),
+		"capabilities":                       capabilities,
 	})
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:])
@@ -220,25 +222,33 @@ func ToVersionInput(task BuiltinTask, hash string) scenario.VersionInput {
 		})
 	}
 	return scenario.VersionInput{
-		Description:         task.Description,
-		Category:            strings.ToLower(strings.TrimSpace(task.Domain)),
-		Difficulty:          task.Difficulty,
-		DurationSeconds:     durationSeconds(task.Duration),
-		Environment:         json.RawMessage(`{}`),
-		Conditions:          cloneRaw(task.Conditions, `[]`),
-		Observables:         agentVisibleObservables(task),
-		ExpectedBehaviors:   []string{},
-		ForbiddenBehaviors:  append([]string(nil), task.Forbidden...),
-		Criteria:            criteria,
-		AuthoringMethod:     "manual",
-		AgentTask:           task.AgentTask,
-		AgentVisibleContext: cloneRaw(task.VisibleContext, `{}`),
-		AllowedResources:    cloneRaw(task.AllowedResources, `[]`),
-		AllowedActions:      append([]string(nil), task.AllowedActions...),
-		GroundTruth:         cloneRaw(task.GroundTruth, `{}`),
-		ExecutionSpec:       executionSpecFor(task),
-		SourceMetadata:      SourceMetadata(task, hash),
+		Description:          task.Description,
+		Category:             strings.ToLower(strings.TrimSpace(task.Domain)),
+		Difficulty:           task.Difficulty,
+		DurationSeconds:      durationSeconds(task.Duration),
+		Environment:          json.RawMessage(`{}`),
+		Conditions:           cloneRaw(task.Conditions, `[]`),
+		Observables:          agentVisibleObservables(task),
+		ExpectedBehaviors:    []string{},
+		ForbiddenBehaviors:   append([]string(nil), task.Forbidden...),
+		Criteria:             criteria,
+		AuthoringMethod:      "manual",
+		AgentTask:            task.AgentTask,
+		AgentVisibleContext:  cloneRaw(task.VisibleContext, `{}`),
+		AllowedResources:     cloneRaw(task.AllowedResources, `[]`),
+		AllowedActions:       append([]string(nil), task.AllowedActions...),
+		GroundTruth:          cloneRaw(task.GroundTruth, `{}`),
+		ExecutionSpec:        executionSpecFor(task),
+		SourceMetadata:       SourceMetadata(task, hash),
+		EvidenceRequirements: evidenceRequirementsFor(task),
 	}
+}
+
+func evidenceRequirementsFor(task BuiltinTask) evidencecontract.Requirements {
+	if _, gitopsTask := gitopsqual.Get(task.ID); gitopsTask {
+		return evidencecontract.GitOpsRequirements()
+	}
+	return evidencecontract.DefaultRequirements()
 }
 
 // Built-in task read requirements describe evaluator or mediated-provider
