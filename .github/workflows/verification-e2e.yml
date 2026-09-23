@@ -648,16 +648,56 @@ jobs:
             echo "Cleanup stage events:" >&2
             jq -Rrc 'fromjson? | select(.kind == "qualification_stage" and .value.stage == "cleanup")' "$ARTIFACT_DIR/qualification.log" >&2 || true
           }
+          capture_cleanup_namespace_diagnostics() {
+            echo "Cleanup namespace diagnostics:" >&2
+            timeout 30s kubectl get namespace "$run_namespace" -o yaml > "$ARTIFACT_DIR/product-cleanup-namespace.yaml" 2>&1 || true
+            timeout 30s kubectl get namespace "$run_namespace" -o json |
+              jq '{name: .metadata.name, phase: .status.phase, deletionTimestamp: .metadata.deletionTimestamp, finalizers: .spec.finalizers}' |
+              tee "$ARTIFACT_DIR/product-cleanup-namespace-status.json" >&2 || true
+            : > "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt"
+            for resource in pods deployments.apps replicasets.apps jobs.batch services configmaps serviceaccounts roles.rbac.authorization.k8s.io rolebindings.rbac.authorization.k8s.io; do
+              count="$(timeout 5s kubectl -n "$run_namespace" get "$resource" --ignore-not-found -o name 2>/dev/null | wc -l | tr -d ' ')" || {
+                printf '%s=unavailable\n' "$resource" >> "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt"
+                continue
+              }
+              if (( count > 0 )); then
+                printf '%s=%s\n' "$resource" "$count" >> "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt"
+              fi
+            done
+            cat "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt" >&2 || true
+            print_cleanup_stage_events
+          }
           echo "proof assertion: product cleanup"
-          if ! cleanup_namespace="$(kubectl get namespace "$run_namespace" --ignore-not-found -o name)"; then
+          if ! cleanup_namespace_json="$(timeout 30s kubectl get namespace "$run_namespace" --ignore-not-found -o json)"; then
             echo "Could not read product cleanup namespace state for $run_namespace" >&2
             print_cleanup_stage_events
             fail_proof_assertion "product cleanup namespace read"
           fi
+          if [[ -n "$cleanup_namespace_json" ]]; then
+            jq '{name: .metadata.name, phase: .status.phase, deletionTimestamp: .metadata.deletionTimestamp, finalizers: .spec.finalizers}' <<< "$cleanup_namespace_json" > "$ARTIFACT_DIR/product-cleanup-namespace-before-wait.json"
+            deletion_timestamp="$(jq -r '.metadata.deletionTimestamp // empty' <<< "$cleanup_namespace_json")"
+            if [[ -z "$deletion_timestamp" ]]; then
+              echo "Product cleanup did not request deletion of run namespace $run_namespace" >&2
+              capture_cleanup_namespace_diagnostics
+              fail_proof_assertion "product cleanup deletion not requested"
+            fi
+            echo "Product cleanup deletion is progressing for $run_namespace since $deletion_timestamp"
+            if ! kubectl wait --for=delete "namespace/$run_namespace" --timeout=120s > "$ARTIFACT_DIR/product-cleanup-wait.txt" 2>&1; then
+              echo "Product cleanup deletion did not complete within 120 seconds for $run_namespace" >&2
+              cat "$ARTIFACT_DIR/product-cleanup-wait.txt" >&2 || true
+              capture_cleanup_namespace_diagnostics
+              fail_proof_assertion "product cleanup deletion timeout"
+            fi
+          fi
+          if ! cleanup_namespace="$(timeout 30s kubectl get namespace "$run_namespace" --ignore-not-found -o name)"; then
+            echo "Could not verify product cleanup namespace absence for $run_namespace" >&2
+            capture_cleanup_namespace_diagnostics
+            fail_proof_assertion "product cleanup post-wait namespace read"
+          fi
           if [[ -n "$cleanup_namespace" ]]; then
-            echo "Product cleanup did not remove run namespace $run_namespace" >&2
-            print_cleanup_stage_events
-            fail_proof_assertion "product cleanup"
+            echo "Product cleanup namespace still exists after deletion wait: $run_namespace" >&2
+            capture_cleanup_namespace_diagnostics
+            fail_proof_assertion "product cleanup namespace still present"
           fi
           if ! printf 'product_run_namespace_cleanup=VERIFIED\n' > "$ARTIFACT_DIR/cleanup.txt"; then
             fail_proof_assertion "product cleanup artifact"
