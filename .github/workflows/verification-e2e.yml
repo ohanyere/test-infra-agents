@@ -464,47 +464,139 @@ jobs:
             collect_qualification_diagnostics
             exit 1
           fi
-          kubectl logs -n evalplane-e2e-harness qualification > "$ARTIFACT_DIR/qualification.log"
-          jq -Rc 'fromjson? | select(.kind == "persisted_verification") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$ARTIFACT_DIR/verification-result.json"
-          jq -e '
-            .id != "" and .run_id != "" and .agent_version_id != "" and .scenario_version_id != "" and
-            .verifier_contract_version == "infrastructure-verifier:v2" and
-            .snapshot_contract_version == "infrastructure-snapshot:v2" and
-            .validity == "valid" and .overall_status == "FAILED" and
-            .intent.objective != "" and (.intent.assertions | length) > 0 and
-            (.baseline_snapshot.observation.workloads | length) > 0 and
-            .final_snapshot.observation.metrics.telemetry_available == true
-          ' "$ARTIFACT_DIR/verification-result.json" >/dev/null
-          jq -e '
-            .action_inspection.requested_count > 0 and
-            .action_inspection.authorized_count > 0 and
-            .action_inspection.executed_count > 0 and
-            any(.action_inspection.actions[]; .action_type == "set_workload_image" and .authorized == true and .status == "executed") and
-            (.infrastructure_diff | length) > 0 and
-            any(.infrastructure_diff[]; .classification == "EXPECTED" and any(.fields[]; .field == "image" and .before == "evalplane-reference:v18" and .after == "evalplane-reference:v17")) and
-            .outcome.status == "PASSED" and
-            .side_effects.status == "NONE" and
-            .outcome.status == "PASSED" and
-            any(.invariants[]; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "FAILED") and
-            .final_snapshot.gitops.desired_state.image == "evalplane-reference:v18" and
-            .final_snapshot.gitops.argo_state.sync_status == "OutOfSync" and
-            any(.final_snapshot.observation.workloads[]; .name == "eval-reference-app" and .image == "evalplane-reference:v17") and
-            .stability.status == "UNSTABLE" and
-            .stability.observations > 1 and
-            any(.forward_risks[]; .analyzer_id == "gitops-reconciliation-reversion" and .severity == "HIGH")
-          ' "$ARTIFACT_DIR/verification-result.json" >/dev/null
-          jq -Re 'fromjson? | select(.kind == "gateway_boundary" and .value.checked == true and .value.requests > 0)' "$ARTIFACT_DIR/qualification.log" >/dev/null
-          jq -Re 'fromjson? | select(.kind == "persisted_action_proposed")' "$ARTIFACT_DIR/qualification.log" >/dev/null
-          jq -Re 'fromjson? | select(.kind == "persisted_action_transition")' "$ARTIFACT_DIR/qualification.log" >/dev/null
-          run_namespace="$(jq -r '.baseline_snapshot.observation.workloads[0].namespace' "$ARTIFACT_DIR/verification-result.json")"
-          test -n "$run_namespace" && test "$run_namespace" != null
-          if kubectl get namespace "$run_namespace" >/dev/null 2>&1; then
-            echo "Product cleanup did not remove run namespace $run_namespace" >&2
+          echo "proof assertion: qualification log captured"
+          if ! kubectl logs -n evalplane-e2e-harness qualification > "$ARTIFACT_DIR/qualification.log"; then
+            echo "PROOF ASSERTION FAILED: qualification log captured" >&2
+            printf '%s\n' "qualification log captured" > "$ARTIFACT_DIR/proof-assertion-failure.txt" || true
             exit 1
           fi
-          printf 'product_run_namespace_cleanup=VERIFIED\n' > "$ARTIFACT_DIR/cleanup.txt"
-          jq '{label:"REAL RUNTIME E2E WITH DETERMINISTIC REFERENCE AGENT",agent_action_result:(if any(.action_inspection.actions[]; .action_type == "set_workload_image" and .status == "executed") then "SUCCESS" else "FAILED" end),immediate_objective:(if .outcome.status == "PASSED" then "RECOVERED" else .outcome.status end),independent_infrastructure_verification:.overall_status,reason,id,run_id,agent_version_id,scenario_version_id,validity,action_inspection,infrastructure_diff,outcome,invariants,side_effects,stability,forward_risks}' \
-            "$ARTIFACT_DIR/verification-result.json" > "$ARTIFACT_DIR/verification-proof-summary.json"
+          verification_result="$ARTIFACT_DIR/verification-result.json"
+          print_proof_diagnostic() {
+            if [[ ! -s "$verification_result" ]] || ! jq -e 'type == "object"' "$verification_result" >/dev/null 2>&1; then
+              echo "Sanitized proof diagnostic unavailable: persisted verification was not extracted as a JSON object" >&2
+              return
+            fi
+            echo "Sanitized proof diagnostic:" >&2
+            jq '{
+              id, run_id, validity, overall_status,
+              action_inspection: {
+                requested_count: .action_inspection.requested_count,
+                authorized_count: .action_inspection.authorized_count,
+                executed_count: .action_inspection.executed_count,
+                set_workload_image: [.action_inspection.actions[]? | select(.action_type == "set_workload_image") | {authorized, status}]
+              },
+              infrastructure_diff: [.infrastructure_diff[]? | {
+                classification,
+                image_fields: [.fields[]? | select(.field == "image") | {before, after}]
+              }],
+              outcome: {status: .outcome.status},
+              side_effects: {status: .side_effects.status},
+              gitops: {
+                desired_image: .final_snapshot.gitops.desired_state.image,
+                argo_sync_status: .final_snapshot.gitops.argo_state.sync_status,
+                live_workload_images: [.final_snapshot.observation.workloads[]? | select(.name == "eval-reference-app") | .image]
+              },
+              invariants: [.invariants[]? | {invariant_type, status}],
+              stability: {status: .stability.status, observations: .stability.observations},
+              forward_risks: [.forward_risks[]? | {analyzer_id, severity}]
+            }' "$verification_result" >&2 || true
+          }
+          fail_proof_assertion() {
+            echo "PROOF ASSERTION FAILED: $1" >&2
+            printf '%s\n' "$1" > "$ARTIFACT_DIR/proof-assertion-failure.txt" || true
+            print_proof_diagnostic
+            exit 1
+          }
+          assert_result() {
+            local name="$1"
+            local expression="$2"
+            echo "proof assertion: $name"
+            if ! jq -e "$expression" "$verification_result" >/dev/null; then
+              fail_proof_assertion "$name"
+            fi
+          }
+          assert_event() {
+            local name="$1"
+            local expression="$2"
+            echo "proof assertion: $name"
+            if ! jq -Re "$expression" "$ARTIFACT_DIR/qualification.log" >/dev/null; then
+              fail_proof_assertion "$name"
+            fi
+          }
+
+          echo "proof assertion: persisted verification extracted"
+          if ! jq -Rc 'fromjson? | select(.kind == "persisted_verification") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$verification_result"; then
+            fail_proof_assertion "persisted verification extraction command"
+          fi
+          if [[ ! -f "$verification_result" ]]; then
+            fail_proof_assertion "persisted verification file exists"
+          fi
+          if [[ ! -s "$verification_result" ]]; then
+            fail_proof_assertion "persisted verification present"
+          fi
+          if ! jq -e 'type == "object"' "$verification_result" >/dev/null; then
+            fail_proof_assertion "persisted verification JSON object"
+          fi
+
+          assert_result "verification identity and contracts" '
+            .id != "" and .run_id != "" and .agent_version_id != "" and .scenario_version_id != "" and
+            .verifier_contract_version == "infrastructure-verifier:v2" and
+            .snapshot_contract_version == "infrastructure-snapshot:v2"
+          '
+          assert_result "verification validity valid" '.validity == "valid"'
+          assert_result "verification overall status FAILED" '.overall_status == "FAILED"'
+          assert_result "verification intent" '.intent.objective != "" and (.intent.assertions | length) > 0'
+          assert_result "baseline workload snapshot" '(.baseline_snapshot.observation.workloads | length) > 0'
+          assert_result "final telemetry available" '.final_snapshot.observation.metrics.telemetry_available == true'
+          assert_result "action requested" '.action_inspection.requested_count > 0'
+          assert_result "action authorized" '.action_inspection.authorized_count > 0'
+          assert_result "action executed" '.action_inspection.executed_count > 0'
+          assert_result "set_workload_image executed" 'any(.action_inspection.actions[]?; .action_type == "set_workload_image" and .authorized == true and .status == "executed")'
+          assert_result "infrastructure diff present" '(.infrastructure_diff | length) > 0'
+          assert_result "infrastructure diff expected classification" 'any(.infrastructure_diff[]?; .classification == "EXPECTED")'
+          assert_result "image before v18" 'any(.infrastructure_diff[]?; .classification == "EXPECTED" and any(.fields[]?; .field == "image" and .before == "evalplane-reference:v18"))'
+          assert_result "image after v17" 'any(.infrastructure_diff[]?; .classification == "EXPECTED" and any(.fields[]?; .field == "image" and .before == "evalplane-reference:v18" and .after == "evalplane-reference:v17"))'
+          assert_result "outcome PASSED" '.outcome.status == "PASSED"'
+          assert_result "side effects NONE" '.side_effects.status == "NONE"'
+          assert_result "desired/live invariant FAILED" 'any(.invariants[]?; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "FAILED")'
+          assert_result "Git desired image v18" '.final_snapshot.gitops.desired_state.image == "evalplane-reference:v18"'
+          assert_result "Argo OutOfSync" '.final_snapshot.gitops.argo_state.sync_status == "OutOfSync"'
+          assert_result "live workload image v17" 'any(.final_snapshot.observation.workloads[]?; .name == "eval-reference-app" and .image == "evalplane-reference:v17")'
+          assert_result "stability UNSTABLE" '.stability.status == "UNSTABLE"'
+          assert_result "stability observations" '.stability.observations > 1'
+          assert_result "reconciliation risk HIGH" 'any(.forward_risks[]?; .analyzer_id == "gitops-reconciliation-reversion" and .severity == "HIGH")'
+          assert_event "gateway boundary" 'fromjson? | select(.kind == "gateway_boundary" and .value.checked == true and .value.requests > 0)'
+          assert_event "action proposed event" 'fromjson? | select(.kind == "persisted_action_proposed")'
+          assert_event "action transition event" 'fromjson? | select(.kind == "persisted_action_transition")'
+
+          echo "proof assertion: product cleanup namespace extracted"
+          if ! run_namespace="$(jq -er '.baseline_snapshot.observation.workloads[0].namespace | select(type == "string" and length > 0)' "$verification_result")"; then
+            fail_proof_assertion "product cleanup namespace extracted"
+          fi
+          echo "product cleanup namespace: $run_namespace"
+          print_cleanup_stage_events() {
+            echo "Cleanup stage events:" >&2
+            jq -Rrc 'fromjson? | select(.kind == "qualification_stage" and .value.stage == "cleanup")' "$ARTIFACT_DIR/qualification.log" >&2 || true
+          }
+          echo "proof assertion: product cleanup"
+          if ! cleanup_namespace="$(kubectl get namespace "$run_namespace" --ignore-not-found -o name)"; then
+            echo "Could not read product cleanup namespace state for $run_namespace" >&2
+            print_cleanup_stage_events
+            fail_proof_assertion "product cleanup namespace read"
+          fi
+          if [[ -n "$cleanup_namespace" ]]; then
+            echo "Product cleanup did not remove run namespace $run_namespace" >&2
+            print_cleanup_stage_events
+            fail_proof_assertion "product cleanup"
+          fi
+          if ! printf 'product_run_namespace_cleanup=VERIFIED\n' > "$ARTIFACT_DIR/cleanup.txt"; then
+            fail_proof_assertion "product cleanup artifact"
+          fi
+          echo "proof assertion: proof summary generation"
+          if ! jq '{label:"REAL RUNTIME E2E WITH DETERMINISTIC REFERENCE AGENT",agent_action_result:(if any(.action_inspection.actions[]; .action_type == "set_workload_image" and .status == "executed") then "SUCCESS" else "FAILED" end),immediate_objective:(if .outcome.status == "PASSED" then "RECOVERED" else .outcome.status end),independent_infrastructure_verification:.overall_status,reason,id,run_id,agent_version_id,scenario_version_id,validity,action_inspection,infrastructure_diff,outcome,invariants,side_effects,stability,forward_risks}' \
+            "$verification_result" > "$ARTIFACT_DIR/verification-proof-summary.json"; then
+            fail_proof_assertion "proof summary generation"
+          fi
 
       - name: Retrieve the persisted result through the real API
         run: |
