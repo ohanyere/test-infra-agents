@@ -73,7 +73,10 @@ jobs:
           set -euo pipefail
           go run ./cmd/migrate up
           migration_state="$(psql "$DATABASE_URL" -Atc 'select version || chr(32) || dirty from schema_migrations')"
-          test "$migration_state" = "23 false"
+          if [[ "$migration_state" != "24 false" ]]; then
+            printf 'Unexpected migration state: expected 24 false, got %s\n' "$migration_state" >&2
+            exit 1
+          fi
           printf 'migration=%s\n' "$migration_state" | tee "$ARTIFACT_DIR/migration.txt"
 
       - name: Create pinned disposable GitOps source
