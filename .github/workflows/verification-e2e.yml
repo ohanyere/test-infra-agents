@@ -218,11 +218,11 @@ jobs:
           #!/bin/sh
           set -eu
           git daemon --listen=0.0.0.0 --reuseaddr --base-path=/srv --export-all --verbose /srv/repo.git &
-          exec busybox httpd -f -p 8080 -h /www
+          exec httpd -f -p 8080 -h /www
           SCRIPT
           cat > /tmp/git-server/Dockerfile <<'DOCKER'
           FROM alpine/git:2.49.1
-          RUN apk add --no-cache git-daemon
+          RUN apk add --no-cache busybox-extras git-daemon
           COPY repo.git /srv/repo.git
           COPY www /www
           COPY entrypoint.sh /entrypoint.sh
@@ -231,10 +231,32 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
           docker build -t evalplane-git-fixture:e2e /tmp/git-server
-          git_fixture_container="$(docker run --rm -d -p 127.0.0.1::9418 evalplane-git-fixture:e2e)"
-          trap 'docker stop "$git_fixture_container" >/dev/null' EXIT
+          git_fixture_container="$(docker run -d -p 127.0.0.1::9418 -p 127.0.0.1::8080 evalplane-git-fixture:e2e)"
+          collect_git_fixture_diagnostics() {
+            mkdir -p "$ARTIFACT_DIR"
+            docker inspect "$git_fixture_container" > "$ARTIFACT_DIR/git-fixture-smoke-inspect.json" 2>&1 || true
+            docker logs "$git_fixture_container" > "$ARTIFACT_DIR/git-fixture-smoke.log" 2>&1 || true
+          }
+          cleanup_git_fixture() {
+            status=$?
+            if (( status != 0 )); then
+              collect_git_fixture_diagnostics
+              docker stop "$git_fixture_container" >/dev/null 2>&1 || true
+              return
+            fi
+            docker rm --force "$git_fixture_container" >/dev/null 2>&1 || true
+          }
+          trap cleanup_git_fixture EXIT
           git_fixture_port="$(docker port "$git_fixture_container" 9418/tcp | sed 's/.*://')"
-          test -n "$git_fixture_port"
+          http_fixture_port="$(docker port "$git_fixture_container" 8080/tcp | sed 's/.*://')"
+          if [[ -z "$git_fixture_port" ]]; then
+            echo "Git fixture did not publish 9418/tcp" >&2
+            exit 1
+          fi
+          if [[ -z "$http_fixture_port" ]]; then
+            echo "HTTP fixture did not publish 8080/tcp" >&2
+            exit 1
+          fi
           expected_revision="$(cat /tmp/gitops-revision)"
           served_revision=""
           for attempt in {1..10}; do
@@ -250,6 +272,20 @@ jobs:
             exit 1
           fi
           echo "Git fixture serves pinned revision $served_revision"
+          fixture_state=""
+          for attempt in {1..10}; do
+            fixture_state="$(timeout 5s curl --fail --silent --show-error "http://127.0.0.1:${http_fixture_port}/cgi-bin/state" 2>/dev/null)" || true
+            if jq -e --arg revision "$expected_revision" '.revision == $revision and .image == "evalplane-reference:v18"' <<< "$fixture_state" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          if ! jq -e --arg revision "$expected_revision" '.revision == $revision and .image == "evalplane-reference:v18"' <<< "$fixture_state" >/dev/null 2>&1; then
+            collect_git_fixture_diagnostics
+            echo "Git fixture HTTP control endpoint did not serve its pinned state" >&2
+            exit 1
+          fi
+          echo "Git fixture HTTP control endpoint serves pinned state"
 
       - name: Build E2E images
         working-directory: backend

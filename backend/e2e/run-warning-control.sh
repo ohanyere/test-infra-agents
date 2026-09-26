@@ -39,8 +39,8 @@ assert_result() {
   jq -e "$expression" "$result" >/dev/null || fail_assertion "$name"
 }
 
-kubectl -n argocd get appproject evalplane-e2e >/dev/null
-kubectl apply -f backend/e2e/qualification-warning.yaml
+timeout 30s kubectl -n argocd get appproject evalplane-e2e >/dev/null || fail_assertion "Argo project readable"
+timeout 30s kubectl apply -f backend/e2e/qualification-warning.yaml || fail_assertion "qualification pod applied"
 if ! kubectl wait -n "$harness_namespace" --for=condition=Ready "pod/$pod" --timeout=180s; then
   fail_assertion "qualification pod ready"
 fi
@@ -48,9 +48,9 @@ fi
 capacity_deadline=$((SECONDS + 180))
 deployment_json=""
 while ((SECONDS < capacity_deadline)); do
-  run_namespace="$(kubectl -n argocd get application "$application" -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)"
+  run_namespace="$(timeout 30s kubectl -n argocd get application "$application" -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)"
   if [[ -n "$run_namespace" ]]; then
-    deployment_json="$(kubectl -n "$run_namespace" get deployment eval-reference-app -o json 2>/dev/null || true)"
+    deployment_json="$(timeout 30s kubectl -n "$run_namespace" get deployment eval-reference-app -o json 2>/dev/null || true)"
     if [[ -n "$deployment_json" ]]; then
       break
     fi
@@ -75,7 +75,7 @@ deadline=$((SECONDS + 720))
 last_phase=""
 succeeded=false
 while ((SECONDS < deadline)); do
-  if ! phase="$(kubectl -n "$harness_namespace" get pod "$pod" -o jsonpath='{.status.phase}')"; then
+  if ! phase="$(timeout 30s kubectl -n "$harness_namespace" get pod "$pod" -o jsonpath='{.status.phase}')"; then
     fail_assertion "qualification pod phase readable"
   fi
   if [[ "$phase" != "$last_phase" ]]; then

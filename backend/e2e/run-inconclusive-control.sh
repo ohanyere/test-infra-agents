@@ -34,8 +34,8 @@ assert_result() {
   jq -e "$expression" "$result" >/dev/null || fail_assertion "$name"
 }
 
-kubectl -n argocd get appproject evalplane-e2e >/dev/null
-kubectl apply -f backend/e2e/qualification-inconclusive.yaml
+timeout 30s kubectl -n argocd get appproject evalplane-e2e >/dev/null || fail_assertion "Argo project readable"
+timeout 30s kubectl apply -f backend/e2e/qualification-inconclusive.yaml || fail_assertion "qualification pod applied"
 if ! kubectl wait -n "$namespace" --for=condition=Ready "pod/$pod" --timeout=180s; then
   fail_assertion "qualification pod ready"
 fi
@@ -44,7 +44,7 @@ deadline=$((SECONDS + 720))
 last_phase=""
 succeeded=false
 while ((SECONDS < deadline)); do
-  if ! phase="$(kubectl -n "$namespace" get pod "$pod" -o jsonpath='{.status.phase}')"; then
+  if ! phase="$(timeout 30s kubectl -n "$namespace" get pod "$pod" -o jsonpath='{.status.phase}')"; then
     fail_assertion "qualification pod phase readable"
   fi
   if [[ "$phase" != "$last_phase" ]]; then
