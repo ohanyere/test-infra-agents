@@ -35,11 +35,12 @@ type EvaluationInput struct {
 }
 
 type MetricValue struct {
-	State       string   `json:"state"`
-	Value       *float64 `json:"value,omitempty"`
-	Unit        string   `json:"unit,omitempty"`
-	EvidenceIDs []string `json:"evidence_ids,omitempty"`
-	Reason      string   `json:"reason,omitempty"`
+	State             string   `json:"state"`
+	Value             *float64 `json:"value,omitempty"`
+	Unit              string   `json:"unit,omitempty"`
+	EvidenceIDs       []string `json:"evidence_ids,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+	EvidenceSelection string   `json:"evidence_selection,omitempty"`
 }
 
 type CriterionResult struct {
@@ -54,6 +55,7 @@ type CriterionResult struct {
 	Status              string          `json:"status"`
 	Reason              string          `json:"reason"`
 	EvidenceIDs         []string        `json:"evidence_ids,omitempty"`
+	EvidenceSelection   string          `json:"evidence_selection,omitempty"`
 }
 
 type Finding struct {
@@ -79,9 +81,10 @@ type EvaluationResult struct {
 }
 
 type evaluationEvidence struct {
-	Metrics         map[string]MetricValue
-	Actions         []evidence.AgentAction
-	Events          []evidence.RunEvent
-	RuntimeFailure  bool
-	RuntimeEvidence []string
+	Metrics           map[string]MetricValue
+	HistoricalMetrics map[string]MetricValue
+	Actions           []evidence.AgentAction
+	Events            []evidence.RunEvent
+	RuntimeFailure    bool
+	RuntimeEvidence   []string
 }

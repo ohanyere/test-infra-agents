@@ -155,12 +155,14 @@ func (w *Worker) agentLoop(ctx context.Context, run execution.ExecutionRun, env 
 		if err = w.event(ctx, run.RunID, "decision", "agent_decision_received", map[string]any{"step": step, "action_count": len(response.Actions)}); err != nil {
 			return err
 		}
-		useful := false
+		useful, terminal := false, false
 		for _, action := range response.Actions {
 			if err = w.checkStop(ctx, run); err != nil {
 				return err
 			}
-			if action.Type != "no_op" {
+			if action.Type == "no_op" {
+				terminal = true
+			} else {
 				useful = true
 			}
 			if err = w.processAction(ctx, run, env, view, action); err != nil {
@@ -175,16 +177,16 @@ func (w *Worker) agentLoop(ctx context.Context, run execution.ExecutionRun, env 
 		if err = w.event(ctx, run.RunID, "system", "agent_step_completed", map[string]any{"step": step}); err != nil {
 			return err
 		}
-		if !useful {
+		if terminal || !useful {
 			return nil
-		} // Empty responses and exclusively no_op terminate decisions, not grading.
+		} // no_op is the protocol's explicit terminal decision; empty responses preserve the existing contract.
 		if step < w.config.MaxAgentSteps {
 			if err = wait(ctx, w.config.StepInterval); err != nil {
 				return err
 			}
 		}
 	}
-	return w.event(ctx, run.RunID, "system", "max_agent_steps_reached", nil)
+	return &Failure{Code: "agent_step_limit_reached", Class: "agent", Cause: ErrAgentStepLimitReached}
 }
 
 func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, env observation.EnvironmentContext, view scenario.AgentView, action agentgateway.ProposedAction) error {

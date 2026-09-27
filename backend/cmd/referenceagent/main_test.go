@@ -40,3 +40,25 @@ func TestReferencePolicyRollsBackFailedImage(t *testing.T) {
 		t.Fatalf("post-recovery action=%+v", got)
 	}
 }
+
+func TestStepLimitFixtureAlwaysInspects(t *testing.T) {
+	t.Setenv("REFERENCE_AGENT_BEHAVIOR", "step_limit")
+	response := decide(agentgateway.Request{AvailableActions: []string{"inspect", "no_op"}})
+	if len(response.Actions) != 1 || response.Actions[0].Type != "inspect" {
+		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestImmediateRemediationFixtureMutatesOnceThenTerminates(t *testing.T) {
+	t.Setenv("REFERENCE_AGENT_BEHAVIOR", "remediate_immediately")
+	request := agentgateway.Request{AvailableActions: []string{"inspect", "no_op", "set_workload_image"}, AllowedResources: json.RawMessage(`[{"kind":"Deployment","namespace":"run","name":"checkout"}]`), Observation: agentgateway.Observation{Workloads: []agentgateway.WorkloadObservation{{Kind: "Deployment", Namespace: "run", Name: "checkout", Image: "evalplane-reference:v18"}}}}
+	response := decide(request)
+	if len(response.Actions) != 1 || response.Actions[0].Type != "set_workload_image" {
+		t.Fatalf("remediation response=%+v", response)
+	}
+	request.Observation.Workloads[0].Image = "evalplane-reference:v17"
+	response = decide(request)
+	if len(response.Actions) != 1 || response.Actions[0].Type != "no_op" {
+		t.Fatalf("terminal response=%+v", response)
+	}
+}

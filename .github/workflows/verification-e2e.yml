@@ -154,6 +154,8 @@ jobs:
           git -C "$source_dir" reset --hard "$(cat /tmp/gitops-revision)"
           git -C "$source_dir" branch initial-v18
           git -C "$source_dir" branch warning-main
+          git -C "$source_dir" branch stage2-temporal-main
+          git -C "$source_dir" branch stage2-insufficient-main
           git clone --bare "$source_dir" /tmp/repo.git
           mkdir -p /tmp/git-server
           cp -R /tmp/repo.git /tmp/git-server/repo.git
@@ -214,6 +216,54 @@ jobs:
           fi
           exec /www/cgi-bin/warning-state
           SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/stage2-temporal-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-temporal-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-stage2-temporal-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          [ "${REQUEST_METHOD:-}" = POST ] || { printf 'Status: 405 Method Not Allowed\r\n\r\n'; exit 0; }
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-temporal-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/stage2-temporal-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'; exit 0
+          fi
+          exec /www/cgi-bin/stage2-temporal-state
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/stage2-insufficient-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-insufficient-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-stage2-insufficient-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          [ "${REQUEST_METHOD:-}" = POST ] || { printf 'Status: 405 Method Not Allowed\r\n\r\n'; exit 0; }
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-insufficient-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/stage2-insufficient-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'; exit 0
+          fi
+          exec /www/cgi-bin/stage2-insufficient-state
+          SCRIPT
           cat > /tmp/git-server/entrypoint.sh <<'SCRIPT'
           #!/bin/sh
           set -eu
@@ -226,7 +276,7 @@ jobs:
           COPY repo.git /srv/repo.git
           COPY www /www
           COPY entrypoint.sh /entrypoint.sh
-          RUN chmod 0755 /entrypoint.sh /www/cgi-bin/state /www/cgi-bin/remediate-v17 /www/cgi-bin/warning-state /www/cgi-bin/remediate-warning-v17
+          RUN chmod 0755 /entrypoint.sh /www/cgi-bin/state /www/cgi-bin/remediate-v17 /www/cgi-bin/warning-state /www/cgi-bin/remediate-warning-v17 /www/cgi-bin/stage2-temporal-state /www/cgi-bin/remediate-stage2-temporal-v17 /www/cgi-bin/stage2-insufficient-state /www/cgi-bin/remediate-stage2-insufficient-v17
           EXPOSE 9418 8080
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
@@ -446,6 +496,10 @@ jobs:
           [{"Key":"checkout-recovered","Name":"Current checkout error rate","MetricKey":"current_error_rate","Operator":"lte","TargetValue":1,"Unit":"pct","SortOrder":0}]
           JSON
           kubectl create configmap calibrated-criteria -n evalplane-e2e-harness --from-file=criteria.json=/tmp/criteria.json
+          cat > /tmp/stage2-recovery-criteria.json <<'JSON'
+          [{"Key":"checkout-error-rate-recovered","Name":"Checkout error rate after remediation","MetricKey":"error_rate","Operator":"lte","TargetValue":1,"Unit":"pct","SortOrder":0},{"Key":"checkout-availability-recovered","Name":"Checkout availability after remediation","MetricKey":"availability","Operator":"gte","TargetValue":99,"Unit":"pct","SortOrder":1}]
+          JSON
+          kubectl create configmap stage2-recovery-criteria -n evalplane-e2e-harness --from-file=criteria.json=/tmp/stage2-recovery-criteria.json
           kubectl create configmap gitops-proof -n evalplane-e2e-harness --from-literal=revision="$(cat /tmp/gitops-revision)"
           cat <<'YAML' | kubectl apply -f -
           apiVersion: apps/v1
@@ -841,6 +895,15 @@ jobs:
       - name: Run and assert non-blocking risk warning control
         run: bash backend/e2e/run-warning-control.sh
 
+      - name: Run and assert Stage 2 step-exhaustion control
+        run: bash backend/e2e/run-stage2-control.sh step-limit
+
+      - name: Run and assert Stage 2 temporal-recovery control
+        run: bash backend/e2e/run-stage2-control.sh temporal
+
+      - name: Run and assert Stage 2 incomplete-evidence control
+        run: bash backend/e2e/run-stage2-control.sh insufficient
+
       - name: Retrieve the persisted result through the real API
         run: |
           set -euo pipefail
@@ -954,6 +1017,9 @@ jobs:
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification-positive --tail=500 > "$ARTIFACT_DIR/qualification-positive-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification-inconclusive --tail=500 > "$ARTIFACT_DIR/qualification-inconclusive-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification-warning --tail=500 > "$ARTIFACT_DIR/qualification-warning-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-step-limit --tail=500 > "$ARTIFACT_DIR/qualification-stage2-step-limit-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-temporal --tail=500 > "$ARTIFACT_DIR/qualification-stage2-temporal-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-insufficient --tail=500 > "$ARTIFACT_DIR/qualification-stage2-insufficient-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness deployment/git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1
           timeout 30s kubectl logs -n argocd statefulset/argocd-application-controller --tail=300 > "$ARTIFACT_DIR/argocd-controller.log" 2>&1
           timeout 30s kubectl logs -n argocd deployment/argocd-repo-server --tail=200 > "$ARTIFACT_DIR/argocd-repo-server.log" 2>&1
@@ -966,6 +1032,9 @@ jobs:
           timeout 60s kubectl delete -f backend/e2e/qualification-positive.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/qualification-inconclusive.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/qualification-warning.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage2-step-limit.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage2-temporal.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage2-insufficient.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/calibration.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/harness-rbac.yaml --ignore-not-found --wait=false
           timeout 120s kind delete cluster --name evalplane-e2e

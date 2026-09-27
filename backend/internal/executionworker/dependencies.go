@@ -152,6 +152,7 @@ func (e *StageFailure) Unwrap() error { return e.Err }
 var ErrStopped = errors.New("run stopped")
 var ErrLeaseLost = errors.New("worker lease lost")
 var ErrUnsupported = errors.New("scenario unsupported by current runtime")
+var ErrAgentStepLimitReached = errors.New("agent step limit reached")
 
 type Failure struct {
 	Code, Class string

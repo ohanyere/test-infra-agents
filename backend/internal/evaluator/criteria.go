@@ -17,6 +17,7 @@ func evaluateCriterion(criterion scenario.Criterion, normalized evaluationEviden
 		return result
 	}
 	result.EvidenceIDs = append([]string(nil), metric.EvidenceIDs...)
+	result.EvidenceSelection = metric.EvidenceSelection
 	if metric.State != ValuePresent || metric.Value == nil {
 		result.Status, result.Reason = CriterionInconclusive, metric.Reason
 		return result

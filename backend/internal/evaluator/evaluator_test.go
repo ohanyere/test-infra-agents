@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/evaluationbatch"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
+	"github.com/evalplane/evalplane/backend/internal/telemetry"
 )
 
 var evaluatorNow = time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
@@ -62,6 +64,97 @@ func TestCurrentErrorRateUsesPostActionTraffic(t *testing.T) {
 				t.Fatalf("historical bad traffic was not preserved: %+v", result)
 			}
 		})
+	}
+}
+
+func TestPostActionRecoveryMetricsUseOnlyCompleteEligibleEvidence(t *testing.T) {
+	tests := []struct {
+		metric, rawKey, operator, target string
+		bad, good                        float64
+	}{
+		{"error_rate", "error_rate_pct", "lte", `1`, 40, 0},
+		{"current_error_rate", "error_rate_pct", "lte", `1`, 40, 0},
+		{"p95_latency", "p95_latency_ms", "lte", `500`, 900, 100},
+		{"availability", "availability_pct", "gte", `99`, 40, 100},
+	}
+	for _, test := range tests {
+		t.Run(test.metric, func(t *testing.T) {
+			mutatedAt := evaluatorNow.Add(90 * time.Second)
+			makeInput := func(before, after float64, afterAt time.Time, requestRate float64) EvaluationInput {
+				input := evaluationInput(
+					[]scenario.Criterion{criterion("recovery", test.metric, test.operator, test.target, map[string]string{"p95_latency": "ms"}[test.metric])},
+					metricEventAt("run-1", 1, evaluatorNow.Add(time.Minute), map[string]any{"telemetry_available": true, "request_rate_rps": 10, test.rawKey: before}),
+					metricEventAt("run-1", 2, afterAt, map[string]any{"telemetry_available": true, "request_rate_rps": requestRate, test.rawKey: after}),
+				)
+				if input.ScenarioVersion.Criteria[0].Unit == nil || *input.ScenarioVersion.Criteria[0].Unit == "" {
+					unit := "pct"
+					input.ScenarioVersion.Criteria[0].Unit = &unit
+				}
+				input.Actions = []evidence.AgentAction{{ID: "mutation", RunID: "run-1", ActionType: "set_workload_image", Status: "executed", Authorized: true, CreatedAt: mutatedAt, CompletedAt: &mutatedAt}}
+				return input
+			}
+
+			t.Run("bad before good after", func(t *testing.T) {
+				result := mustEvaluate(t, makeInput(test.bad, test.good, mutatedAt.Add(telemetry.RateWindow), 10))
+				if result.Status != StatusPass || result.CriterionResults[0].Status != CriterionPassed {
+					t.Fatalf("result=%+v", result)
+				}
+			})
+			t.Run("good before bad after", func(t *testing.T) {
+				result := mustEvaluate(t, makeInput(test.good, test.bad, mutatedAt.Add(telemetry.RateWindow), 10))
+				if result.Status != StatusFail || result.CriterionResults[0].Status != CriterionFailed {
+					t.Fatalf("result=%+v", result)
+				}
+			})
+			t.Run("incomplete post action window", func(t *testing.T) {
+				result := mustEvaluate(t, makeInput(test.bad, test.good, mutatedAt.Add(telemetry.RateWindow-time.Second), 10))
+				if result.Status != StatusInconclusive || !strings.Contains(result.CriterionResults[0].Reason, "complete required lookback") {
+					t.Fatalf("result=%+v", result)
+				}
+			})
+			t.Run("no traffic", func(t *testing.T) {
+				result := mustEvaluate(t, makeInput(test.bad, test.good, mutatedAt.Add(telemetry.RateWindow), 0))
+				if result.Status != StatusInconclusive || !strings.Contains(result.CriterionResults[0].Reason, "positive request traffic") {
+					t.Fatalf("result=%+v", result)
+				}
+			})
+		})
+	}
+}
+
+func TestRecoveryBoundaryIgnoresReadOnlyActionsAndUsesLatestMutation(t *testing.T) {
+	mutationA := evaluatorNow.Add(time.Minute)
+	mutationB := evaluatorNow.Add(3 * time.Minute)
+	input := evaluationInput(
+		[]scenario.Criterion{criterion("recovery", "error_rate", "lte", `1`, "pct")},
+		metricEventAt("run-1", 1, mutationA.Add(telemetry.RateWindow), map[string]any{"telemetry_available": true, "request_rate_rps": 10, "error_rate_pct": 0}),
+		metricEventAt("run-1", 2, mutationB.Add(telemetry.RateWindow-time.Second), map[string]any{"telemetry_available": true, "request_rate_rps": 10, "error_rate_pct": 0}),
+	)
+	inspectAt, noOpAt := mutationA.Add(time.Minute), mutationA.Add(2*time.Minute)
+	input.Actions = []evidence.AgentAction{
+		{ID: "mutation-a", RunID: "run-1", ActionType: "scale_workload", Status: "executed", Authorized: true, CreatedAt: mutationA, CompletedAt: &mutationA},
+		{ID: "inspect", RunID: "run-1", ActionType: "inspect", Status: "executed", Authorized: true, CreatedAt: inspectAt, CompletedAt: &inspectAt},
+		{ID: "no-op", RunID: "run-1", ActionType: "no_op", Status: "executed", Authorized: true, CreatedAt: noOpAt, CompletedAt: &noOpAt},
+		{ID: "mutation-b", RunID: "run-1", ActionType: "restart_pod", Status: "executed", Authorized: true, CreatedAt: mutationB, CompletedAt: &mutationB},
+	}
+	result := mustEvaluate(t, input)
+	if result.Status != StatusInconclusive || !strings.Contains(result.CriterionResults[0].EvidenceSelection, "mutation-b") {
+		t.Fatalf("latest mutation was not the boundary: %+v", result)
+	}
+
+	input.Events = append(input.Events, metricEventAt("run-1", 3, mutationB.Add(telemetry.RateWindow), map[string]any{"telemetry_available": true, "request_rate_rps": 10, "error_rate_pct": 20}))
+	result = mustEvaluate(t, input)
+	if result.Status != StatusFail {
+		t.Fatalf("latest mutation evidence was not used: %+v", result)
+	}
+}
+
+func TestFailedRunWithBlockingCriterionRemainsFailed(t *testing.T) {
+	input := evaluationInput([]scenario.Criterion{criterion("errors", "error_rate", "lte", `1`, "pct")}, metricEvent("run-1", 1, map[string]any{"telemetry_available": true, "error_rate_pct": 20}))
+	input.Run.Status = "failed"
+	result := mustEvaluate(t, input)
+	if result.Status != StatusFail {
+		t.Fatalf("blocking evidence was masked by incomplete execution: %+v", result)
 	}
 }
 
@@ -263,8 +356,17 @@ func criterion(key, metric, operator, target, unit string) scenario.Criterion {
 }
 
 func metricEvent(runID string, sequence int64, metrics map[string]any) evidence.RunEvent {
+	if _, ok := metrics["request_rate_rps"]; !ok {
+		if available, _ := metrics["telemetry_available"].(bool); available {
+			metrics["request_rate_rps"] = 1.0
+		}
+	}
+	return metricEventAt(runID, sequence, evaluatorNow.Add(time.Duration(sequence)*time.Minute), metrics)
+}
+
+func metricEventAt(runID string, sequence int64, occurredAt time.Time, metrics map[string]any) evidence.RunEvent {
 	payload, _ := json.Marshal(map[string]any{"observation": map[string]any{"workloads": []any{}, "pods": []any{}, "metrics": metrics, "recent_events": []any{}}})
-	return evidence.RunEvent{ID: sequence, RunID: runID, Sequence: sequence, EventType: "observation", OccurredAt: evaluatorNow.Add(time.Duration(sequence) * time.Minute), Payload: payload}
+	return evidence.RunEvent{ID: sequence, RunID: runID, Sequence: sequence, EventType: "observation", OccurredAt: occurredAt, Payload: payload}
 }
 
 func infrastructureEvent(runID string, sequence int64, desired, available int32) evidence.RunEvent {

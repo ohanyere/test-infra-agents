@@ -63,6 +63,29 @@ func TestStatusSemantics(t *testing.T) {
 	}
 }
 
+func TestAgentStepLimitVerdictPrecedence(t *testing.T) {
+	agentFailure, _ := json.Marshal(map[string]any{"classification": "agent", "code": "agent_step_limit_reached"})
+	tests := []struct {
+		name       string
+		evaluation string
+		want       string
+	}{
+		{name: "incomplete execution", evaluation: "inconclusive", want: StatusInconclusive},
+		{name: "blocking outcome", evaluation: "fail", want: StatusFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			in := validInput()
+			in.Evaluation.Status = test.evaluation
+			in.Events = append(in.Events, evidence.RunEvent{ID: 4, RunID: "run", EventType: "system", Summary: "agent_step_limit_reached", OccurredAt: in.Now, Payload: agentFailure})
+			got := Derive(in, HPAConsistencyAnalyzer{})
+			if got.OverallStatus != test.want || got.OverallStatus == StatusVerified || got.OverallStatus == StatusWarning {
+				t.Fatalf("status=%s reason=%s", got.OverallStatus, got.Reason)
+			}
+		})
+	}
+}
+
 func TestActionDiffAndAttribution(t *testing.T) {
 	got := Derive(validInput())
 	if got.ActionInspection.Requested != 1 || got.ActionInspection.Authorized != 1 || got.ActionInspection.Executed != 1 {

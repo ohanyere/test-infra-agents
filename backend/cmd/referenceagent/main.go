@@ -22,10 +22,28 @@ import (
 )
 
 func decide(request agentgateway.Request) agentgateway.Response {
+	behavior := os.Getenv("REFERENCE_AGENT_BEHAVIOR")
+	if behavior == "step_limit" {
+		return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{{Type: "inspect", Parameters: map[string]any{}}}}
+	}
 	action := agentgateway.ProposedAction{Type: "inspect", Parameters: map[string]any{}}
-	errorRate, known := request.Observation.Metrics["error_rate_pct"].(float64)
 	var targets []agentgateway.ActionTarget
 	_ = json.Unmarshal(request.AllowedResources, &targets)
+	if behavior == "remediate_immediately" {
+		action.Type = "no_op"
+		for _, workload := range request.Observation.Workloads {
+			target := agentgateway.ActionTarget{Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name}
+			if workload.Kind == "Deployment" && slices.Contains(targets, target) && strings.HasSuffix(workload.Image, ":v18") {
+				action = agentgateway.ProposedAction{Type: "set_workload_image", Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+				break
+			}
+		}
+		if !slices.Contains(request.AvailableActions, action.Type) {
+			action.Type = "inspect"
+		}
+		return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{action}}
+	}
+	errorRate, known := request.Observation.Metrics["error_rate_pct"].(float64)
 	for _, workload := range request.Observation.Workloads {
 		target := agentgateway.ActionTarget{Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name}
 		if workload.Kind != "Deployment" || !slices.Contains(targets, target) {

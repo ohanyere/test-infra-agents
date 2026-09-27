@@ -113,11 +113,17 @@ const argoApplication = "checkout-gitops-proof"
 const argoPositiveApplication = "checkout-gitops-proof-positive"
 const argoInconclusiveApplication = "checkout-gitops-proof-inconclusive"
 const argoWarningApplication = "checkout-gitops-proof-warning"
+const argoStage2StepLimitApplication = "checkout-stage2-step-limit"
+const argoStage2TemporalApplication = "checkout-stage2-temporal"
+const argoStage2InsufficientApplication = "checkout-stage2-insufficient"
 const argoProject = "evalplane-e2e"
 
 const positiveControl = "positive"
 const inconclusiveControl = "inconclusive"
 const warningControl = "warning"
+const stage2StepLimitControl = "stage2-step-limit"
+const stage2TemporalControl = "stage2-temporal"
+const stage2InsufficientControl = "stage2-insufficient"
 
 var argoApplications = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
 
@@ -134,7 +140,15 @@ func (r *runtime) inconclusive() bool { return r.control == inconclusiveControl 
 
 func (r *runtime) warning() bool { return r.control == warningControl }
 
-func (r *runtime) durable() bool { return r.positive() || r.warning() }
+func (r *runtime) stage2StepLimit() bool { return r.control == stage2StepLimitControl }
+
+func (r *runtime) stage2Temporal() bool { return r.control == stage2TemporalControl }
+
+func (r *runtime) stage2Insufficient() bool { return r.control == stage2InsufficientControl }
+
+func (r *runtime) durable() bool {
+	return r.positive() || r.warning() || r.stage2Temporal() || r.stage2Insufficient()
+}
 
 func (r *runtime) Prepare(ctx context.Context, env observation.EnvironmentContext, version scenario.Version, hidden execution.HiddenVariant) error {
 	emitStage("reference_workload_and_telemetry", "started")
@@ -515,6 +529,27 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		workspaceName, workspaceSlug = "Live warning qualification", "live-warning-qualification"
 		email = "stage17-warning@evalplane.local"
 	}
+	if r.stage2StepLimit() {
+		scenarioName, scenarioSlug = "Stage 2 agent step exhaustion", "stage2-agent-step-exhaustion"
+		description = "Prove bounded agent execution cannot silently qualify as successful verification"
+		identityName, identitySlug = "Evalplane Stage 2 Step Limit", "evalplane-stage2-step-limit"
+		workspaceName, workspaceSlug = "Stage 2 step-limit qualification", "stage2-step-limit-qualification"
+		email = "stage2-step-limit@evalplane.local"
+	}
+	if r.stage2Temporal() {
+		scenarioName, scenarioSlug = "Stage 2 temporal recovery", "stage2-temporal-recovery"
+		description = "Prove recovery criteria use complete evidence after the latest mutation"
+		identityName, identitySlug = "Evalplane Stage 2 Temporal", "evalplane-stage2-temporal"
+		workspaceName, workspaceSlug = "Stage 2 temporal qualification", "stage2-temporal-qualification"
+		email = "stage2-temporal@evalplane.local"
+	}
+	if r.stage2Insufficient() {
+		scenarioName, scenarioSlug = "Stage 2 incomplete recovery evidence", "stage2-incomplete-recovery-evidence"
+		description = "Prove an incomplete post-action lookback remains inconclusive"
+		identityName, identitySlug = "Evalplane Stage 2 Incomplete", "evalplane-stage2-incomplete"
+		workspaceName, workspaceSlug = "Stage 2 incomplete qualification", "stage2-incomplete-qualification"
+		email = "stage2-incomplete@evalplane.local"
+	}
 	startStage("qualification_criteria")
 	raw, err := os.ReadFile("/criteria/criteria.json")
 	if err != nil {
@@ -555,7 +590,12 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	}
 	completeStage()
 	startStage("qualification_scenario")
-	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: scenarioName, Slug: scenarioSlug, InitialVersion: scenario.VersionInput{Description: description, Category: category, Difficulty: "easy", DurationSeconds: 170, AgentTask: agentTask, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: allowedActions, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: qualificationObservables(), ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(executionSpec), Criteria: criteria, EvidenceRequirements: evidencecontract.GitOpsRequirements()}})
+	runDuration, runExecutionSpec := 170, executionSpec
+	if r.stage2Insufficient() {
+		runDuration = 15
+		runExecutionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"stages":[{"target":12,"duration_seconds":15}]}}`
+	}
+	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: scenarioName, Slug: scenarioSlug, InitialVersion: scenario.VersionInput{Description: description, Category: category, Difficulty: "easy", DurationSeconds: runDuration, AgentTask: agentTask, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: allowedActions, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: qualificationObservables(), ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(runExecutionSpec), Criteria: criteria, EvidenceRequirements: evidencecontract.GitOpsRequirements()}})
 	if err != nil {
 		return err
 	}
@@ -603,6 +643,10 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	record := &capture{version: av.LatestVersion.ID}
 	cfg.MaxAgentSteps = 30
 	cfg.StepInterval = 5 * time.Second
+	if r.stage2StepLimit() {
+		cfg.MaxAgentSteps = 2
+		cfg.StepInterval = time.Second
+	}
 	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actionProvider, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), OnStage: emitStage, OnFailure: func(kind, failureStage string, failureErr error) {
 		emit(kind, map[string]string{"stage": failureStage, "error": diagnosticWorkerError(failureErr)})
 	}, Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
@@ -618,14 +662,18 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	emitStage("qualification_setup", "completed")
 	startStage("worker_execution")
 	execErr := w.ExecuteRun(ctx, run)
-	if execErr != nil {
+	expectedStepLimit := r.stage2StepLimit() && errors.Is(execErr, executionworker.ErrAgentStepLimitReached)
+	if execErr != nil && !expectedStepLimit {
 		emitStage("worker_execution", "failed")
 	} else {
 		completeStage()
 	}
-	if execErr != nil {
+	if execErr != nil && !expectedStepLimit {
 		emit("worker_error", diagnosticWorkerError(execErr))
 		return execErr
+	}
+	if expectedStepLimit {
+		emit("expected_worker_terminal", map[string]string{"reason": "agent_step_limit_reached"})
 	}
 	startStage("persisted_proof_fetch")
 	final, done := context.WithTimeout(context.Background(), 30*time.Second)
@@ -695,6 +743,12 @@ func run() (err error) {
 		application = argoInconclusiveApplication
 	} else if control == warningControl {
 		application = argoWarningApplication
+	} else if control == stage2StepLimitControl {
+		application = argoStage2StepLimitApplication
+	} else if control == stage2TemporalControl {
+		application = argoStage2TemporalApplication
+	} else if control == stage2InsufficientControl {
+		application = argoStage2InsufficientApplication
 	}
 	gitHTTP := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
 	r := &runtime{KubernetesRuntime: base, client: client, dynamic: dynamicClient, gitRoot: os.Getenv("GITOPS_REPOSITORY_ROOT"), gitRepo: os.Getenv("GITOPS_REPOSITORY_URL"), gitRevision: os.Getenv("GITOPS_REVISION"), gitStateURL: os.Getenv("GITOPS_STATE_URL"), gitUpdateURL: os.Getenv("GITOPS_UPDATE_URL"), gitHTTP: gitHTTP, control: control, application: application, argoEnabled: os.Getenv("E2E_GITOPS") == "true"}

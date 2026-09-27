@@ -110,6 +110,6 @@ func findingEvidence(f Finding) json.RawMessage {
 }
 
 func criterionEvidence(result CriterionResult) json.RawMessage {
-	raw, _ := json.Marshal(map[string]any{"status": result.Status, "reason": result.Reason, "observed_state": result.ObservedState, "evidence_references": result.EvidenceIDs})
+	raw, _ := json.Marshal(map[string]any{"status": result.Status, "reason": result.Reason, "observed_state": result.ObservedState, "evidence_references": result.EvidenceIDs, "evidence_selection": result.EvidenceSelection})
 	return raw
 }

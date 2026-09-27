@@ -400,8 +400,8 @@ func assertOrder(t *testing.T, trace []string, items ...string) {
 func TestMaxStepsFreshObservationsAndActionLifecycle(t *testing.T) {
 	f := newFixture()
 	f.response = []agentgateway.ProposedAction{{Type: "inspect"}}
-	if e := f.worker(t, testConfig()).ExecuteRun(context.Background(), f.run); e != nil {
-		t.Fatal(e)
+	if e := f.worker(t, testConfig()).ExecuteRun(context.Background(), f.run); !errors.Is(e, ErrAgentStepLimitReached) {
+		t.Fatalf("error=%v", e)
 	}
 	if len(f.requests) != 3 || f.observes != 7 {
 		t.Fatalf("calls=%d observations=%d", len(f.requests), f.observes)
@@ -435,8 +435,8 @@ func TestDenialPersistsAndReachesEvaluator(t *testing.T) {
 	f.response = []agentgateway.ProposedAction{{Type: "scale_workload", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: "production", Name: "app"}}}
 	c := testConfig()
 	c.MaxAgentSteps = 1
-	if e := f.worker(t, c).ExecuteRun(context.Background(), f.run); e != nil {
-		t.Fatal(e)
+	if e := f.worker(t, c).ExecuteRun(context.Background(), f.run); !errors.Is(e, ErrAgentStepLimitReached) {
+		t.Fatalf("error=%v", e)
 	}
 	if f.executed != 0 || len(f.actions) != 1 {
 		t.Fatal("denied action executed")
@@ -466,8 +466,25 @@ func TestNoOpStopsDecisions(t *testing.T) {
 	if e := f.worker(t, testConfig()).ExecuteRun(context.Background(), f.run); e != nil {
 		t.Fatal(e)
 	}
-	if len(f.requests) != 1 {
-		t.Fatal("no_op did not terminate loop")
+	if len(f.requests) != 1 || f.status != "completed" || len(f.results) != 1 || f.results[0].Status != evaluator.StatusPass {
+		t.Fatalf("legitimate no_op completion changed: requests=%d status=%s results=%+v", len(f.requests), f.status, f.results)
+	}
+}
+
+func TestAgentStepLimitIsPersistedAndInconclusive(t *testing.T) {
+	f := newFixture()
+	f.response = []agentgateway.ProposedAction{{Type: "inspect"}}
+	c := testConfig()
+	c.MaxAgentSteps = 2
+	err := f.worker(t, c).ExecuteRun(context.Background(), f.run)
+	if !errors.Is(err, ErrAgentStepLimitReached) {
+		t.Fatalf("error=%v", err)
+	}
+	if f.status != "failed" || len(f.requests) != c.MaxAgentSteps || !hasEvent(f, "agent_step_limit_reached") {
+		t.Fatalf("status=%s requests=%d events=%+v", f.status, len(f.requests), f.events)
+	}
+	if len(f.results) != 1 || f.results[0].Status != evaluator.StatusInconclusive {
+		t.Fatalf("step exhaustion must be inconclusive without blocking evidence: %+v", f.results)
 	}
 }
 func TestAgentTimeoutAndRunTimeout(t *testing.T) {

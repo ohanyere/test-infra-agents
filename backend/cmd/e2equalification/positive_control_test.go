@@ -197,10 +197,13 @@ func TestHostedWorkflowRunsFailedVerifiedInconclusiveAndWarningControls(t *testi
 	positive := strings.Index(text, "bash backend/e2e/run-positive-control.sh")
 	inconclusive := strings.Index(text, "bash backend/e2e/run-inconclusive-control.sh")
 	warning := strings.Index(text, "bash backend/e2e/run-warning-control.sh")
-	if negative < 0 || positive < 0 || inconclusive < 0 || warning < 0 || negative >= positive || positive >= inconclusive || inconclusive >= warning {
-		t.Fatalf("controls are missing or out of order: negative=%d positive=%d inconclusive=%d warning=%d", negative, positive, inconclusive, warning)
+	stepLimit := strings.Index(text, "bash backend/e2e/run-stage2-control.sh step-limit")
+	temporal := strings.Index(text, "bash backend/e2e/run-stage2-control.sh temporal")
+	insufficient := strings.Index(text, "bash backend/e2e/run-stage2-control.sh insufficient")
+	if negative < 0 || positive < 0 || inconclusive < 0 || warning < 0 || stepLimit < 0 || temporal < 0 || insufficient < 0 || negative >= positive || positive >= inconclusive || inconclusive >= warning || warning >= stepLimit || stepLimit >= temporal || temporal >= insufficient {
+		t.Fatalf("controls are missing or out of order: negative=%d positive=%d inconclusive=%d warning=%d step_limit=%d temporal=%d insufficient=%d", negative, positive, inconclusive, warning, stepLimit, temporal, insufficient)
 	}
-	for _, required := range []string{"branch remediation-v17", "branch initial-v18", "branch warning-main", "update-ref refs/heads/main", "update-ref refs/heads/warning-main", "api-verification-result-warning.json"} {
+	for _, required := range []string{"branch remediation-v17", "branch initial-v18", "branch warning-main", "branch stage2-temporal-main", "branch stage2-insufficient-main", "update-ref refs/heads/main", "update-ref refs/heads/warning-main", "update-ref refs/heads/stage2-temporal-main", "update-ref refs/heads/stage2-insufficient-main", "api-verification-result-warning.json", "stage2-recovery-criteria"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("workflow fixture lacks %q", required)
 		}
@@ -253,6 +256,16 @@ func TestHostedWorkflowRunsFailedVerifiedInconclusiveAndWarningControls(t *testi
 	for _, required := range []string{"objective PASSED", "critical invariants PASSED", "resulting state STABLE", "real capacity evidence observed", "meaningful non-blocking headroom risk", "capacity policy measurements", "no blocking failure", "overall status WARNING"} {
 		if !strings.Contains(string(warningAssertions), required) {
 			t.Fatalf("warning proof lacks named assertion %q", required)
+		}
+	}
+
+	stage2Assertions, err := os.ReadFile(filepath.Join("..", "..", "e2e", "run-stage2-control.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"step exhaustion is INCONCLUSIVE", "machine-readable step-limit reason persisted", "temporal recovery VERIFIED", "both recovery criteria passed", "recovery criterion inconclusive", "real mutation executed", "cleanup deletion completed"} {
+		if !strings.Contains(string(stage2Assertions), required) {
+			t.Fatalf("Stage 2 proof lacks named assertion %q", required)
 		}
 	}
 }
