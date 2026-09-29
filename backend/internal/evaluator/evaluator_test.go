@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -106,6 +107,12 @@ func TestPostActionRecoveryMetricsUseOnlyCompleteEligibleEvidence(t *testing.T) 
 					t.Fatalf("result=%+v", result)
 				}
 			})
+			t.Run("bad before bad after", func(t *testing.T) {
+				result := mustEvaluate(t, makeInput(test.bad, test.bad, mutatedAt.Add(telemetry.RateWindow), 10))
+				if result.Status != StatusFail || result.CriterionResults[0].Status != CriterionFailed {
+					t.Fatalf("result=%+v", result)
+				}
+			})
 			t.Run("incomplete post action window", func(t *testing.T) {
 				result := mustEvaluate(t, makeInput(test.bad, test.good, mutatedAt.Add(telemetry.RateWindow-time.Second), 10))
 				if result.Status != StatusInconclusive || !strings.Contains(result.CriterionResults[0].Reason, "complete required lookback") {
@@ -118,6 +125,34 @@ func TestPostActionRecoveryMetricsUseOnlyCompleteEligibleEvidence(t *testing.T) 
 					t.Fatalf("result=%+v", result)
 				}
 			})
+		})
+	}
+}
+
+func TestPercentageRoundoffAtUpperBoundIsNormalized(t *testing.T) {
+	for _, test := range []struct {
+		metric, rawKey, operator string
+	}{
+		{"availability", "availability_pct", "gte"},
+		{"error_rate", "error_rate_pct", "lte"},
+		{"current_error_rate", "error_rate_pct", "lte"},
+	} {
+		t.Run(test.metric, func(t *testing.T) {
+			result := mustEvaluate(t, evaluationInput(
+				[]scenario.Criterion{criterion("bounded-percentage", test.metric, test.operator, `100`, "pct")},
+				metricEvent("run-1", 1, map[string]any{"telemetry_available": true, test.rawKey: math.Nextafter(100, math.Inf(1))}),
+			))
+			if result.Status != StatusPass || string(result.CriterionResults[0].ObservedValue) != "100" {
+				t.Fatalf("floating-point roundoff was not normalized: %+v", result)
+			}
+
+			result = mustEvaluate(t, evaluationInput(
+				[]scenario.Criterion{criterion("invalid-percentage", test.metric, test.operator, `100`, "pct")},
+				metricEvent("run-1", 1, map[string]any{"telemetry_available": true, test.rawKey: 100.001}),
+			))
+			if result.Status != StatusInconclusive || result.CriterionResults[0].Status != CriterionInconclusive {
+				t.Fatalf("materially invalid percentage was accepted: %+v", result)
+			}
 		})
 	}
 }

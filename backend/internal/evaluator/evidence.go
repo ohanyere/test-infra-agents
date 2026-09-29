@@ -34,6 +34,10 @@ type recoveryMetricState struct {
 	positiveTraffic    bool
 }
 
+// Prometheus ratio arithmetic can serialize a mathematically exact 100% as a
+// value one or more floating-point ULPs above 100.
+const percentageRoundoffTolerance = 1e-9
+
 func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 	out := evaluationEvidence{Metrics: map[string]MetricValue{}, HistoricalMetrics: map[string]MetricValue{}, Events: []evidence.RunEvent{}, Actions: []evidence.AgentAction{}}
 	samples := map[string][]metricSample{}
@@ -248,9 +252,18 @@ func addJSONMetric(samples map[string][]metricSample, invalid map[string][]strin
 		return
 	}
 	var value float64
-	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || ((key == "availability" || key == "error_rate" || key == "current_error_rate") && value > 100) {
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
 		invalid[key] = append(invalid[key], ref)
 		return
+	}
+	if key == "availability" || key == "error_rate" || key == "current_error_rate" {
+		if value > 100+percentageRoundoffTolerance {
+			invalid[key] = append(invalid[key], ref)
+			return
+		}
+		if value > 100 {
+			value = 100
+		}
 	}
 	addSample(samples, key, value, event, ref)
 }
