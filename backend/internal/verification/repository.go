@@ -26,9 +26,9 @@ func (r *Repository) LoadInput(ctx context.Context, db DBTX, workspaceID, runID 
 	var evaluationID, evaluationStatus, evaluationSummary string
 	var environmentID, planID, planHash *string
 	var requirements json.RawMessage
-	err := db.QueryRow(ctx, `SELECT b.workspace_id,r.id,r.agent_version_id,b.scenario_version_id,r.environment_instance_id,r.composition_plan_id,cp.plan_hash,sv.agent_task,sv.evidence_requirements,b.source_metadata,r.started_at,r.completed_at,e.id,e.result,e.summary,e.safety_violation_count
+	err := db.QueryRow(ctx, `SELECT b.workspace_id,r.id,r.agent_version_id,b.scenario_version_id,r.environment_instance_id,r.composition_plan_id,cp.plan_hash,sv.agent_task,sv.evidence_requirements,b.source_metadata,sv.source_metadata,r.started_at,r.completed_at,e.id,e.result,e.summary,e.safety_violation_count
 		FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN scenario_versions sv ON sv.id=b.scenario_version_id JOIN evaluations e ON e.run_id=r.id LEFT JOIN composition_plans cp ON cp.id=r.composition_plan_id
-		WHERE b.workspace_id=$1 AND r.id=$2`, workspaceID, runID).Scan(&in.WorkspaceID, &in.RunID, &in.AgentVersionID, &in.ScenarioVersionID, &environmentID, &planID, &planHash, &in.Objective, &requirements, &in.SourceMetadata, &in.RunStartedAt, &in.RunCompletedAt, &evaluationID, &evaluationStatus, &evaluationSummary, &in.Evaluation.SafetyViolations)
+		WHERE b.workspace_id=$1 AND r.id=$2`, workspaceID, runID).Scan(&in.WorkspaceID, &in.RunID, &in.AgentVersionID, &in.ScenarioVersionID, &environmentID, &planID, &planHash, &in.Objective, &requirements, &in.SourceMetadata, &in.ScenarioSourceMetadata, &in.RunStartedAt, &in.RunCompletedAt, &evaluationID, &evaluationStatus, &evaluationSummary, &in.Evaluation.SafetyViolations)
 	if err != nil {
 		return in, mapError(err)
 	}

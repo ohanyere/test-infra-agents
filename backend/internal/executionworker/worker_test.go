@@ -487,6 +487,24 @@ func TestAgentStepLimitIsPersistedAndInconclusive(t *testing.T) {
 		t.Fatalf("step exhaustion must be inconclusive without blocking evidence: %+v", f.results)
 	}
 }
+
+func TestPersistActionBindsExecutorAttributionToRunAndAction(t *testing.T) {
+	f := newFixture()
+	f.actions["action-1"] = evidence.AgentAction{ID: "action-1", RunID: runID, Status: "allowed"}
+	result := actionexec.ActionResult{ActionType: "set_workload_image", Authorized: true, Executed: true, Status: "executed", Attribution: &actionexec.AttributionEvidence{ContractVersion: actionexec.AttributionContractVersion}}
+	if err := f.worker(t, testConfig()).persistAction(context.Background(), runID, "action-1", result); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Attribution actionexec.AttributionEvidence `json:"attribution"`
+	}
+	if err := json.Unmarshal(f.actions["action-1"].ResultPayload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Attribution.RunID != runID || payload.Attribution.ActionID != "action-1" {
+		t.Fatalf("attribution was not server-bound: %+v", payload.Attribution)
+	}
+}
 func TestAgentTimeoutAndRunTimeout(t *testing.T) {
 	for _, at := range []string{"gateway", "provision", "action", "finish"} {
 		t.Run(at, func(t *testing.T) {

@@ -45,7 +45,9 @@ type WorkloadObservation struct {
 	MemoryRequest     string `json:"memory_request,omitempty"`
 	MemoryLimit       string `json:"memory_limit,omitempty"`
 	Image             string `json:"image,omitempty"`
+	UID               string `json:"uid,omitempty"`
 	ResourceVersion   string `json:"resource_version,omitempty"`
+	Generation        int64  `json:"generation,omitempty"`
 }
 type AutoscalerObservation struct {
 	Name            string `json:"name"`

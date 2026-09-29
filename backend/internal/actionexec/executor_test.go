@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
@@ -15,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 )
@@ -169,5 +171,46 @@ func TestSetWorkloadImageAuthorizationAndExecution(t *testing.T) {
 	action.Parameters["image"] = "https://user:token@example.invalid/image"
 	if result := executor.Authorize(context.Background(), env, action); result.Authorized {
 		t.Fatalf("unsafe image authorized: %+v", result)
+	}
+}
+
+func TestSetWorkloadImageCapturesExecutorResourceIdentity(t *testing.T) {
+	client, _, env, executor := setup(t)
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	executor.now = func() time.Time { now = now.Add(time.Millisecond); return now }
+	d := deployment(env, owned(scenariorunner.ReferenceComponent), 2)
+	d.UID, d.ResourceVersion, d.Generation = types.UID("deployment-uid"), "10", 1
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v18"}}
+	_, _ = client.AppsV1().Deployments(env.Environment.Namespace).Create(context.Background(), d, metav1.CreateOptions{})
+	client.PrependReactor("update", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+		updated := action.(ktesting.UpdateAction).GetObject().(*appsv1.Deployment)
+		updated.ResourceVersion, updated.Generation = "11", 2
+		return false, nil, nil
+	})
+	action := agentgateway.ProposedAction{Type: "set_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName}, Parameters: map[string]any{"image": "evalplane-reference:v17"}}
+	result := executor.ExecuteAction(context.Background(), env, action)
+	proof := result.Attribution
+	if !result.Executed || proof == nil || proof.ContractVersion != AttributionContractVersion || proof.Executor != "kubernetes-client-go" || proof.PreMutation == nil || proof.PostMutation == nil {
+		t.Fatalf("missing execution attribution: %+v", result)
+	}
+	if proof.PreMutation.UID != "deployment-uid" || proof.PostMutation.UID != "deployment-uid" || proof.PreMutation.ResourceVersion != "10" || proof.PostMutation.ResourceVersion != "11" || proof.PreMutation.Generation != 1 || proof.PostMutation.Generation != 2 || proof.PreMutation.Value != "evalplane-reference:v18" || proof.PostMutation.Value != "evalplane-reference:v17" {
+		t.Fatalf("wrong old/new resource evidence: %+v", proof)
+	}
+	if proof.ExecutionStartedAt.After(proof.PreMutation.ObservedAt) || proof.PreMutation.ObservedAt.After(proof.PostMutation.ObservedAt) || proof.PostMutation.ObservedAt.After(proof.ExecutionCompletedAt) {
+		t.Fatalf("timestamps are not causally ordered: %+v", proof)
+	}
+}
+
+func TestSetWorkloadImageFailureRetainsPreMutationEvidence(t *testing.T) {
+	client, _, env, executor := setup(t)
+	d := deployment(env, owned(scenariorunner.ReferenceComponent), 2)
+	d.UID, d.ResourceVersion, d.Generation = types.UID("deployment-uid"), "10", 1
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v18"}}
+	_, _ = client.AppsV1().Deployments(env.Environment.Namespace).Create(context.Background(), d, metav1.CreateOptions{})
+	client.PrependReactor("update", "deployments", func(ktesting.Action) (bool, runtime.Object, error) { return true, nil, fmt.Errorf("injected") })
+	action := agentgateway.ProposedAction{Type: "set_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName}, Parameters: map[string]any{"image": "evalplane-reference:v17"}}
+	result := executor.ExecuteAction(context.Background(), env, action)
+	if result.Status != "failed" || result.Attribution == nil || result.Attribution.PreMutation == nil || result.Attribution.PostMutation != nil || result.Attribution.PreMutation.Value != "evalplane-reference:v18" {
+		t.Fatalf("failed execution evidence=%+v", result)
 	}
 }

@@ -904,6 +904,12 @@ jobs:
       - name: Run and assert Stage 2 incomplete-evidence control
         run: bash backend/e2e/run-stage2-control.sh insufficient
 
+      - name: Run and assert Stage 3 attributed-action control
+        run: bash backend/e2e/run-stage3-control.sh attributed
+
+      - name: Run and assert Stage 3 contradictory-attribution control
+        run: bash backend/e2e/run-stage3-control.sh contradiction
+
       - name: Retrieve the persisted result through the real API
         run: |
           set -euo pipefail
@@ -1020,6 +1026,8 @@ jobs:
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-step-limit --tail=500 > "$ARTIFACT_DIR/qualification-stage2-step-limit-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-temporal --tail=500 > "$ARTIFACT_DIR/qualification-stage2-temporal-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-insufficient --tail=500 > "$ARTIFACT_DIR/qualification-stage2-insufficient-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage3-attributed --tail=500 > "$ARTIFACT_DIR/qualification-stage3-attributed-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage3-contradiction --tail=500 > "$ARTIFACT_DIR/qualification-stage3-contradiction-failure-tail.log" 2>&1
           timeout 30s kubectl logs -n evalplane-e2e-harness deployment/git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1
           timeout 30s kubectl logs -n argocd statefulset/argocd-application-controller --tail=300 > "$ARTIFACT_DIR/argocd-controller.log" 2>&1
           timeout 30s kubectl logs -n argocd deployment/argocd-repo-server --tail=200 > "$ARTIFACT_DIR/argocd-repo-server.log" 2>&1
@@ -1035,6 +1043,8 @@ jobs:
           timeout 60s kubectl delete -f backend/e2e/qualification-stage2-step-limit.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/qualification-stage2-temporal.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/qualification-stage2-insufficient.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage3-attributed.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage3-contradiction.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/calibration.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/harness-rbac.yaml --ignore-not-found --wait=false
           timeout 120s kind delete cluster --name evalplane-e2e

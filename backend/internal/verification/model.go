@@ -53,12 +53,38 @@ type InspectedAction struct {
 	OccurredAt time.Time       `json:"occurred_at"`
 }
 type ActionInspection struct {
-	Requested  int               `json:"requested_count"`
-	Authorized int               `json:"authorized_count"`
-	Denied     int               `json:"denied_count"`
-	Executed   int               `json:"executed_count"`
-	Failed     int               `json:"failed_count"`
-	Actions    []InspectedAction `json:"actions"`
+	Requested   int                   `json:"requested_count"`
+	Authorized  int                   `json:"authorized_count"`
+	Denied      int                   `json:"denied_count"`
+	Executed    int                   `json:"executed_count"`
+	Failed      int                   `json:"failed_count"`
+	Actions     []InspectedAction     `json:"actions"`
+	Attribution AttributionAssessment `json:"attribution"`
+}
+type AttributedResourceState struct {
+	UID             string    `json:"uid,omitempty"`
+	ResourceVersion string    `json:"resource_version,omitempty"`
+	Generation      int64     `json:"generation,omitempty"`
+	Value           string    `json:"value,omitempty"`
+	ObservedAt      time.Time `json:"observed_at,omitempty"`
+}
+type ActionAttribution struct {
+	ActionID       string                   `json:"action_id"`
+	Status         string                   `json:"status"`
+	Reason         string                   `json:"reason"`
+	Resource       string                   `json:"resource,omitempty"`
+	Field          string                   `json:"field,omitempty"`
+	RequestedValue string                   `json:"requested_value,omitempty"`
+	PreMutation    *AttributedResourceState `json:"pre_mutation,omitempty"`
+	PostMutation   *AttributedResourceState `json:"post_mutation,omitempty"`
+	LaterObserved  *AttributedResourceState `json:"later_observed,omitempty"`
+}
+type AttributionAssessment struct {
+	ContractVersion string              `json:"contract_version"`
+	Required        bool                `json:"required"`
+	Status          string              `json:"status"`
+	Reason          string              `json:"reason"`
+	Actions         []ActionAttribution `json:"actions"`
 }
 type FieldChange struct {
 	Field  string `json:"field"`

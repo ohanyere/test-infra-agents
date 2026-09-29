@@ -128,7 +128,7 @@ func owned(labels map[string]string, id kubeenv.RunIdentity) bool {
 	return labels[kubeenv.ManagedLabelKey] == "true" && labels[kubeenv.RunIDLabelKey] == id.RunID && labels[kubeenv.BatchIDLabelKey] == id.BatchID && labels[kubeenv.WorkspaceIDLabelKey] == id.WorkspaceID
 }
 func workload(d *appsv1.Deployment) agentgateway.WorkloadObservation {
-	w := agentgateway.WorkloadObservation{Kind: "Deployment", Name: d.Name, Namespace: d.Namespace, DesiredReplicas: d.Status.Replicas, ReadyReplicas: d.Status.ReadyReplicas, AvailableReplicas: d.Status.AvailableReplicas, UpdatedReplicas: d.Status.UpdatedReplicas, ResourceVersion: d.ResourceVersion}
+	w := agentgateway.WorkloadObservation{Kind: "Deployment", Name: d.Name, Namespace: d.Namespace, DesiredReplicas: d.Status.Replicas, ReadyReplicas: d.Status.ReadyReplicas, AvailableReplicas: d.Status.AvailableReplicas, UpdatedReplicas: d.Status.UpdatedReplicas, UID: string(d.UID), ResourceVersion: d.ResourceVersion, Generation: d.Generation}
 	if d.Spec.Replicas != nil {
 		w.DesiredReplicas = *d.Spec.Replicas
 	}

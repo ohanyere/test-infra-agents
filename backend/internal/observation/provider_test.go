@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -34,7 +35,7 @@ func setup(t *testing.T) (*fake.Clientset, *kubeenv.Manager, EnvironmentContext)
 func TestObserveOwnedResourcesAndEvents(t *testing.T) {
 	client, manager, env := setup(t)
 	replicas := int32(2)
-	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: env.Environment.Namespace, Labels: labels()}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}}}}}}}, Status: appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, UpdatedReplicas: 2}}
+	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: env.Environment.Namespace, Labels: labels(), UID: types.UID("deployment-uid"), ResourceVersion: "10", Generation: 3}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}}}}}}}, Status: appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, UpdatedReplicas: 2}}
 	_, _ = client.AppsV1().Deployments(env.Environment.Namespace).Create(context.Background(), d, metav1.CreateOptions{})
 	ready := true
 	controller := true
@@ -47,7 +48,7 @@ func TestObserveOwnedResourcesAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Workloads) != 1 || got.Workloads[0].DesiredReplicas != 2 || got.Workloads[0].ReadyReplicas != 1 {
+	if len(got.Workloads) != 1 || got.Workloads[0].DesiredReplicas != 2 || got.Workloads[0].ReadyReplicas != 1 || got.Workloads[0].UID != "deployment-uid" || got.Workloads[0].ResourceVersion != "10" || got.Workloads[0].Generation != 3 {
 		t.Fatalf("workloads: %+v", got.Workloads)
 	}
 	if len(got.Pods) != 1 || got.Pods[0].RestartCount != 3 || !got.Pods[0].Ready {

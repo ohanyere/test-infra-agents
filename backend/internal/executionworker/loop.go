@@ -269,7 +269,11 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 	return nil
 }
 func (w *Worker) persistAction(ctx context.Context, runID, actionID string, result actionexec.ActionResult) error {
-	payload, _ := json.Marshal(map[string]any{"status": result.Status, "authorized": result.Authorized, "executed": result.Executed, "code": result.Code})
+	if result.Attribution != nil {
+		result.Attribution.RunID = runID
+		result.Attribution.ActionID = actionID
+	}
+	payload, _ := json.Marshal(map[string]any{"status": result.Status, "authorized": result.Authorized, "executed": result.Executed, "code": result.Code, "attribution": result.Attribution})
 	if err := w.deps.Evidence.UpdateAgentAction(ctx, evidence.UpdateActionInput{RunID: runID, ActionID: actionID, Status: result.Status, Authorized: result.Authorized, ResultPayload: payload}); err != nil {
 		return platform("action_persistence_failed", err)
 	}

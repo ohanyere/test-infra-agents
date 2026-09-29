@@ -58,19 +58,24 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 				CompositionPlanID: tc.planID, VerifierContractVersion: ContractVersion,
 				SnapshotContractVersion: SnapshotVersion, Validity: ValidityInvalidPlatform,
 				OverallStatus: StatusInconclusive, Reason: "test", SourceMetadata: json.RawMessage(`{}`),
+				ActionInspection:   ActionInspection{Attribution: AttributionAssessment{ContractVersion: AttributionContractVersion, Required: true, Status: AttributionAttributed, Reason: "test", Actions: []ActionAttribution{{ActionID: "action-1", Status: AttributionAttributed, Resource: "Deployment/run/checkout", RequestedValue: "checkout:v17"}}}},
 				EvidenceAssessment: EvidenceAssessment{ContractVersion: evidencecontract.ContractV1, Requirements: evidencecontract.DefaultRequirements(), Dimensions: []EvidenceDimensionAssessment{{EvidenceType: "workload_state", Applicability: applicable, RequirementStatus: string(evidencecontract.Required), Availability: available, SourceProvider: "kubernetes-api", Reason: "test", EvidenceReferences: []string{"run_event:1"}}}},
 			})
 			if err != nil {
 				t.Fatalf("verification insert failed for UUID values: %v", err)
 			}
 			var persistedEnvironment, persistedPlan *string
-			var assessmentJSON []byte
-			if err := conn.QueryRow(ctx, `SELECT environment_instance_id::text, composition_plan_id::text, evidence_assessment FROM verification_results WHERE run_id=$1`, tc.runID).Scan(&persistedEnvironment, &persistedPlan, &assessmentJSON); err != nil {
+			var assessmentJSON, attributionJSON []byte
+			if err := conn.QueryRow(ctx, `SELECT environment_instance_id::text, composition_plan_id::text, evidence_assessment, action_inspection FROM verification_results WHERE run_id=$1`, tc.runID).Scan(&persistedEnvironment, &persistedPlan, &assessmentJSON, &attributionJSON); err != nil {
 				t.Fatal(err)
 			}
 			var assessment EvidenceAssessment
 			if err := json.Unmarshal(assessmentJSON, &assessment); err != nil || assessment.ContractVersion != evidencecontract.ContractV1 || len(assessment.Dimensions) != 1 {
 				t.Fatalf("evidence assessment did not round trip: assessment=%+v err=%v", assessment, err)
+			}
+			var inspection ActionInspection
+			if err := json.Unmarshal(attributionJSON, &inspection); err != nil || inspection.Attribution.ContractVersion != AttributionContractVersion || inspection.Attribution.Status != AttributionAttributed || len(inspection.Attribution.Actions) != 1 {
+				t.Fatalf("action attribution did not round trip: inspection=%+v err=%v", inspection, err)
 			}
 			if tc.environmentID == "" {
 				if persistedEnvironment != nil || persistedPlan != nil {

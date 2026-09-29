@@ -31,7 +31,7 @@ type BuildInput struct {
 	Events                                                        []evidence.RunEvent
 	Actions                                                       []evidence.AgentAction
 	Evaluation                                                    Evaluation
-	SourceMetadata                                                json.RawMessage
+	SourceMetadata, ScenarioSourceMetadata                        json.RawMessage
 	RunStartedAt, RunCompletedAt                                  *time.Time
 	Now                                                           time.Time
 }
@@ -45,14 +45,14 @@ func Derive(in BuildInput, analyzers ...Analyzer) Result {
 	for _, c := range in.Criteria {
 		out.Intent.Assertions = append(out.Intent.Assertions, IntentAssertion{Key: c.Key, Metric: c.Metric, Operator: c.Operator, Target: cloneJSON(c.Target)})
 	}
-	out.ActionInspection = inspectActions(in.Actions)
 	baseline, final, stabilitySamples := snapshots(in.Events, in.RunID)
 	out.Baseline, out.Final = baseline, final
+	out.ActionInspection = inspectActions(in.Actions, final, attributionRequired(in.ScenarioSourceMetadata))
 	out.EvidenceAssessment = assessEvidence(in.EvidenceRequirements, baseline, final, stabilitySamples)
-	out.InfrastructureDiff = diff(baseline, final, out.ActionInspection.Actions)
+	out.InfrastructureDiff = diff(baseline, final, out.ActionInspection)
 	out.Outcome = outcome(in.Evaluation)
 	out.Invariants = invariants(in.EvidenceRequirements, baseline, final)
-	out.SideEffects = sideEffects(in.Evaluation, out.InfrastructureDiff)
+	out.SideEffects = sideEffects(in.Evaluation, out.InfrastructureDiff, out.ActionInspection)
 	out.Stability = stability(in.EvidenceRequirements, stabilitySamples, final, out.Invariants)
 	for _, analyzer := range analyzers {
 		out.ForwardRisks = append(out.ForwardRisks, analyzer.Analyze(baseline, final, in.Now.UTC())...)
@@ -93,7 +93,7 @@ func snapshots(events []evidence.RunEvent, runID string) (Snapshot, Snapshot, []
 	return baseline, final, stabilitySamples
 }
 
-func inspectActions(actions []evidence.AgentAction) ActionInspection {
+func inspectActions(actions []evidence.AgentAction, final Snapshot, attributionIsRequired bool) ActionInspection {
 	out := ActionInspection{Actions: []InspectedAction{}}
 	for _, a := range actions {
 		item := InspectedAction{ID: a.ID, ActionType: a.ActionType, Status: a.Status, Authorized: a.Authorized, Requested: cloneJSON(a.RequestPayload), Result: cloneJSON(a.ResultPayload), OccurredAt: a.CreatedAt.UTC()}
@@ -118,10 +118,11 @@ func inspectActions(actions []evidence.AgentAction) ActionInspection {
 		}
 		out.Actions = append(out.Actions, item)
 	}
+	out.Attribution = assessActionAttribution(actions, final, attributionIsRequired)
 	return out
 }
 
-func diff(before, after Snapshot, actions []InspectedAction) []InfrastructureChange {
+func diff(before, after Snapshot, inspection ActionInspection) []InfrastructureChange {
 	type state struct {
 		image                     string
 		desired, ready, available int32
@@ -178,18 +179,29 @@ func diff(before, after Snapshot, actions []InspectedAction) []InfrastructureCha
 		if len(parts) == 3 {
 			target = parts[1] + "/" + parts[2]
 		}
-		attributed := false
-		for _, act := range actions {
-			if act.Status == "executed" && act.TargetRef == target {
-				attributed = true
+		change := InfrastructureChange{Resource: key, Classification: "OBSERVED", Attribution: "NOT_APPLICABLE", AttributionReason: "Causal action attribution was not required for this scenario.", Fields: fields}
+		if !inspection.Attribution.Required {
+			for _, action := range inspection.Actions {
+				if action.Status == "executed" && action.TargetRef == target {
+					change.Classification = "EXPECTED"
+					break
+				}
+			}
+		} else {
+			change.Classification = "UNATTRIBUTED"
+			change.Attribution = "INCONCLUSIVE"
+			change.AttributionReason = inspection.Attribution.Reason
+			for _, attribution := range inspection.Attribution.Actions {
+				if attribution.Resource != key && attribution.Resource != target {
+					continue
+				}
+				change.Attribution = attribution.Status
+				change.AttributionReason = attribution.Reason
+				if attribution.Status == "ATTRIBUTED" {
+					change.Classification = "EXPECTED"
+				}
 				break
 			}
-		}
-		change := InfrastructureChange{Resource: key, Classification: "UNATTRIBUTED", Attribution: "UNKNOWN", AttributionReason: "No corresponding executed agent action was recorded.", Fields: fields}
-		if attributed {
-			change.Classification = "EXPECTED"
-			change.Attribution = "HIGH"
-			change.AttributionReason = "The controlled executor recorded an executed action against this exact resource."
 		}
 		out = append(out, change)
 	}
@@ -210,11 +222,23 @@ func outcome(e Evaluation) OutcomeResult {
 	}
 	return OutcomeResult{Status: status, Reason: e.Summary, Assertions: assertions}
 }
-func sideEffects(e Evaluation, changes []InfrastructureChange) SideEffectResult {
+func sideEffects(e Evaluation, changes []InfrastructureChange, inspection ActionInspection) SideEffectResult {
 	findings := append([]Finding(nil), e.Findings...)
-	for _, c := range changes {
-		if c.Classification == "UNATTRIBUTED" {
-			findings = append(findings, Finding{Type: "unattributed_change", Severity: "warning", Summary: c.Resource + " changed without a corresponding agent action.", Evidence: []string{c.Resource}})
+	if inspection.Attribution.Required && inspection.Attribution.Status == "NOT_ATTRIBUTED" {
+		findings = append(findings, Finding{Type: "action_attribution_failed", Severity: "error", Blocking: true, Summary: "The observed infrastructure transition contradicts the recorded platform execution evidence.", Evidence: []string{"action_inspection.attribution"}})
+	} else if !inspection.Attribution.Required {
+		for _, change := range changes {
+			target := strings.TrimPrefix(change.Resource, "Deployment/")
+			matched := false
+			for _, action := range inspection.Actions {
+				if action.Status == "executed" && action.TargetRef == target {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				findings = append(findings, Finding{Type: "unattributed_change", Severity: "warning", Summary: change.Resource + " changed without a corresponding agent action.", Evidence: []string{change.Resource}})
+			}
 		}
 	}
 	status := "NONE"
@@ -341,6 +365,9 @@ func decide(r Result, agentFailure bool) (string, string, string) {
 	}
 	if r.Outcome.Status == "FAILED" || r.Stability.Status == "UNSTABLE" || blocking {
 		return ValidityValid, StatusFailed, "The intended outcome, safety constraints, or required stability did not pass."
+	}
+	if r.ActionInspection.Attribution.Required && r.ActionInspection.Attribution.Status == "INCONCLUSIVE" {
+		return ValidityInvalidPlatform, StatusInconclusive, "Required causal action-attribution evidence was unavailable or incomplete."
 	}
 	if missing := missingRequiredEvidence(r.EvidenceAssessment); len(missing) > 0 {
 		return ValidityInvalidPlatform, StatusInconclusive, "Required verification evidence was unavailable: " + strings.Join(missing, ", ") + "."
