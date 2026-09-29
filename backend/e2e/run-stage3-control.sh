@@ -71,7 +71,7 @@ case "$mode" in
     ;;
 esac
 
-run_namespace="$(jq -er '.Run.environment_ref // empty | sub("^kubernetes://"; "") | select(length > 0)' "$input")" || true
+run_namespace="$(jq -er '.Run.environment_ref // empty | sub("^k8s://"; "") | select(length > 0)' "$input")" || true
 if [[ -n "$run_namespace" ]]; then
   if namespace_json="$(timeout 30s kubectl get namespace "$run_namespace" --ignore-not-found -o json)" && [[ -n "$namespace_json" ]]; then
     [[ -n "$(jq -r '.metadata.deletionTimestamp // empty' <<< "$namespace_json")" ]] || fail "cleanup deletion requested"
