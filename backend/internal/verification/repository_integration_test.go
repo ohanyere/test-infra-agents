@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -33,7 +34,7 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 		baseline_snapshot jsonb, final_snapshot jsonb, intent_result jsonb, action_inspection jsonb,
 		infrastructure_diff jsonb, outcome_result jsonb, invariant_results jsonb,
 		side_effect_result jsonb, stability_result jsonb, forward_risk_findings jsonb,
-		evidence_assessment jsonb,
+		evidence_assessment jsonb, provenance jsonb,
 		platform_validity text, overall_status text, reason text, source_metadata jsonb,
 		evidence_started_at timestamptz, evidence_completed_at timestamptz
 	)`)
@@ -52,12 +53,14 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 		{"absent", "77777777-7777-4777-8777-777777777777", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			pinned := &provenance.Verification{ContractVersion: provenance.ContractVersion, AgentImplementation: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: "revision-a", ProvenanceLevel: provenance.LevelDeclared}, Contracts: provenance.ContractIdentities{Verifier: ContractVersion}, Providers: []provenance.ProviderIdentity{{Role: "workload_state", ProviderID: "kubernetes-api"}}}
 			_, err := NewRepository().Insert(ctx, conn, Result{
 				WorkspaceID: workspaceID, RunID: tc.runID, AgentVersionID: agentID,
 				ScenarioVersionID: scenarioID, EnvironmentInstanceID: tc.environmentID,
 				CompositionPlanID: tc.planID, VerifierContractVersion: ContractVersion,
 				SnapshotContractVersion: SnapshotVersion, Validity: ValidityInvalidPlatform,
 				OverallStatus: StatusInconclusive, Reason: "test", SourceMetadata: json.RawMessage(`{}`),
+				Provenance:         pinned,
 				ActionInspection:   ActionInspection{Attribution: AttributionAssessment{ContractVersion: AttributionContractVersion, Required: true, Status: AttributionAttributed, Reason: "test", Actions: []ActionAttribution{{ActionID: "action-1", Status: AttributionAttributed, Resource: "Deployment/run/checkout", RequestedValue: "checkout:v17"}}}},
 				EvidenceAssessment: EvidenceAssessment{ContractVersion: evidencecontract.ContractV1, Requirements: evidencecontract.DefaultRequirements(), Dimensions: []EvidenceDimensionAssessment{{EvidenceType: "workload_state", Applicability: applicable, RequirementStatus: string(evidencecontract.Required), Availability: available, SourceProvider: "kubernetes-api", Reason: "test", EvidenceReferences: []string{"run_event:1"}}}},
 			})
@@ -65,9 +68,13 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 				t.Fatalf("verification insert failed for UUID values: %v", err)
 			}
 			var persistedEnvironment, persistedPlan *string
-			var assessmentJSON, attributionJSON []byte
-			if err := conn.QueryRow(ctx, `SELECT environment_instance_id::text, composition_plan_id::text, evidence_assessment, action_inspection FROM verification_results WHERE run_id=$1`, tc.runID).Scan(&persistedEnvironment, &persistedPlan, &assessmentJSON, &attributionJSON); err != nil {
+			var assessmentJSON, attributionJSON, provenanceJSON []byte
+			if err := conn.QueryRow(ctx, `SELECT environment_instance_id::text, composition_plan_id::text, evidence_assessment, action_inspection, provenance FROM verification_results WHERE run_id=$1`, tc.runID).Scan(&persistedEnvironment, &persistedPlan, &assessmentJSON, &attributionJSON, &provenanceJSON); err != nil {
 				t.Fatal(err)
+			}
+			var persistedProvenance provenance.Verification
+			if err := json.Unmarshal(provenanceJSON, &persistedProvenance); err != nil || persistedProvenance.AgentImplementation.Identifier != "revision-a" || len(persistedProvenance.Providers) != 1 {
+				t.Fatalf("provenance did not round trip: provenance=%+v err=%v", persistedProvenance, err)
 			}
 			var assessment EvidenceAssessment
 			if err := json.Unmarshal(assessmentJSON, &assessment); err != nil || assessment.ContractVersion != evidencecontract.ContractV1 || len(assessment.Dimensions) != 1 {
@@ -85,5 +92,13 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 				t.Fatalf("UUIDs changed: environment=%v plan=%v", persistedEnvironment, persistedPlan)
 			}
 		})
+	}
+	const historicalRunID = "77777777-7777-4777-8777-777777777777"
+	if _, err := conn.Exec(ctx, `UPDATE verification_results SET provenance=NULL WHERE run_id=$1`, historicalRunID); err != nil {
+		t.Fatal(err)
+	}
+	historical, err := NewRepository().Get(ctx, conn, workspaceID, historicalRunID)
+	if err != nil || historical.Provenance != nil {
+		t.Fatalf("historical pre-Stage-4 row must remain readable: provenance=%+v err=%v", historical.Provenance, err)
 	}
 }

@@ -35,6 +35,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/observation"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
 	"github.com/evalplane/evalplane/backend/internal/verification"
@@ -46,6 +47,8 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
+
+var sourceRevision = "development"
 
 func emit(kind string, value any) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"kind": kind, "value": value})
@@ -606,7 +609,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	p := auth.Principal{UserID: user.ID}
 	roles := auth.NewRepository()
 	startStage("qualification_agent_registration")
-	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "set_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, Metadata: json.RawMessage(`{"fixture":true}`)}})
+	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "set_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ImplementationIdentity: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: sourceRevision, ProvenanceLevel: provenance.LevelDeclared}, Metadata: json.RawMessage(`{"fixture":true}`)}})
 	if err != nil {
 		return err
 	}

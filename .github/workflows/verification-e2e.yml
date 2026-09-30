@@ -344,7 +344,7 @@ jobs:
           build_dir="$(mktemp -d)"
           mkdir -p "$build_dir/bin"
           cp -R /tmp/gitops-source "$build_dir/git-fixture"
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/e2equalification" ./cmd/e2equalification
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.sourceRevision=${GITHUB_SHA}" -o "$build_dir/bin/e2equalification" ./cmd/e2equalification
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceagent" ./cmd/referenceagent
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceapp" ./cmd/referenceapp
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/verification-e2e-api ./cmd/api
@@ -785,6 +785,38 @@ jobs:
             .verifier_contract_version == "infrastructure-verifier:v3" and
             .snapshot_contract_version == "infrastructure-snapshot:v2"
           '
+          assert_result "Stage 4 pinned agent implementation provenance" '
+            .provenance.contract_version == "verification-provenance:v1" and
+            .provenance.agent_implementation.contract_version == "agent-implementation-identity:v1" and
+            .provenance.agent_implementation.kind == "source_revision" and
+            .provenance.agent_implementation.provenance_level == "declared" and
+            (.provenance.agent_implementation.identifier | test("^[0-9a-f]{40}$"))
+          '
+          assert_result "Stage 4 contract provenance" '
+            .provenance.contracts.verifier == "infrastructure-verifier:v3" and
+            .provenance.contracts.evaluator == "deterministic-evaluator:v1" and
+            .provenance.contracts.evidence_requirements == "evidence-requirements:v1" and
+            .provenance.contracts.attribution == "action-attribution:v1" and
+            .provenance.contracts.snapshot == "infrastructure-snapshot:v2" and
+            .provenance.contracts.temporal_policy == "deterministic-evaluator:v1" and
+            .provenance.contracts.stability_policy == "infrastructure-verifier:v3"
+          '
+          assert_result "Stage 4 provider provenance" '
+            any(.provenance.providers[]; .role == "environment_runtime" and .provider_id != "" and .contract_version == "environment-provider-contract:v1") and
+            any(.provenance.providers[]; .role == "workload_state" and .provider_id == "kubernetes-api") and
+            any(.provenance.providers[]; .role == "telemetry" and .provider_id == "prometheus") and
+            any(.provenance.providers[]; .role == "git_desired_state" and .provider_id == "git" and .contract_version == "gitops-evidence:v1") and
+            any(.provenance.providers[]; .role == "argo_state" and .provider_id == "argocd" and .contract_version == "gitops-evidence:v1") and
+            any(.provenance.providers[]; .role == "stability" and .provider_id == "verification-stability-sampler") and
+            any(.provenance.providers[]; .role == "action_policy" and .provider_id == "executionworker-action-policy") and
+            any(.provenance.providers[]; .role == "action_executor" and .provider_id == "kubernetes-client-go")
+          '
+          echo "proof assertion: Stage 4 run/result provenance pin agrees"
+          if ! jq -e --slurpfile result "$verification_result" '
+            .Run.agent_implementation_identity == $result[0].provenance.agent_implementation
+          ' "$evaluation_input" >/dev/null; then
+            fail_proof_assertion "Stage 4 run/result provenance pin agrees"
+          fi
           assert_result "required evidence complete" '
             .evidence_assessment.contract_version == "evidence-requirements:v1" and
             .evidence_assessment.requirements == {"contract_version":"evidence-requirements:v1","workload_state":"REQUIRED","telemetry":"REQUIRED","git_desired_state":"REQUIRED","argo_state":"REQUIRED","stability":"REQUIRED"} and

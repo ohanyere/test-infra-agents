@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
 type Version struct {
@@ -23,9 +24,10 @@ type Version struct {
 	CapabilityCatalogVersion string `json:"capability_catalog_version,omitempty"`
 	// ClaimStatus is "claimed" when claims exist, else "". TESTED/QUALIFIED
 	// states are never fabricated here; they come from the coverage engine.
-	ClaimStatus string          `json:"claim_status,omitempty"`
-	Metadata    json.RawMessage `json:"metadata"`
-	CreatedAt   time.Time       `json:"created_at"`
+	ClaimStatus            string                                 `json:"claim_status,omitempty"`
+	ImplementationIdentity provenance.AgentImplementationIdentity `json:"implementation_identity"`
+	Metadata               json.RawMessage                        `json:"metadata"`
+	CreatedAt              time.Time                              `json:"created_at"`
 }
 
 type Agent struct {
@@ -49,8 +51,9 @@ type VersionInput struct {
 	Capabilities   []string
 	// ClaimedCapabilityIDs selects competencies from the active server catalog.
 	// Persisted immutably at registration; new behavior requires a new version.
-	ClaimedCapabilityIDs []string
-	Metadata             json.RawMessage
+	ClaimedCapabilityIDs   []string
+	ImplementationIdentity provenance.AgentImplementationIdentity
+	Metadata               json.RawMessage
 }
 
 type CreateInput struct {

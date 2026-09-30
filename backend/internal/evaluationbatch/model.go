@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
 type ScenarioRef struct {
@@ -45,16 +46,17 @@ type SourceMetadata struct {
 	Workflow    string `json:"workflow,omitempty"`
 }
 type Run struct {
-	ID             string       `json:"id"`
-	BatchID        string       `json:"batch_id"`
-	Agent          AgentRef     `json:"agent"`
-	Scenario       *ScenarioRef `json:"scenario,omitempty"`
-	AttemptNumber  int          `json:"attempt_number"`
-	Status         string       `json:"status"`
-	EnvironmentRef *string      `json:"environment_ref"`
-	CreatedAt      time.Time    `json:"created_at"`
-	StartedAt      *time.Time   `json:"started_at"`
-	CompletedAt    *time.Time   `json:"completed_at"`
+	ID                          string                                 `json:"id"`
+	BatchID                     string                                 `json:"batch_id"`
+	Agent                       AgentRef                               `json:"agent"`
+	AgentImplementationIdentity provenance.AgentImplementationIdentity `json:"agent_implementation_identity"`
+	Scenario                    *ScenarioRef                           `json:"scenario,omitempty"`
+	AttemptNumber               int                                    `json:"attempt_number"`
+	Status                      string                                 `json:"status"`
+	EnvironmentRef              *string                                `json:"environment_ref"`
+	CreatedAt                   time.Time                              `json:"created_at"`
+	StartedAt                   *time.Time                             `json:"started_at"`
+	CompletedAt                 *time.Time                             `json:"completed_at"`
 }
 type CreateInput struct {
 	ScenarioVersionID string

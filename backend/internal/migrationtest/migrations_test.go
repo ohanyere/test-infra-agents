@@ -38,17 +38,17 @@ func TestMigrations(t *testing.T) {
 	if err := migrator.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up: %v", err)
 	}
-	assertVersion(t, migrator, 22)
+	assertVersion(t, migrator, 25)
 	assertCoreTables(t, databaseURL)
 
 	if err := migrator.Steps(-1); err != nil {
 		t.Fatalf("migrate down one version: %v", err)
 	}
-	assertVersion(t, migrator, 21)
+	assertVersion(t, migrator, 24)
 	if err := migrator.Up(); err != nil {
 		t.Fatalf("migrate back up: %v", err)
 	}
-	assertVersion(t, migrator, 22)
+	assertVersion(t, migrator, 25)
 }
 
 func assertVersion(t *testing.T, migrator *migrate.Migrate, want uint) {
@@ -81,16 +81,23 @@ func assertCoreTables(t *testing.T, databaseURL string) {
 		"billing_provider_events_provider_provider_event_id_key",
 		"qualification_plans_immutable",
 		"verification_results_immutable",
+		"runs_immutable_provenance",
 		"evaluation_batches_ci_idempotency_idx",
 	}
 	for _, object := range objects {
 		var exists bool
 		query := `SELECT to_regclass($1) IS NOT NULL`
-		if object == "qualification_plans_immutable" || object == "verification_results_immutable" {
+		if object == "qualification_plans_immutable" || object == "verification_results_immutable" || object == "runs_immutable_provenance" {
 			query = `SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = $1 AND NOT tgisinternal)`
 		}
 		if err := pool.QueryRow(context.Background(), query, object).Scan(&exists); err != nil || !exists {
 			t.Fatalf("schema object %s exists = %v, error = %v", object, exists, err)
+		}
+	}
+	for table, column := range map[string]string{"agent_versions": "implementation_identity", "runs": "agent_implementation_identity", "verification_results": "provenance"} {
+		var exists bool
+		if err := pool.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name=$2)`, table, column).Scan(&exists); err != nil || !exists {
+			t.Fatalf("column %s.%s exists = %v, error = %v", table, column, exists, err)
 		}
 	}
 	var coverageScopeUnique bool

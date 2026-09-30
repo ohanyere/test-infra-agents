@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,12 +12,27 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/auth"
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 	"github.com/evalplane/evalplane/backend/internal/verification"
 )
 
 type fakeVerificationService struct {
 	result verification.Result
 	err    error
+}
+
+func TestVerificationSerializesPinnedProvenance(t *testing.T) {
+	pinned := &provenance.Verification{ContractVersion: provenance.ContractVersion, AgentImplementation: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindArtifactDigest, Identifier: "sha256:abc", ProvenanceLevel: provenance.LevelDeclared}, Contracts: provenance.ContractIdentities{Verifier: verification.ContractVersion}, Providers: []provenance.ProviderIdentity{{Role: "telemetry", ProviderID: "prometheus"}}}
+	request := authenticatedEvidenceRequest(evidencePath("verification"))
+	response := httptest.NewRecorder()
+	verificationRouter(fakeAuth{allow: true}, fakeVerificationService{result: verification.Result{Provenance: pinned}}).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body verification.Result
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Provenance == nil || body.Provenance.AgentImplementation.Identifier != "sha256:abc" {
+		t.Fatalf("body=%s provenance=%+v err=%v", response.Body.String(), body.Provenance, err)
+	}
 }
 
 func (f fakeVerificationService) Get(context.Context, auth.Principal, string, string) (verification.Result, error) {

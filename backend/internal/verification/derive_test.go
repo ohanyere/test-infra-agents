@@ -9,9 +9,11 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/actionattribution"
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/evaluator"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/gitops"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
 func event(id int64, summary string, at time.Time, obs agentgateway.Observation) evidence.RunEvent {
@@ -29,7 +31,7 @@ func validInput() BuildInput {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	before := healthy("checkout:v18", 3)
 	after := healthy("checkout:v17", 6)
-	return BuildInput{WorkspaceID: "workspace", RunID: "run", AgentVersionID: "agent-version", ScenarioVersionID: "scenario-version", Objective: "Restore checkout health", Criteria: []Criterion{{Key: "ready", Metric: "deployment_available_replicas", Operator: ">=", Target: json.RawMessage(`3`)}}, EvidenceRequirements: evidencecontract.DefaultRequirements(), Events: []evidence.RunEvent{event(1, "verification_baseline_captured", now, before), event(2, "stability_observation_collected", now.Add(time.Second), after), event(3, "final_observation_collected", now.Add(2*time.Second), after)}, Actions: []evidence.AgentAction{{ID: "action", RunID: "run", ActionType: "scale_workload", Status: "executed", Authorized: true, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"replicas":6}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: now}}, Evaluation: Evaluation{Status: "pass", Summary: "All required criteria passed."}, Now: now.Add(3 * time.Second)}
+	return BuildInput{WorkspaceID: "workspace", RunID: "run", AgentVersionID: "agent-version", AgentImplementationIdentity: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindArtifactDigest, Identifier: "sha256:test", ProvenanceLevel: provenance.LevelDeclared}, ScenarioVersionID: "scenario-version", EnvironmentProviderID: "kind-dev:v1", EnvironmentProviderContractVersion: "environment-provider-contract:v1", Objective: "Restore checkout health", Criteria: []Criterion{{Key: "ready", Metric: "deployment_available_replicas", Operator: ">=", Target: json.RawMessage(`3`)}}, EvidenceRequirements: evidencecontract.DefaultRequirements(), Events: []evidence.RunEvent{event(1, "verification_baseline_captured", now, before), event(2, "stability_observation_collected", now.Add(time.Second), after), event(3, "final_observation_collected", now.Add(2*time.Second), after)}, Actions: []evidence.AgentAction{{ID: "action", RunID: "run", ActionType: "scale_workload", Status: "executed", Authorized: true, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"replicas":6}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: now}}, Evaluation: Evaluation{Status: "pass", Summary: "All required criteria passed.", ContractVersion: evaluator.ContractVersion}, Now: now.Add(3 * time.Second)}
 }
 func str(v string) *string { return &v }
 
@@ -61,6 +63,31 @@ func TestStatusSemantics(t *testing.T) {
 				t.Fatalf("status=%s reason=%s", got.OverallStatus, got.Reason)
 			}
 		})
+	}
+}
+
+func TestVerificationProvenancePinsContractsAndProvidersWithoutChangingVerdict(t *testing.T) {
+	got := Derive(validInput())
+	if got.OverallStatus != StatusVerified {
+		t.Fatalf("verdict changed: %s", got.OverallStatus)
+	}
+	if got.Provenance == nil || got.Provenance.ContractVersion != provenance.ContractVersion || got.Provenance.AgentImplementation.Identifier != "sha256:test" {
+		t.Fatalf("provenance=%+v", got.Provenance)
+	}
+	contracts := got.Provenance.Contracts
+	if contracts.Verifier != ContractVersion || contracts.Evaluator != evaluator.ContractVersion || contracts.EvidenceRequirements != evidencecontract.ContractV1 || contracts.Attribution != AttributionContractVersion || contracts.TemporalPolicy != evaluator.ContractVersion || contracts.StabilityPolicy != ContractVersion {
+		t.Fatalf("contracts=%+v", contracts)
+	}
+	want := map[string]bool{"environment_runtime": false, "workload_state": false, "telemetry": false, "action_policy": false, "action_executor": false}
+	for _, provider := range got.Provenance.Providers {
+		if _, ok := want[provider.Role]; ok {
+			want[provider.Role] = true
+		}
+	}
+	for role, found := range want {
+		if !found {
+			t.Fatalf("provider role %s missing: %+v", role, got.Provenance.Providers)
+		}
 	}
 }
 

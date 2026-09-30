@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/evaluator"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/gitops"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
 type Criterion struct {
@@ -19,12 +21,15 @@ type Criterion struct {
 }
 type Evaluation struct {
 	Status, Summary  string
+	ContractVersion  string
 	SafetyViolations int
 	Findings         []Finding
 }
 type BuildInput struct {
 	WorkspaceID, RunID, AgentVersionID, ScenarioVersionID         string
 	EnvironmentInstanceID, CompositionPlanID, CompositionPlanHash string
+	EnvironmentProviderID, EnvironmentProviderContractVersion     string
+	AgentImplementationIdentity                                   provenance.AgentImplementationIdentity
 	Objective                                                     string
 	Criteria                                                      []Criterion
 	EvidenceRequirements                                          evidencecontract.Requirements
@@ -49,6 +54,7 @@ func Derive(in BuildInput, analyzers ...Analyzer) Result {
 	out.Baseline, out.Final = baseline, final
 	out.ActionInspection = inspectActions(in.Actions, final, attributionRequired(in.ScenarioSourceMetadata))
 	out.EvidenceAssessment = assessEvidence(in.EvidenceRequirements, baseline, final, stabilitySamples)
+	out.Provenance = buildProvenance(in, out.EvidenceAssessment)
 	out.InfrastructureDiff = diff(baseline, final, out.ActionInspection)
 	out.Outcome = outcome(in.Evaluation)
 	out.Invariants = invariants(in.EvidenceRequirements, baseline, final)
@@ -64,6 +70,59 @@ func Derive(in BuildInput, analyzers ...Analyzer) Result {
 	out.Validity, agentFailure = evidenceValidity(in.Events)
 	out.Validity, out.OverallStatus, out.Reason = decide(out, agentFailure)
 	return out
+}
+
+func buildProvenance(in BuildInput, assessment EvidenceAssessment) *provenance.Verification {
+	evaluatorVersion := in.Evaluation.ContractVersion
+	if evaluatorVersion == "" {
+		evaluatorVersion = evaluator.ContractVersion
+	}
+	providers := make([]provenance.ProviderIdentity, 0, len(assessment.Dimensions)+3)
+	if in.EnvironmentProviderID != "" {
+		providers = append(providers, provenance.ProviderIdentity{Role: "environment_runtime", ProviderID: in.EnvironmentProviderID, ContractVersion: in.EnvironmentProviderContractVersion})
+	}
+	for _, dimension := range assessment.Dimensions {
+		if dimension.SourceProvider == "" || dimension.Applicability != applicable {
+			continue
+		}
+		contract := ""
+		if dimension.EvidenceType == "git_desired_state" || dimension.EvidenceType == "argo_state" {
+			contract = gitops.EvidenceContractVersion
+		}
+		if dimension.EvidenceType == "stability" {
+			contract = ContractVersion
+		}
+		providers = append(providers, provenance.ProviderIdentity{Role: dimension.EvidenceType, ProviderID: dimension.SourceProvider, ContractVersion: contract})
+	}
+	if len(in.Actions) > 0 {
+		providers = append(providers, provenance.ProviderIdentity{Role: "action_policy", ProviderID: "executionworker-action-policy"})
+		for _, action := range in.Actions {
+			if action.Status == "executed" && (action.ActionType == "set_workload_image" || action.ActionType == "scale_workload" || action.ActionType == "restart_pod") {
+				providers = append(providers, provenance.ProviderIdentity{Role: "action_executor", ProviderID: "kubernetes-client-go", ContractVersion: AttributionContractVersion})
+				break
+			}
+		}
+	}
+	sort.Slice(providers, func(i, j int) bool {
+		if providers[i].Role == providers[j].Role {
+			return providers[i].ProviderID < providers[j].ProviderID
+		}
+		return providers[i].Role < providers[j].Role
+	})
+	return &provenance.Verification{
+		ContractVersion:     provenance.ContractVersion,
+		AgentImplementation: in.AgentImplementationIdentity,
+		Contracts: provenance.ContractIdentities{
+			Verifier:             ContractVersion,
+			Evaluator:            evaluatorVersion,
+			EvidenceRequirements: in.EvidenceRequirements.ContractVersion,
+			Attribution:          AttributionContractVersion,
+			Snapshot:             SnapshotVersion,
+			TemporalPolicy:       evaluatorVersion,
+			StabilityPolicy:      ContractVersion,
+		},
+		Providers: providers,
+	}
 }
 
 func snapshots(events []evidence.RunEvent, runID string) (Snapshot, Snapshot, []Snapshot) {

@@ -28,6 +28,8 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
   const [competencyContract, setCompetencyContract] = useState("infrastructure-capability-catalog:v1");
   const [name, setName] = useState("");
   const [version, setVersion] = useState("");
+	const [implementationKind, setImplementationKind] = useState<"artifact_digest" | "source_revision" | "deployment_revision" | "model_provider" | "declared">("source_revision");
+	const [implementationIdentifier, setImplementationIdentifier] = useState("");
   const [description, setDescription] = useState("");
   const [endpoint, setEndpoint] = useState("");
   const [toolAccessMode, setToolAccessMode] = useState<"direct" | "mcp">("direct");
@@ -120,12 +122,12 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
 	  let versionID: string | undefined;
 	  if (existingAgentID) {
 		const createdVersion = await apiRequest<AgentVersion>("/v1/workspaces/" + workspace.id + "/agents/" + existingAgentID + "/versions", {
-		  method: "POST", body: JSON.stringify({ version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, metadata: {} }),
+		  method: "POST", body: JSON.stringify({ version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, implementation_identity: { contract_version: "agent-implementation-identity:v1", kind: implementationKind, identifier: implementationIdentifier, provenance_level: "declared" }, metadata: {} }),
 		});
 		versionID = createdVersion.id;
 	  } else {
 		const created = await apiRequest<Agent>("/v1/workspaces/" + workspace.id + "/agents", {
-		  method: "POST", body: JSON.stringify({ name, slug: slugify(name), description, visibility: "workspace", initial_version: { version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, metadata: {} } }),
+		  method: "POST", body: JSON.stringify({ name, slug: slugify(name), description, visibility: "workspace", initial_version: { version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, implementation_identity: { contract_version: "agent-implementation-identity:v1", kind: implementationKind, identifier: implementationIdentifier, provenance_level: "declared" }, metadata: {} } }),
 		});
 		agentID = created.id;
 		versionID = created.latest_version?.id;
@@ -158,6 +160,9 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
           <h2>Identity and version</h2>
 		  {!existingAgentID && <label>Agent name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} /></label>}
           <label>Version<input required maxLength={100} placeholder="1.0.0" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+		  <label>Implementation identity type<select value={implementationKind} onChange={(event) => setImplementationKind(event.target.value as typeof implementationKind)}><option value="source_revision">Source revision</option><option value="artifact_digest">Artifact/image digest</option><option value="deployment_revision">Deployment revision</option><option value="model_provider">Model/provider identifier</option><option value="declared">Other declared identity</option></select></label>
+		  <label>Immutable implementation identifier<input required maxLength={500} placeholder="sha256:… or source commit" value={implementationIdentifier} onChange={(event) => setImplementationIdentifier(event.target.value)} /></label>
+		  <p className={styles.explanation}>This declared identity is pinned to the version and every run. Realverax does not attest it cryptographically.</p>
 		  {!existingAgentID && <label>Description <span>Optional</span><textarea maxLength={4000} value={description} onChange={(event) => setDescription(event.target.value)} /></label>}
 		</section>
         <section>

@@ -56,7 +56,7 @@ func (r *Repository) AddAgentsAndRuns(ctx context.Context, db DBTX, batchID stri
 	if _, e := db.Exec(ctx, `INSERT INTO evaluation_batch_agents(batch_id,agent_version_id) SELECT $1,agent_version_id FROM unnest($2::uuid[]) AS selected(agent_version_id)`, batchID, agentVersionIDs); e != nil {
 		return mapDB(e)
 	}
-	if _, e := db.Exec(ctx, `INSERT INTO runs(batch_id,agent_version_id,attempt_number,status) SELECT $1,agent_version_id,attempt_number,'queued' FROM unnest($2::uuid[]) AS selected(agent_version_id) CROSS JOIN generate_series(1,$3) AS attempts(attempt_number)`, batchID, agentVersionIDs, repetitions); e != nil {
+	if _, e := db.Exec(ctx, `INSERT INTO runs(batch_id,agent_version_id,agent_implementation_identity,attempt_number,status) SELECT $1,av.id,av.implementation_identity,attempt_number,'queued' FROM unnest($2::uuid[]) AS selected(agent_version_id) JOIN agent_versions av ON av.id=selected.agent_version_id CROSS JOIN generate_series(1,$3) AS attempts(attempt_number)`, batchID, agentVersionIDs, repetitions); e != nil {
 		return mapDB(e)
 	}
 	return nil
@@ -133,7 +133,7 @@ func (r *Repository) ListRuns(ctx context.Context, db DBTX, w, batchID string, f
 		where += fmt.Sprintf(" AND r.status=$%d", len(args))
 	}
 	args = append(args, f.Pagination.Limit, f.Pagination.Offset)
-	q := fmt.Sprintf(`SELECT r.id,r.batch_id,r.attempt_number,r.status,r.environment_ref,r.created_at,r.started_at,r.completed_at,a.id,av.id,a.name,av.version_label FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN agent_versions av ON av.id=r.agent_version_id JOIN agents a ON a.id=av.agent_id WHERE %s ORDER BY a.id,av.id,r.attempt_number LIMIT $%d OFFSET $%d`, where, len(args)-1, len(args))
+	q := fmt.Sprintf(`SELECT r.id,r.batch_id,r.attempt_number,r.status,r.environment_ref,r.created_at,r.started_at,r.completed_at,a.id,av.id,a.name,av.version_label,r.agent_implementation_identity FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN agent_versions av ON av.id=r.agent_version_id JOIN agents a ON a.id=av.agent_id WHERE %s ORDER BY a.id,av.id,r.attempt_number LIMIT $%d OFFSET $%d`, where, len(args)-1, len(args))
 	rows, e := db.Query(ctx, q, args...)
 	if e != nil {
 		return nil, mapDB(e)
@@ -151,7 +151,7 @@ func (r *Repository) ListRuns(ctx context.Context, db DBTX, w, batchID string, f
 }
 func (r *Repository) GetRun(ctx context.Context, db DBTX, w, id string) (Run, error) {
 	v := Run{Scenario: &ScenarioRef{}}
-	e := db.QueryRow(ctx, `SELECT r.id,r.batch_id,r.attempt_number,r.status,r.environment_ref,r.created_at,r.started_at,r.completed_at,a.id,av.id,a.name,av.version_label,s.id,sv.id,s.name,sv.version FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN agent_versions av ON av.id=r.agent_version_id JOIN agents a ON a.id=av.agent_id JOIN scenario_versions sv ON sv.id=b.scenario_version_id JOIN scenarios s ON s.id=sv.scenario_id WHERE r.id=$1 AND b.workspace_id=$2`, id, w).Scan(&v.ID, &v.BatchID, &v.AttemptNumber, &v.Status, &v.EnvironmentRef, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.Agent.AgentID, &v.Agent.AgentVersionID, &v.Agent.Name, &v.Agent.VersionLabel, &v.Scenario.ScenarioID, &v.Scenario.ScenarioVersionID, &v.Scenario.Name, &v.Scenario.Version)
+	e := db.QueryRow(ctx, `SELECT r.id,r.batch_id,r.attempt_number,r.status,r.environment_ref,r.created_at,r.started_at,r.completed_at,a.id,av.id,a.name,av.version_label,r.agent_implementation_identity,s.id,sv.id,s.name,sv.version FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN agent_versions av ON av.id=r.agent_version_id JOIN agents a ON a.id=av.agent_id JOIN scenario_versions sv ON sv.id=b.scenario_version_id JOIN scenarios s ON s.id=sv.scenario_id WHERE r.id=$1 AND b.workspace_id=$2`, id, w).Scan(&v.ID, &v.BatchID, &v.AttemptNumber, &v.Status, &v.EnvironmentRef, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.Agent.AgentID, &v.Agent.AgentVersionID, &v.Agent.Name, &v.Agent.VersionLabel, &v.AgentImplementationIdentity, &v.Scenario.ScenarioID, &v.Scenario.ScenarioVersionID, &v.Scenario.Name, &v.Scenario.Version)
 	return v, mapDB(e)
 }
 
@@ -168,7 +168,7 @@ func scanBatch(row scanner) (Batch, error) {
 }
 func scanRun(row scanner) (Run, error) {
 	var v Run
-	e := row.Scan(&v.ID, &v.BatchID, &v.AttemptNumber, &v.Status, &v.EnvironmentRef, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.Agent.AgentID, &v.Agent.AgentVersionID, &v.Agent.Name, &v.Agent.VersionLabel)
+	e := row.Scan(&v.ID, &v.BatchID, &v.AttemptNumber, &v.Status, &v.EnvironmentRef, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.Agent.AgentID, &v.Agent.AgentVersionID, &v.Agent.Name, &v.Agent.VersionLabel, &v.AgentImplementationIdentity)
 	return v, mapDB(e)
 }
 func mapDB(e error) error {

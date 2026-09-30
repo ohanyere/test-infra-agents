@@ -7,6 +7,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/gitops"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
 const (
@@ -163,32 +164,33 @@ type RiskFinding struct {
 	CreatedAt         time.Time          `json:"created_at"`
 }
 type Result struct {
-	ID                      string                 `json:"id"`
-	WorkspaceID             string                 `json:"workspace_id"`
-	RunID                   string                 `json:"run_id"`
-	AgentVersionID          string                 `json:"agent_version_id"`
-	ScenarioVersionID       string                 `json:"scenario_version_id"`
-	EnvironmentInstanceID   string                 `json:"environment_instance_id,omitempty"`
-	CompositionPlanID       string                 `json:"composition_plan_id,omitempty"`
-	CompositionPlanHash     string                 `json:"composition_plan_hash,omitempty"`
-	VerifierContractVersion string                 `json:"verifier_contract_version"`
-	SnapshotContractVersion string                 `json:"snapshot_contract_version"`
-	Baseline                Snapshot               `json:"baseline_snapshot"`
-	Final                   Snapshot               `json:"final_snapshot"`
-	Intent                  IntentResult           `json:"intent"`
-	ActionInspection        ActionInspection       `json:"action_inspection"`
-	InfrastructureDiff      []InfrastructureChange `json:"infrastructure_diff"`
-	Outcome                 OutcomeResult          `json:"outcome"`
-	Invariants              []InvariantResult      `json:"invariants"`
-	SideEffects             SideEffectResult       `json:"side_effects"`
-	Stability               StabilityResult        `json:"stability"`
-	ForwardRisks            []RiskFinding          `json:"forward_risks"`
-	EvidenceAssessment      EvidenceAssessment     `json:"evidence_assessment"`
-	Validity                string                 `json:"validity"`
-	OverallStatus           string                 `json:"overall_status"`
-	Reason                  string                 `json:"reason"`
-	SourceMetadata          json.RawMessage        `json:"source_metadata"`
-	EvidenceStartedAt       *time.Time             `json:"evidence_started_at,omitempty"`
-	EvidenceCompletedAt     *time.Time             `json:"evidence_completed_at,omitempty"`
-	CreatedAt               time.Time              `json:"created_at"`
+	ID                      string                   `json:"id"`
+	WorkspaceID             string                   `json:"workspace_id"`
+	RunID                   string                   `json:"run_id"`
+	AgentVersionID          string                   `json:"agent_version_id"`
+	ScenarioVersionID       string                   `json:"scenario_version_id"`
+	EnvironmentInstanceID   string                   `json:"environment_instance_id,omitempty"`
+	CompositionPlanID       string                   `json:"composition_plan_id,omitempty"`
+	CompositionPlanHash     string                   `json:"composition_plan_hash,omitempty"`
+	VerifierContractVersion string                   `json:"verifier_contract_version"`
+	SnapshotContractVersion string                   `json:"snapshot_contract_version"`
+	Baseline                Snapshot                 `json:"baseline_snapshot"`
+	Final                   Snapshot                 `json:"final_snapshot"`
+	Intent                  IntentResult             `json:"intent"`
+	ActionInspection        ActionInspection         `json:"action_inspection"`
+	InfrastructureDiff      []InfrastructureChange   `json:"infrastructure_diff"`
+	Outcome                 OutcomeResult            `json:"outcome"`
+	Invariants              []InvariantResult        `json:"invariants"`
+	SideEffects             SideEffectResult         `json:"side_effects"`
+	Stability               StabilityResult          `json:"stability"`
+	ForwardRisks            []RiskFinding            `json:"forward_risks"`
+	EvidenceAssessment      EvidenceAssessment       `json:"evidence_assessment"`
+	Provenance              *provenance.Verification `json:"provenance,omitempty"`
+	Validity                string                   `json:"validity"`
+	OverallStatus           string                   `json:"overall_status"`
+	Reason                  string                   `json:"reason"`
+	SourceMetadata          json.RawMessage          `json:"source_metadata"`
+	EvidenceStartedAt       *time.Time               `json:"evidence_started_at,omitempty"`
+	EvidenceCompletedAt     *time.Time               `json:"evidence_completed_at,omitempty"`
+	CreatedAt               time.Time                `json:"created_at"`
 }
