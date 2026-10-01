@@ -24,6 +24,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/auth"
 	"github.com/evalplane/evalplane/backend/internal/database"
+	"github.com/evalplane/evalplane/backend/internal/environment"
 	"github.com/evalplane/evalplane/backend/internal/evaluationbatch"
 	"github.com/evalplane/evalplane/backend/internal/evaluator"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
@@ -679,7 +680,23 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		cfg.MaxAgentSteps = 2
 		cfg.StepInterval = time.Second
 	}
-	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actionProvider, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), OnStage: emitStage, OnFailure: func(kind, failureStage string, failureErr error) {
+	// Production-shaped run lifecycle: scenario requirements → server-owned
+	// scheduler → run-owned EnvironmentInstance → provider provision. Stage 4
+	// provider provenance requires the persisted instance's real provider
+	// identity; the legacy nil-Environments fallback provisions directly and
+	// creates no instance, leaving environment_runtime provenance empty.
+	envManager, err := kubeenv.NewManager(client)
+	if err != nil {
+		return err
+	}
+	kindProvider, err := environment.NewKindDevProvider(envManager)
+	if err != nil {
+		return err
+	}
+	runEnvs := executionworker.NewPostgresRunEnvironments(pool, environment.NewRepository(), environment.DefaultAvailability(), map[string]environment.Provider{
+		environment.ProviderKindDev: kindProvider,
+	})
+	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actionProvider, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), Environments: runEnvs, OnStage: emitStage, OnFailure: func(kind, failureStage string, failureErr error) {
 		emit(kind, map[string]string{"stage": failureStage, "error": diagnosticWorkerError(failureErr)})
 	}, Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
 		if workspace != ws.ID || version.ID != av.LatestVersion.ID {

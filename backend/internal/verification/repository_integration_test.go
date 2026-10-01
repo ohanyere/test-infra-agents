@@ -53,7 +53,7 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 		{"absent", "77777777-7777-4777-8777-777777777777", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pinned := &provenance.Verification{ContractVersion: provenance.ContractVersion, AgentImplementation: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: "revision-a", ProvenanceLevel: provenance.LevelDeclared}, Contracts: provenance.ContractIdentities{Verifier: ContractVersion}, Providers: []provenance.ProviderIdentity{{Role: "workload_state", ProviderID: "kubernetes-api"}}}
+			pinned := &provenance.Verification{ContractVersion: provenance.ContractVersion, AgentImplementation: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: "revision-a", ProvenanceLevel: provenance.LevelDeclared}, Contracts: provenance.ContractIdentities{Verifier: ContractVersion}, Providers: []provenance.ProviderIdentity{{Role: "environment_runtime", ProviderID: "kind-dev:v1", ContractVersion: "environment-provider-contract:v1"}, {Role: "workload_state", ProviderID: "kubernetes-api"}}}
 			_, err := NewRepository().Insert(ctx, conn, Result{
 				WorkspaceID: workspaceID, RunID: tc.runID, AgentVersionID: agentID,
 				ScenarioVersionID: scenarioID, EnvironmentInstanceID: tc.environmentID,
@@ -73,8 +73,11 @@ func TestInsertVerificationUUIDColumns(t *testing.T) {
 				t.Fatal(err)
 			}
 			var persistedProvenance provenance.Verification
-			if err := json.Unmarshal(provenanceJSON, &persistedProvenance); err != nil || persistedProvenance.AgentImplementation.Identifier != "revision-a" || len(persistedProvenance.Providers) != 1 {
+			if err := json.Unmarshal(provenanceJSON, &persistedProvenance); err != nil || persistedProvenance.AgentImplementation.Identifier != "revision-a" || len(persistedProvenance.Providers) != 2 {
 				t.Fatalf("provenance did not round trip: provenance=%+v err=%v", persistedProvenance, err)
+			}
+			if persistedProvenance.Providers[0].Role != "environment_runtime" || persistedProvenance.Providers[0].ProviderID != "kind-dev:v1" || persistedProvenance.Providers[0].ContractVersion != "environment-provider-contract:v1" {
+				t.Fatalf("environment provider provenance did not round trip: provenance=%+v", persistedProvenance)
 			}
 			var assessment EvidenceAssessment
 			if err := json.Unmarshal(assessmentJSON, &assessment); err != nil || assessment.ContractVersion != evidencecontract.ContractV1 || len(assessment.Dimensions) != 1 {

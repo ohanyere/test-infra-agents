@@ -22,7 +22,7 @@ type fakeVerificationService struct {
 }
 
 func TestVerificationSerializesPinnedProvenance(t *testing.T) {
-	pinned := &provenance.Verification{ContractVersion: provenance.ContractVersion, AgentImplementation: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindArtifactDigest, Identifier: "sha256:abc", ProvenanceLevel: provenance.LevelDeclared}, Contracts: provenance.ContractIdentities{Verifier: verification.ContractVersion}, Providers: []provenance.ProviderIdentity{{Role: "telemetry", ProviderID: "prometheus"}}}
+	pinned := &provenance.Verification{ContractVersion: provenance.ContractVersion, AgentImplementation: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindArtifactDigest, Identifier: "sha256:abc", ProvenanceLevel: provenance.LevelDeclared}, Contracts: provenance.ContractIdentities{Verifier: verification.ContractVersion}, Providers: []provenance.ProviderIdentity{{Role: "environment_runtime", ProviderID: "kind-dev:v1", ContractVersion: "environment-provider-contract:v1"}, {Role: "telemetry", ProviderID: "prometheus"}}}
 	request := authenticatedEvidenceRequest(evidencePath("verification"))
 	response := httptest.NewRecorder()
 	verificationRouter(fakeAuth{allow: true}, fakeVerificationService{result: verification.Result{Provenance: pinned}}).ServeHTTP(response, request)
@@ -32,6 +32,9 @@ func TestVerificationSerializesPinnedProvenance(t *testing.T) {
 	var body verification.Result
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Provenance == nil || body.Provenance.AgentImplementation.Identifier != "sha256:abc" {
 		t.Fatalf("body=%s provenance=%+v err=%v", response.Body.String(), body.Provenance, err)
+	}
+	if len(body.Provenance.Providers) != 2 || body.Provenance.Providers[0].Role != "environment_runtime" || body.Provenance.Providers[0].ProviderID != "kind-dev:v1" {
+		t.Fatalf("provider provenance was not preserved by the read model: %+v", body.Provenance)
 	}
 }
 

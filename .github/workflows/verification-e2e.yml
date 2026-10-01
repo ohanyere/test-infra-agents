@@ -771,6 +771,12 @@ jobs:
             else
               echo "Sanitized recovery timeline unavailable" >&2
             fi
+            echo "Sanitized provider provenance:" >&2
+            jq '{
+              provenance_contract: .provenance.contract_version,
+              providers: [.provenance.providers[]? | {role, provider_id, contract_version}],
+              evidence_dimensions: [.evidence_assessment.dimensions[]? | {evidence_type, applicability, availability, source_provider}]
+            }' "$verification_result" >&2 || true
           }
           fail_proof_assertion() {
             echo "PROOF ASSERTION FAILED: $1" >&2
