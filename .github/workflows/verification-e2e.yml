@@ -72,9 +72,38 @@ jobs:
         run: |
           set -euo pipefail
           go run ./cmd/migrate up
+          shopt -s nullglob
+          migration_files=(migrations/*.up.sql)
+          if (( ${#migration_files[@]} == 0 )); then
+            printf 'No migration files found in backend/migrations\n' >&2
+            exit 1
+          fi
+          declare -A migration_versions=()
+          expected_version=""
+          for migration_path in "${migration_files[@]}"; do
+            migration_file="${migration_path##*/}"
+            if [[ ! "$migration_file" =~ ^([0-9]{6})_[a-z0-9]+(_[a-z0-9]+)*\.up\.sql$ ]]; then
+              printf 'Invalid migration filename: %s\n' "$migration_file" >&2
+              exit 1
+            fi
+            migration_version="$((10#${BASH_REMATCH[1]}))"
+            if (( migration_version == 0 )); then
+              printf 'Invalid migration version in filename: %s\n' "$migration_file" >&2
+              exit 1
+            fi
+            if [[ -n "${migration_versions[$migration_version]+x}" ]]; then
+              printf 'Ambiguous migration version %s: %s and %s\n' \
+                "$migration_version" "${migration_versions[$migration_version]}" "$migration_file" >&2
+              exit 1
+            fi
+            migration_versions[$migration_version]="$migration_file"
+            if [[ -z "$expected_version" ]] || (( migration_version > expected_version )); then
+              expected_version="$migration_version"
+            fi
+          done
           migration_state="$(psql "$DATABASE_URL" -Atc 'select version || chr(32) || dirty from schema_migrations')"
-          if [[ "$migration_state" != "24 false" ]]; then
-            printf 'Unexpected migration state: expected 24 false, got %s\n' "$migration_state" >&2
+          if [[ "$migration_state" != "$expected_version false" ]]; then
+            printf 'Unexpected migration state: expected %s false, got %s\n' "$expected_version" "$migration_state" >&2
             exit 1
           fi
           printf 'migration=%s\n' "$migration_state" | tee "$ARTIFACT_DIR/migration.txt"
