@@ -82,3 +82,28 @@ func TestImmediateRemediationFixtureMutatesOnceThenTerminates(t *testing.T) {
 		t.Fatalf("terminal response=%+v", response)
 	}
 }
+
+func TestPositiveDesiredSequenceTerminatesWithoutStepLimit(t *testing.T) {
+	available := []string{"inspect", "set_desired_workload_image", "no_op"}
+	allowed := json.RawMessage(`[{"kind":"Deployment","namespace":"run","name":"checkout"}]`)
+	observe := func(image string, errorRate float64) agentgateway.Request {
+		return agentgateway.Request{AvailableActions: available, AllowedResources: allowed, Observation: agentgateway.Observation{Workloads: []agentgateway.WorkloadObservation{{Kind: "Deployment", Namespace: "run", Name: "checkout", Image: image, DesiredReplicas: 2, AvailableReplicas: 2}}, Metrics: map[string]any{"error_rate_pct": errorRate}}}
+	}
+	// Unhealthy desired/live state: remediation proposed, only while v18 remains.
+	remediations := 0
+	for _, observation := range []agentgateway.Request{observe("evalplane-reference:v18", 100), observe("evalplane-reference:v18", 85)} {
+		got := decide(observation).Actions[0]
+		if got.Type != "set_desired_workload_image" || got.Parameters["image"] != "evalplane-reference:v17" {
+			t.Fatalf("remediation=%+v", got)
+		}
+		remediations++
+	}
+	// Converged healthy state: terminal success, not another mutation.
+	terminal := decide(observe("evalplane-reference:v17", 0)).Actions[0]
+	if terminal.Type != "no_op" {
+		t.Fatalf("terminal=%+v", terminal)
+	}
+	if remediations != 2 {
+		t.Fatalf("remediations=%d", remediations)
+	}
+}

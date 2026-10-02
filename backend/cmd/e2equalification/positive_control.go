@@ -99,7 +99,34 @@ type positiveControlActions struct {
 }
 
 func (a positiveControlActions) Authorize(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction) actionexec.ActionResult {
+	if action.Type == "set_desired_workload_image" {
+		return authorizeDesiredState(env, action)
+	}
 	return a.delegate.Authorize(ctx, env, action)
+}
+
+// authorizeDesiredState authorizes the explicit desired-state contract without
+// mutating anything. The live executor cannot authorize this contract: it has
+// no Git writer and fails the type closed, so delegating would deny every
+// desired-state remediation before it can execute.
+func authorizeDesiredState(env observation.EnvironmentContext, action agentgateway.ProposedAction) actionexec.ActionResult {
+	deny := func(code, summary string) actionexec.ActionResult {
+		return actionexec.ActionResult{Code: code, ActionType: action.Type, Status: "denied", Summary: summary}
+	}
+	if action.Target == nil {
+		return deny("invalid_action_parameters", "desired-state mutation requires a target")
+	}
+	if action.Target.Kind != "Deployment" || action.Target.Name != scenariorunner.ReferenceDeploymentName {
+		return deny("disallowed_resource", "only the reference Deployment desired state may be changed")
+	}
+	if action.Target.Namespace != env.Environment.Namespace {
+		return deny("cross_namespace", "cross-namespace desired-state target denied")
+	}
+	image, _ := action.Parameters["image"].(string)
+	if image != "evalplane-reference:v17" {
+		return deny("invalid_action_parameters", "durable controls only permit the declared v17 remediation")
+	}
+	return actionexec.ActionResult{ActionType: action.Type, Authorized: true, Status: "allowed"}
 }
 
 func (a positiveControlActions) ExecuteAction(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction) actionexec.ActionResult {
@@ -109,7 +136,7 @@ func (a positiveControlActions) ExecuteAction(ctx context.Context, env observati
 	if action.Type != "set_desired_workload_image" {
 		return a.delegate.ExecuteAction(ctx, env, action)
 	}
-	decision := a.delegate.Authorize(ctx, env, action)
+	decision := a.Authorize(ctx, env, action)
 	if decision.Status != "allowed" || !decision.Authorized {
 		return decision
 	}

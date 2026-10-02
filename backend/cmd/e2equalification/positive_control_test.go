@@ -21,7 +21,9 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/actionexec"
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/observation"
+	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
 )
 
 type allowedActions struct{}
@@ -78,6 +80,31 @@ func TestPositiveApplicationTracksMainWithoutChangingNegativePin(t *testing.T) {
 	}
 	if !(&runtime{control: warningControl}).durable() {
 		t.Fatal("warning control must use the durable desired-state action path")
+	}
+}
+
+func TestPositiveDesiredStateAuthorizationReachesGitPath(t *testing.T) {
+	ctx := context.Background()
+	client := kubernetesfake.NewSimpleClientset()
+	manager, err := kubeenv.NewManager(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := kubeenv.RunIdentity{RunID: "11111111-1111-4111-8111-111111111111", BatchID: "22222222-2222-4222-8222-222222222222", WorkspaceID: "33333333-3333-4333-8333-333333333333"}
+	env, err := manager.CreateEnvironment(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envCtx := observation.EnvironmentContext{Identity: id, Environment: env}
+	executor, err := actionexec.New(client, manager, actionexec.DefaultConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := positiveControlActions{delegate: executor, runtime: &runtime{}}
+	target := agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Namespace, Name: scenariorunner.ReferenceDeploymentName}
+	decision := wrapper.Authorize(ctx, envCtx, agentgateway.ProposedAction{Type: "set_desired_workload_image", Target: &target, Parameters: map[string]any{"image": "evalplane-reference:v17"}})
+	if decision.Status != "allowed" || !decision.Authorized {
+		t.Fatalf("desired-state authorization did not reach the Git path: %+v", decision)
 	}
 }
 
@@ -151,6 +178,78 @@ func TestImageActionSelectsExplicitMutationContractPerControl(t *testing.T) {
 	for control, want := range cases {
 		if got := (&runtime{control: control}).imageAction(); got != want {
 			t.Fatalf("control %q: image action=%q want %q", control, got, want)
+		}
+	}
+}
+
+func TestPositiveDesiredAuthorizationRejectsWrongContract(t *testing.T) {
+	env := convergenceTestEnvironment()
+	wrapper := positiveControlActions{delegate: allowedActions{}, runtime: &runtime{}}
+	owned := agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: "eval-reference-app"}
+	for _, tc := range []struct {
+		name   string
+		action agentgateway.ProposedAction
+		code   string
+	}{
+		{"missing target", agentgateway.ProposedAction{Type: "set_desired_workload_image", Parameters: map[string]any{"image": "evalplane-reference:v17"}}, "invalid_action_parameters"},
+		{"wrong resource", agentgateway.ProposedAction{Type: "set_desired_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: "other-app"}, Parameters: map[string]any{"image": "evalplane-reference:v17"}}, "disallowed_resource"},
+		{"cross namespace", agentgateway.ProposedAction{Type: "set_desired_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: "other-ns", Name: "eval-reference-app"}, Parameters: map[string]any{"image": "evalplane-reference:v17"}}, "cross_namespace"},
+		{"undeclared image", agentgateway.ProposedAction{Type: "set_desired_workload_image", Target: &owned, Parameters: map[string]any{"image": "evalplane-reference:v18"}}, "invalid_action_parameters"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := wrapper.Authorize(context.Background(), env, tc.action)
+			if decision.Code != tc.code || decision.Authorized || decision.Executed || decision.Status != "denied" {
+				t.Fatalf("decision=%+v", decision)
+			}
+		})
+	}
+}
+
+func TestPositiveDesiredExecutionUsesGitPathWithRealDelegate(t *testing.T) {
+	revision := strings.Repeat("c", 40)
+	updated := false
+	client := fixtureHTTPClient(func(request *http.Request) fixtureGitState {
+		if request.URL.Path == "/update" {
+			updated = true
+		}
+		image := "evalplane-reference:v18"
+		if updated {
+			image = "evalplane-reference:v17"
+		}
+		return fixtureGitState{Revision: revision, Image: image}
+	})
+	env := convergenceTestEnvironment()
+	replicas := int32(2)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "eval-reference-app", Namespace: env.Environment.Namespace, Generation: 2},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v17"}}}}},
+		Status:     appsv1.DeploymentStatus{ObservedGeneration: 2, UpdatedReplicas: 2, AvailableReplicas: 2},
+	}
+	live := kubernetesfake.NewSimpleClientset(deployment)
+	manager, err := kubeenv.NewManager(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegate, err := actionexec.New(live, manager, actionexec.DefaultConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+		"metadata": map[string]any{"name": argoPositiveApplication, "namespace": argoNamespace},
+		"spec":     map[string]any{"source": map[string]any{"targetRevision": "main"}, "syncPolicy": map[string]any{"automated": map[string]any{}}},
+		"status":   map[string]any{"sync": map[string]any{"status": "Synced", "revision": revision}, "health": map[string]any{"status": "Healthy"}},
+	}}
+	r := &runtime{client: live, dynamic: fake.NewSimpleDynamicClient(k8sruntime.NewScheme(), application), control: positiveControl, application: argoPositiveApplication, gitStateURL: "http://fixture/state", gitUpdateURL: "http://fixture/update"}
+	actions := positiveControlActions{delegate: delegate, runtime: r, client: client, deadline: time.Second}
+	target := agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: "eval-reference-app"}
+	result := actions.ExecuteAction(context.Background(), env, agentgateway.ProposedAction{Type: "set_desired_workload_image", Target: &target, Parameters: map[string]any{"image": "evalplane-reference:v17"}})
+	if !updated || !result.Authorized || !result.Executed || result.Status != "executed" {
+		t.Fatalf("desired-state remediation did not take the Git path: updated=%t result=%+v", updated, result)
+	}
+	for _, action := range live.Actions() {
+		if (action.GetVerb() == "update" || action.GetVerb() == "patch") && action.GetResource().Resource == "deployments" {
+			t.Fatalf("desired-state remediation secretly mutated live state: %s %s", action.GetVerb(), action.GetResource().Resource)
 		}
 	}
 }
