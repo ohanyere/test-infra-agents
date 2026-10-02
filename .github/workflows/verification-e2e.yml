@@ -183,6 +183,7 @@ jobs:
           git -C "$source_dir" reset --hard "$(cat /tmp/gitops-revision)"
           git -C "$source_dir" branch initial-v18
           git -C "$source_dir" branch warning-main
+          git -C "$source_dir" branch external-main
           git -C "$source_dir" branch stage2-temporal-main
           git -C "$source_dir" branch stage2-insufficient-main
           git clone --bare "$source_dir" /tmp/repo.git
@@ -245,8 +246,31 @@ jobs:
           fi
           exec /www/cgi-bin/warning-state
           SCRIPT
-          cat > /tmp/git-server/www/cgi-bin/stage2-temporal-state <<'SCRIPT'
+          cat > /tmp/git-server/www/cgi-bin/external-state <<'SCRIPT'
           #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/external-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-external-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          [ "${REQUEST_METHOD:-}" = POST ] || { printf 'Status: 405 Method Not Allowed\r\n\r\n'; exit 0; }
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/external-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/external-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'; exit 0
+          fi
+          exec /www/cgi-bin/external-state
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/stage2-temporal-state <<'SCRIPT'          #!/bin/sh
           set -eu
           revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-temporal-main)"
           image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
@@ -305,7 +329,7 @@ jobs:
           COPY repo.git /srv/repo.git
           COPY www /www
           COPY entrypoint.sh /entrypoint.sh
-          RUN chmod 0755 /entrypoint.sh /www/cgi-bin/state /www/cgi-bin/remediate-v17 /www/cgi-bin/warning-state /www/cgi-bin/remediate-warning-v17 /www/cgi-bin/stage2-temporal-state /www/cgi-bin/remediate-stage2-temporal-v17 /www/cgi-bin/stage2-insufficient-state /www/cgi-bin/remediate-stage2-insufficient-v17
+          RUN chmod 0755 /entrypoint.sh /www/cgi-bin/state /www/cgi-bin/remediate-v17 /www/cgi-bin/warning-state /www/cgi-bin/remediate-warning-v17 /www/cgi-bin/external-state /www/cgi-bin/remediate-external-v17 /www/cgi-bin/stage2-temporal-state /www/cgi-bin/remediate-stage2-temporal-v17 /www/cgi-bin/stage2-insufficient-state /www/cgi-bin/remediate-stage2-insufficient-v17
           EXPOSE 9418 8080
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
@@ -376,11 +400,13 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.sourceRevision=${GITHUB_SHA}" -o "$build_dir/bin/e2equalification" ./cmd/e2equalification
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceagent" ./cmd/referenceagent
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceapp" ./cmd/referenceapp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/externalagent" ./cmd/externalagent
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/verification-e2e-api ./cmd/api
           docker build -t evalplane-harness:stage17 --build-arg APP_ERROR_RATE=0 -f e2e/Dockerfile "$build_dir"
           docker tag evalplane-harness:stage17 evalplane-reference:stage17
           docker build -t evalplane-reference:v17 --build-arg APP_ERROR_RATE=0 --build-arg MAX_CONCURRENT_WORK=32 -f e2e/Dockerfile "$build_dir"
           docker build -t evalplane-reference:v18 --build-arg APP_ERROR_RATE=100 --build-arg MAX_CONCURRENT_WORK=32 -f e2e/Dockerfile "$build_dir"
+          docker build -t external-agent:e2e -f e2e/external-agent.Dockerfile "$build_dir"
           timeout 180s docker pull "$K6_IMAGE"
           timeout 180s docker pull "$PROMETHEUS_IMAGE"
 
@@ -396,7 +422,7 @@ jobs:
           kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-controller-manager --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l component=etcd --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l k8s-app=kube-dns --timeout=180s
-          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
+          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e external-agent:e2e "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
 
@@ -977,6 +1003,12 @@ jobs:
 
       - name: Run and assert Stage 3 contradictory-attribution control
         run: bash backend/e2e/run-stage3-control.sh contradiction
+
+      - name: Run and assert external-agent independence control
+        run: bash backend/e2e/run-external-control.sh
+
+      - name: Run and assert hostile external-agent probe
+        run: bash backend/e2e/run-hostile-control.sh
 
       - name: Retrieve the persisted result through the real API
         run: |

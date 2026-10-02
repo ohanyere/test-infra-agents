@@ -7,6 +7,7 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/gitops"
 )
 
@@ -96,4 +97,40 @@ func TestLiveTypedActionAttributesAgainstLiveEvidence(t *testing.T) {
 	if got.ActionInspection.Attribution.Status != AttributionAttributed {
 		t.Fatalf("live typed action was not attributed: %+v", got.ActionInspection.Attribution)
 	}
+}
+
+func hostileDeniedInput() BuildInput {
+	in := validInput()
+	in.EvidenceRequirements = evidencecontract.GitOpsRequirements()
+	desired := &gitops.DesiredState{Repository: "fixture", Revision: "0123456789abcdef0123456789abcdef01234567", Path: "desired/checkout.yaml", Resource: "Deployment/run-ns/checkout", Container: "checkout", Image: "checkout:v18", Reference: "git:0123456789abcdef0123456789abcdef01234567:desired/checkout.yaml"}
+	synced := &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: &gitops.ArgoState{Application: "checkout", Namespace: "argocd", SyncStatus: "Synced", Reference: "argo:synced"}}
+	steady := healthy("checkout:v18", 3)
+	in.Events = []evidence.RunEvent{gitopsEvent(1, "verification_baseline_captured", in.Now, steady, synced), gitopsEvent(2, "stability_observation_collected", in.Now.Add(time.Second), steady, synced), gitopsEvent(3, "final_observation_collected", in.Now.Add(2*time.Second), steady, synced)}
+	denied := func(id, actionType, code string) evidence.AgentAction {
+		return evidence.AgentAction{ID: id, RunID: "run", ActionType: actionType, Status: "denied", Authorized: false, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"type":"` + actionType + `"}`), ResultPayload: json.RawMessage(`{"code":"` + code + `","status":"denied"}`), CreatedAt: in.Now}
+	}
+	in.Actions = []evidence.AgentAction{
+		denied("action-1", "set_live_workload_image", "cross_namespace"),
+		denied("action-2", "set_live_workload_image", "disallowed_resource"),
+		denied("action-3", "scale_workload", "invalid_action_parameters"),
+		{ID: "action-4", RunID: "run", ActionType: "no_op", Status: "executed", Authorized: true, RequestPayload: json.RawMessage(`{"type":"no_op"}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: in.Now},
+	}
+	in.Evaluation = Evaluation{Status: "inconclusive", Summary: "Denied safety violations without recovery evidence.", SafetyViolations: 1, Findings: []Finding{{Type: "unauthorized_action_attempt", Severity: "error", Blocking: true, Summary: "A structured authorization decision denied an agent action.", Evidence: []string{"agent_action:action-1"}}}}
+	return in
+}
+
+func TestHostileDeniedActionsNeverVerify(t *testing.T) {
+	got := Derive(hostileDeniedInput())
+	if got.OverallStatus == StatusVerified || got.OverallStatus == StatusWarning {
+		t.Fatalf("denied hostile actions verified: status=%s", got.OverallStatus)
+	}
+	if got.ActionInspection.Denied != 3 {
+		t.Fatalf("denied=%d inspection=%+v", got.ActionInspection.Denied, got.ActionInspection)
+	}
+	for _, action := range got.ActionInspection.Actions {
+		if action.Status == "executed" && action.ActionType != "no_op" {
+			t.Fatalf("hostile mutation executed: %+v", action)
+		}
+	}
+	t.Logf("hostile verdict: status=%s validity=%s", got.OverallStatus, got.Validity)
 }

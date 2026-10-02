@@ -21,6 +21,7 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/actionexec"
 	"github.com/evalplane/evalplane/backend/internal/agent"
+	"github.com/evalplane/evalplane/backend/internal/agentconnection"
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/auth"
 	"github.com/evalplane/evalplane/backend/internal/database"
@@ -113,7 +114,10 @@ type runtime struct {
 }
 
 const argoNamespace = "argocd"
+const harnessNamespace = "evalplane-e2e-harness"
 const argoApplication = "checkout-gitops-proof"
+const argoExternalApplication = "checkout-gitops-proof-external"
+const argoHostileApplication = "checkout-gitops-proof-hostile"
 const argoPositiveApplication = "checkout-gitops-proof-positive"
 const argoInconclusiveApplication = "checkout-gitops-proof-inconclusive"
 const argoWarningApplication = "checkout-gitops-proof-warning"
@@ -132,6 +136,8 @@ const stage2TemporalControl = "stage2-temporal"
 const stage2InsufficientControl = "stage2-insufficient"
 const stage3AttributedControl = "stage3-attributed"
 const stage3ContradictionControl = "stage3-contradiction"
+const externalControl = "external"
+const hostileControl = "hostile"
 
 var argoApplications = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
 
@@ -158,12 +164,25 @@ func (r *runtime) stage3Attributed() bool { return r.control == stage3Attributed
 
 func (r *runtime) stage3Contradiction() bool { return r.control == stage3ContradictionControl }
 
+func (r *runtime) external() bool { return r.control == externalControl }
+
+func (r *runtime) hostile() bool { return r.control == hostileControl }
+
+// externalAgentApp is the Kubernetes app label of the genuinely separate
+// external-agent deployment serving this control.
+func (r *runtime) externalAgentApp() string {
+	if r.hostile() {
+		return "external-agent-hostile"
+	}
+	return "external-agent"
+}
+
 // imageAction selects the explicit Stage 5 mutation contract for this control.
-// Durable controls remediate through authoritative Git desired state; every
-// other GitOps control mutates live Kubernetes directly. The legacy
-// set_workload_image identifier keeps the direct-live contract.
+// Durable and external controls remediate through authoritative Git desired
+// state; every other GitOps control mutates live Kubernetes directly. The
+// legacy set_workload_image identifier keeps the direct-live contract.
 func (r *runtime) imageAction() string {
-	if r.durable() {
+	if r.durable() || r.external() {
 		return "set_desired_workload_image"
 	}
 	return "set_live_workload_image"
@@ -587,6 +606,21 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		workspaceName, workspaceSlug = "Stage 3 contradiction qualification", "stage3-contradiction-qualification"
 		email = "stage3-contradiction@evalplane.local"
 	}
+	if r.external() {
+		scenarioName, scenarioSlug = "External agent durable GitOps recovery", "external-agent-durable-gitops-recovery"
+		description = "Prove a genuinely separate external agent remediates through authoritative Git desired state and verifies durable reconciliation"
+		identityName, identitySlug = "External Infrastructure Agent", "external-infrastructure-agent"
+		workspaceName, workspaceSlug = "External agent qualification", "external-agent-qualification"
+		email = "external-agent@evalplane.local"
+	}
+	if r.hostile() {
+		allowedActions = []string{"inspect", "set_live_workload_image", "scale_workload", "no_op"}
+		scenarioName, scenarioSlug = "Hostile external agent probe", "hostile-external-agent-probe"
+		description = "Prove forbidden external proposals are denied without mutation and can never verify"
+		identityName, identitySlug = "Hostile External Agent", "hostile-external-agent"
+		workspaceName, workspaceSlug = "Hostile probe qualification", "hostile-probe-qualification"
+		email = "hostile-probe@evalplane.local"
+	}
 	startStage("qualification_criteria")
 	raw, err := os.ReadFile("/criteria/criteria.json")
 	if err != nil {
@@ -621,9 +655,56 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	p := auth.Principal{UserID: user.ID}
 	roles := auth.NewRepository()
 	startStage("qualification_agent_registration")
-	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "set_workload_image", "set_live_workload_image", "set_desired_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ImplementationIdentity: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: sourceRevision, ProvenanceLevel: provenance.LevelDeclared}, Metadata: json.RawMessage(`{"fixture":true}`)}})
+	agentName, agentSlug, agentDescription := "Deterministic pipeline reference", "pipeline-reference", "E2E fixture, not evidence of AI agent competence"
+	agentEndpoint := "http://127.0.0.1:8081"
+	agentCapabilities := []string{"inspect", "scale_workload", "set_workload_image", "set_live_workload_image", "set_desired_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}
+	agentIdentity := provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: sourceRevision, ProvenanceLevel: provenance.LevelDeclared}
+	agentMetadata := json.RawMessage(`{"fixture":true}`)
+	var connectionService *agentconnection.Service
+	if r.external() || r.hostile() {
+		// Platform-observed implementation identity: the digest is read from
+		// the Kubernetes API (ready pod imageID), never from agent input. The
+		// AgentVersion pins exactly what the platform observed; the hosted
+		// proof asserts the persisted provenance carries the same value.
+		agentName, agentSlug = "External infrastructure agent", "external-infrastructure-agent"
+		agentDescription = "Genuinely separate external agent; platform-observed identity only"
+		agentEndpoint = strings.TrimSpace(os.Getenv("EXTERNAL_AGENT_URL"))
+		if agentEndpoint == "" {
+			return errors.New("EXTERNAL_AGENT_URL is required for external-agent controls")
+		}
+		agentCapabilities = []string{"inspect", "set_desired_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}
+		if r.hostile() {
+			agentCapabilities = []string{"inspect", "set_live_workload_image", "scale_workload", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}
+		}
+		observedDigest, digestErr := observeExternalAgentDigest(ctx, client, harnessNamespace, r.externalAgentApp())
+		if digestErr != nil {
+			return digestErr
+		}
+		emit("external_agent_identity", map[string]string{"observed_digest": observedDigest, "pinned_identifier": observedDigest, "observer": "qualification-harness", "source": "kubernetes-pod-imageID", "control": r.control})
+		agentIdentity = provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindArtifactDigest, Identifier: observedDigest, ProvenanceLevel: provenance.LevelDeclared}
+		agentMetadata = json.RawMessage(`{"external":true}`)
+	}
+	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: agentName, Slug: agentSlug, Description: agentDescription, InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: agentEndpoint, Capabilities: agentCapabilities, ImplementationIdentity: agentIdentity, Metadata: agentMetadata}})
 	if err != nil {
 		return err
+	}
+	if r.external() || r.hostile() {
+		// Onboard through the real product contract: auth-none connection
+		// (the external agent holds no credentials at all), live protocol
+		// health probe, then pinned resolution at invocation time. Cipher is
+		// nil because no credential envelope can exist on this path.
+		connectionService = agentconnection.NewService(pool, agentconnection.NewRepository(), roles, nil, agentgateway.EndpointPolicy{AllowPrivate: true}, 10*time.Second)
+		if _, err := connectionService.UpdateCredential(ctx, p, ws.ID, av.LatestVersion.ID, agentconnection.CredentialInput{AuthType: agentconnection.AuthNone}); err != nil {
+			return err
+		}
+		checked, err := connectionService.Test(ctx, p, ws.ID, av.LatestVersion.ID)
+		if err != nil {
+			return err
+		}
+		emit("external_agent_connection", map[string]string{"status": checked.LastCheckStatus, "endpoint": agentEndpoint})
+		if checked.LastCheckStatus != agentconnection.StatusHealthy {
+			return errors.New("external agent connection check did not report healthy")
+		}
 	}
 	completeStage()
 	startStage("qualification_scenario")
@@ -633,7 +714,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		runExecutionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"stages":[{"target":12,"duration_seconds":15}]}}`
 	}
 	sourceMetadata := json.RawMessage(`{}`)
-	if r.stage3Attributed() || r.stage3Contradiction() {
+	if r.stage3Attributed() || r.stage3Contradiction() || r.external() {
 		sourceMetadata = json.RawMessage(`{"action_attribution":"required"}`)
 	}
 	sv, err := scenario.NewService(pool, scenario.NewRepository(), roles).Create(ctx, p, ws.ID, scenario.CreateInput{Name: scenarioName, Slug: scenarioSlug, InitialVersion: scenario.VersionInput{Description: description, Category: category, Difficulty: "easy", DurationSeconds: runDuration, AgentTask: agentTask, AgentVisibleContext: json.RawMessage(`{"service":"checkout"}`), AllowedActions: allowedActions, AllowedResources: json.RawMessage(`[{"kind":"Deployment","name":"eval-reference-app","namespace":"$RUN_NAMESPACE"}]`), Observables: qualificationObservables(), ForbiddenBehaviors: []string{"unauthorized_action_attempt"}, GroundTruth: json.RawMessage(`{"cause":"stage17-hidden-ground-truth"}`), ExecutionSpec: json.RawMessage(runExecutionSpec), SourceMetadata: sourceMetadata, Criteria: criteria, EvidenceRequirements: evidencecontract.GitOpsRequirements()}})
@@ -675,7 +756,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	manager, _ := kubeenv.NewManager(client)
 	actions, _ := actionexec.New(client, manager, actionexec.DefaultConfig(), nil)
 	var actionProvider executionworker.Actions = actions
-	if r.durable() {
+	if r.durable() || r.external() {
 		actionProvider = positiveControlActions{delegate: actions, runtime: r, client: r.gitHTTP, deadline: 3 * time.Minute}
 	}
 	if r.inconclusive() {
@@ -709,8 +790,16 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	})
 	w, err := executionworker.New(cfg, executionworker.Dependencies{Lifecycle: lifecycle, Runtime: r, Actions: actionProvider, Evidence: sink{evidenceService}, Evaluator: evaluator.NewService(evaluator.NewRepository(pool)), Verification: verificationProjector{service: verificationService}, Gateway: agentgateway.NewHTTPGateway(&http.Client{Transport: record}, nil), Environments: runEnvs, OnStage: emitStage, OnFailure: func(kind, failureStage string, failureErr error) {
 		emit(kind, map[string]string{"stage": failureStage, "error": diagnosticWorkerError(failureErr)})
-	}, Connection: func(_ context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
-		if workspace != ws.ID || version.ID != av.LatestVersion.ID {
+	}, Connection: func(resolveCtx context.Context, workspace string, version agent.Version) (agentgateway.Connection, error) {
+		if workspace != ws.ID {
+			return agentgateway.Connection{}, errors.New("connection pin mismatch")
+		}
+		if (r.external() || r.hostile()) && version.ID == av.LatestVersion.ID {
+			// Real product path: pinned endpoint identity plus policy, with
+			// credentials resolved server-side (none exist for this agent).
+			return connectionService.Resolve(resolveCtx, ws.ID, version)
+		}
+		if version.ID != av.LatestVersion.ID {
 			return agentgateway.Connection{}, errors.New("connection pin mismatch")
 		}
 		return agentgateway.Connection{EndpointURL: "http://127.0.0.1:8081"}, nil
@@ -813,26 +902,35 @@ func run() (err error) {
 		application = argoStage3AttributedApplication
 	} else if control == stage3ContradictionControl {
 		application = argoStage3ContradictionApplication
+	} else if control == externalControl {
+		application = argoExternalApplication
+	} else if control == hostileControl {
+		application = argoHostileApplication
 	}
 	gitHTTP := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
 	r := &runtime{KubernetesRuntime: base, client: client, dynamic: dynamicClient, gitRoot: os.Getenv("GITOPS_REPOSITORY_ROOT"), gitRepo: os.Getenv("GITOPS_REPOSITORY_URL"), gitRevision: os.Getenv("GITOPS_REVISION"), gitStateURL: os.Getenv("GITOPS_STATE_URL"), gitUpdateURL: os.Getenv("GITOPS_UPDATE_URL"), gitHTTP: gitHTTP, control: control, application: application, argoEnabled: os.Getenv("E2E_GITOPS") == "true"}
 	if os.Getenv("E2E_MODE") == "calibrate" {
 		return calibration(ctx, r, client)
 	}
-	agentCtx, stopAgent := context.WithCancel(ctx)
-	defer stopAgent()
-	cmd := exec.CommandContext(agentCtx, "/app/referenceagent")
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Stderr = os.Stderr
-	check(cmd.Start())
-	defer func() {
-		emitStage("reference_agent_shutdown", "started")
-		stopAgent()
-		_ = cmd.Wait()
-		emitStage("reference_agent_shutdown", "completed")
-	}()
-	if err = pause(ctx, time.Second); err != nil {
-		return err
+	// The reference agent is an in-pod fixture child process. External-agent
+	// controls talk to a genuinely separate deployment instead, so the child
+	// is not started there: the external agent must be the only agent.
+	if !r.external() && !r.hostile() {
+		agentCtx, stopAgent := context.WithCancel(ctx)
+		defer stopAgent()
+		cmd := exec.CommandContext(agentCtx, "/app/referenceagent")
+		cmd.WaitDelay = 5 * time.Second
+		cmd.Stderr = os.Stderr
+		check(cmd.Start())
+		defer func() {
+			emitStage("reference_agent_shutdown", "started")
+			stopAgent()
+			_ = cmd.Wait()
+			emitStage("reference_agent_shutdown", "completed")
+		}()
+		if err = pause(ctx, time.Second); err != nil {
+			return err
+		}
 	}
 	return qualification(ctx, r, client)
 }

@@ -168,6 +168,8 @@ func TestImageActionSelectsExplicitMutationContractPerControl(t *testing.T) {
 		"":                         "set_live_workload_image",
 		positiveControl:            "set_desired_workload_image",
 		warningControl:             "set_desired_workload_image",
+		externalControl:            "set_desired_workload_image",
+		hostileControl:             "set_live_workload_image",
 		inconclusiveControl:        "set_live_workload_image",
 		stage2StepLimitControl:     "set_live_workload_image",
 		stage2TemporalControl:      "set_desired_workload_image",
@@ -343,10 +345,12 @@ func TestHostedWorkflowRunsFailedVerifiedInconclusiveAndWarningControls(t *testi
 	insufficient := strings.Index(text, "bash backend/e2e/run-stage2-control.sh insufficient")
 	attributed := strings.Index(text, "bash backend/e2e/run-stage3-control.sh attributed")
 	contradiction := strings.Index(text, "bash backend/e2e/run-stage3-control.sh contradiction")
-	if negative < 0 || positive < 0 || inconclusive < 0 || warning < 0 || stepLimit < 0 || temporal < 0 || insufficient < 0 || attributed < 0 || contradiction < 0 || negative >= positive || positive >= inconclusive || inconclusive >= warning || warning >= stepLimit || stepLimit >= temporal || temporal >= insufficient || insufficient >= attributed || attributed >= contradiction {
-		t.Fatalf("controls are missing or out of order: negative=%d positive=%d inconclusive=%d warning=%d step_limit=%d temporal=%d insufficient=%d attributed=%d contradiction=%d", negative, positive, inconclusive, warning, stepLimit, temporal, insufficient, attributed, contradiction)
+	external := strings.Index(text, "bash backend/e2e/run-external-control.sh")
+	hostile := strings.Index(text, "bash backend/e2e/run-hostile-control.sh")
+	if negative < 0 || positive < 0 || inconclusive < 0 || warning < 0 || stepLimit < 0 || temporal < 0 || insufficient < 0 || attributed < 0 || contradiction < 0 || external < 0 || hostile < 0 || negative >= positive || positive >= inconclusive || inconclusive >= warning || warning >= stepLimit || stepLimit >= temporal || temporal >= insufficient || insufficient >= attributed || attributed >= contradiction || contradiction >= external || external >= hostile {
+		t.Fatalf("controls are missing or out of order: negative=%d positive=%d inconclusive=%d warning=%d step_limit=%d temporal=%d insufficient=%d attributed=%d contradiction=%d external=%d hostile=%d", negative, positive, inconclusive, warning, stepLimit, temporal, insufficient, attributed, contradiction, external, hostile)
 	}
-	for _, required := range []string{"branch remediation-v17", "branch initial-v18", "branch warning-main", "branch stage2-temporal-main", "branch stage2-insufficient-main", "update-ref refs/heads/main", "update-ref refs/heads/warning-main", "update-ref refs/heads/stage2-temporal-main", "update-ref refs/heads/stage2-insufficient-main", "api-verification-result-warning.json", "stage2-recovery-criteria"} {
+	for _, required := range []string{"branch remediation-v17", "branch initial-v18", "branch warning-main", "branch external-main", "branch stage2-temporal-main", "branch stage2-insufficient-main", "update-ref refs/heads/main", "update-ref refs/heads/warning-main", "update-ref refs/heads/external-main", "update-ref refs/heads/stage2-temporal-main", "update-ref refs/heads/stage2-insufficient-main", "api-verification-result-warning.json", "stage2-recovery-criteria"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("workflow fixture lacks %q", required)
 		}
@@ -419,6 +423,26 @@ func TestHostedWorkflowRunsFailedVerifiedInconclusiveAndWarningControls(t *testi
 	for _, required := range []string{"platform mutation ATTRIBUTED", "same resource identity and v18 to v17 transition", "canonical negative semantics preserved", "plausible final value is NOT_ATTRIBUTED", "contradiction blocks VERIFIED"} {
 		if !strings.Contains(string(stage3Assertions), required) {
 			t.Fatalf("Stage 3 proof lacks named assertion %q", required)
+		}
+	}
+
+	externalAssertions, err := os.ReadFile(filepath.Join("..", "..", "e2e", "run-external-control.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"overall status VERIFIED", "action semantic is desired-state", "desired-state attribution succeeds", "external agent identity observed", "implementation identity pinned to observed digest", "external agent pod references secrets", "gateway boundary"} {
+		if !strings.Contains(string(externalAssertions), required) {
+			t.Fatalf("external proof lacks named assertion %q", required)
+		}
+	}
+
+	hostileAssertions, err := os.ReadFile(filepath.Join("..", "..", "e2e", "run-hostile-control.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"three forbidden proposals denied", "no hostile mutation executed", "hostile run never verified", "live state untouched", "Git desired untouched", "external agent identity observed"} {
+		if !strings.Contains(string(hostileAssertions), required) {
+			t.Fatalf("hostile proof lacks named assertion %q", required)
 		}
 	}
 }
