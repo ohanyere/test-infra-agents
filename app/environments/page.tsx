@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import styles from "../scenarios/scenarios.module.css";
 import { PublicNavigation } from "../site-navigation";
+import { SiteFooter } from "../site-footer";
 
 export const metadata: Metadata = { title: "Environments — Realverax", description: "Server-owned execution environment profiles and providers for evaluation tasks." };
 
@@ -24,5 +25,6 @@ export default function EnvironmentsPage() {
       {profiles.map((row) => <div key={row.profile}><h2>{row.profile}</h2><dl><div><dt>Provider</dt><dd>{row.provider}</dd></div><div><dt>Isolation</dt><dd>{row.isolation}</dd></div><div><dt>Status</dt><dd>{row.status}</dd></div></dl><p>{row.note}</p></div>)}
       <p>Kind is a development runtime, never production qualification infrastructure. AWS sandboxes are not presented as available.</p>
     </section>
+    <SiteFooter />
   </main>;
 }
