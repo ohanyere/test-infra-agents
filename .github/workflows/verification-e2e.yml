@@ -694,7 +694,7 @@ jobs:
                 authorized_count: .action_inspection.authorized_count,
                 executed_count: .action_inspection.executed_count,
                 action_type_counts: ([.action_inspection.actions[]?.action_type] | sort | group_by(.) | map({action_type: .[0], count: length})),
-                set_workload_image: [.action_inspection.actions[]? | select(.action_type == "set_workload_image") | {authorized, status}]
+                set_live_workload_image: [.action_inspection.actions[]? | select(.action_type == "set_live_workload_image") | {authorized, status}]
               },
               infrastructure_diff: [.infrastructure_diff[]? | {
                 classification,
@@ -866,7 +866,8 @@ jobs:
           assert_result "action requested" '.action_inspection.requested_count > 0'
           assert_result "action authorized" '.action_inspection.authorized_count > 0'
           assert_result "action executed" '.action_inspection.executed_count > 0'
-          assert_result "set_workload_image executed" 'any(.action_inspection.actions[]?; .action_type == "set_workload_image" and .authorized == true and .status == "executed")'
+          assert_result "direct-live image mutation executed" 'any(.action_inspection.actions[]?; .action_type == "set_live_workload_image" and .authorized == true and .status == "executed")'
+          assert_result "action semantic is direct-live" 'all(.action_inspection.actions[]?; .action_type != "set_desired_workload_image")'
           assert_result "infrastructure diff present" '(.infrastructure_diff | length) > 0'
           assert_result "infrastructure diff expected classification" 'any(.infrastructure_diff[]?; .classification == "EXPECTED")'
           assert_result "image before v18" 'any(.infrastructure_diff[]?; .classification == "EXPECTED" and any(.fields[]?; .field == "image" and .before == "evalplane-reference:v18"))'
@@ -948,7 +949,7 @@ jobs:
             fail_proof_assertion "product cleanup artifact"
           fi
           echo "proof assertion: proof summary generation"
-          if ! jq '{label:"REAL RUNTIME E2E WITH DETERMINISTIC REFERENCE AGENT",agent_action_result:(if any(.action_inspection.actions[]; .action_type == "set_workload_image" and .status == "executed") then "SUCCESS" else "FAILED" end),immediate_objective:(if .outcome.status == "PASSED" then "RECOVERED" else .outcome.status end),independent_infrastructure_verification:.overall_status,reason,id,run_id,agent_version_id,scenario_version_id,validity,action_inspection,infrastructure_diff,outcome,invariants,side_effects,stability,forward_risks}' \
+          if ! jq '{label:"REAL RUNTIME E2E WITH DETERMINISTIC REFERENCE AGENT",agent_action_result:(if any(.action_inspection.actions[]; .action_type == "set_live_workload_image" and .status == "executed") then "SUCCESS" else "FAILED" end),immediate_objective:(if .outcome.status == "PASSED" then "RECOVERED" else .outcome.status end),independent_infrastructure_verification:.overall_status,reason,id,run_id,agent_version_id,scenario_version_id,validity,action_inspection,infrastructure_diff,outcome,invariants,side_effects,stability,forward_risks}' \
             "$verification_result" > "$ARTIFACT_DIR/verification-proof-summary.json"; then
             fail_proof_assertion "proof summary generation"
           fi

@@ -103,7 +103,10 @@ func (a positiveControlActions) Authorize(ctx context.Context, env observation.E
 }
 
 func (a positiveControlActions) ExecuteAction(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction) actionexec.ActionResult {
-	if action.Type != "set_workload_image" {
+	// Only the explicit desired-state contract takes the Git path. Live
+	// mutation types (including the legacy identifier, which keeps the
+	// direct-live contract) always dispatch to the live executor below.
+	if action.Type != "set_desired_workload_image" {
 		return a.delegate.ExecuteAction(ctx, env, action)
 	}
 	decision := a.delegate.Authorize(ctx, env, action)

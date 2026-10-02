@@ -79,12 +79,12 @@ case "$mode" in
   temporal)
     assert_json "$verification" "temporal recovery VERIFIED" '.overall_status == "VERIFIED" and .outcome.status == "PASSED"'
     assert_json "$evaluation" "both recovery criteria passed" '(.criteria | length) == 2 and all(.criteria[]; .evidence.status == "passed" and (.evidence.evidence_selection | contains("latest executed mutating action")))'
-    assert_json "$input" "real mutation executed" 'any(.Actions[]?; .action_type == "set_workload_image" and .status == "executed" and .authorized == true)'
+    assert_json "$input" "real mutation executed" 'any(.Actions[]?; .action_type == "set_desired_workload_image" and .status == "executed" and .authorized == true)'
     ;;
   insufficient)
     assert_json "$verification" "incomplete recovery evidence INCONCLUSIVE" '.overall_status == "INCONCLUSIVE"'
     assert_json "$evaluation" "recovery criterion inconclusive" 'any(.criteria[]?; .evidence.status == "inconclusive" and ((.evidence.reason | contains("complete required lookback")) or (.evidence.reason | contains("positive request traffic"))))'
-    assert_json "$input" "real mutation executed" 'any(.Actions[]?; .action_type == "set_workload_image" and .status == "executed" and .authorized == true)'
+    assert_json "$input" "real mutation executed" 'any(.Actions[]?; .action_type == "set_desired_workload_image" and .status == "executed" and .authorized == true)'
     ;;
 esac
 

@@ -16,7 +16,9 @@ type Capability struct {
 var actionCatalog = []Capability{
 	{ID: "inspect", Kind: "action", Label: "Inspect", Category: "actions"},
 	{ID: "scale_workload", Kind: "action", Label: "Scale workload", Category: "actions"},
-	{ID: "set_workload_image", Kind: "action", Label: "Set workload image", Category: "actions"},
+	{ID: "set_workload_image", Kind: "action", Label: "Set workload image (legacy live mutation)", Category: "actions"},
+	{ID: "set_live_workload_image", Kind: "action", Label: "Set live workload image", Category: "actions"},
+	{ID: "set_desired_workload_image", Kind: "action", Label: "Set desired workload image", Category: "actions"},
 	{ID: "restart_pod", Kind: "action", Label: "Restart pod", Category: "actions"},
 	{ID: "no_op", Kind: "action", Label: "No operation", Category: "actions"},
 }

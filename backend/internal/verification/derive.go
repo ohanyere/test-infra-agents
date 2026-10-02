@@ -97,7 +97,10 @@ func buildProvenance(in BuildInput, assessment EvidenceAssessment) *provenance.V
 	if len(in.Actions) > 0 {
 		providers = append(providers, provenance.ProviderIdentity{Role: "action_policy", ProviderID: "executionworker-action-policy"})
 		for _, action := range in.Actions {
-			if action.Status == "executed" && (action.ActionType == "set_workload_image" || action.ActionType == "scale_workload" || action.ActionType == "restart_pod") {
+			// Only direct-live mutations run through kubernetes-client-go. A
+			// desired-state action never touches the live executor, so it must
+			// not gain live-executor provenance.
+			if action.Status == "executed" && (isLiveImageAction(action.ActionType) || action.ActionType == "scale_workload" || action.ActionType == "restart_pod") {
 				providers = append(providers, provenance.ProviderIdentity{Role: "action_executor", ProviderID: "kubernetes-client-go", ContractVersion: AttributionContractVersion})
 				break
 			}

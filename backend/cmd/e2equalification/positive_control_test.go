@@ -55,7 +55,7 @@ func (allowedActions) Authorize(context.Context, observation.EnvironmentContext,
 }
 
 func (allowedActions) ExecuteAction(context.Context, observation.EnvironmentContext, agentgateway.ProposedAction) actionexec.ActionResult {
-	panic("positive set_workload_image must not directly mutate Kubernetes")
+	panic("positive desired-state action must not directly mutate Kubernetes")
 }
 
 func TestPositiveApplicationTracksMainWithoutChangingNegativePin(t *testing.T) {
@@ -114,9 +114,44 @@ func TestPositiveActionUpdatesGitAndWaitsForArgoReconciliation(t *testing.T) {
 	r := &runtime{client: kubernetesfake.NewSimpleClientset(deployment), dynamic: fake.NewSimpleDynamicClient(k8sruntime.NewScheme(), application), control: positiveControl, application: argoPositiveApplication, gitStateURL: "http://fixture/state", gitUpdateURL: "http://fixture/update"}
 	actions := positiveControlActions{delegate: allowedActions{}, runtime: r, client: client, deadline: time.Second}
 	target := agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: "eval-reference-app"}
-	result := actions.ExecuteAction(context.Background(), env, agentgateway.ProposedAction{Type: "set_workload_image", Target: &target, Parameters: map[string]any{"image": "evalplane-reference:v17"}})
+	result := actions.ExecuteAction(context.Background(), env, agentgateway.ProposedAction{Type: "set_desired_workload_image", Target: &target, Parameters: map[string]any{"image": "evalplane-reference:v17"}})
 	if !updated || !result.Authorized || !result.Executed || result.Status != "executed" {
 		t.Fatalf("positive remediation did not update Git and reconcile: updated=%t result=%+v", updated, result)
+	}
+}
+
+func TestPositiveControlPassesLiveMutationsToTheLiveExecutor(t *testing.T) {
+	env := convergenceTestEnvironment()
+	actions := positiveControlActions{delegate: allowedActions{}, runtime: &runtime{}}
+	for _, actionType := range []string{"set_live_workload_image", "set_workload_image"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s did not reach the live executor", actionType)
+				}
+			}()
+			target := agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: "eval-reference-app"}
+			actions.ExecuteAction(context.Background(), env, agentgateway.ProposedAction{Type: actionType, Target: &target, Parameters: map[string]any{"image": "evalplane-reference:v17"}})
+		}()
+	}
+}
+
+func TestImageActionSelectsExplicitMutationContractPerControl(t *testing.T) {
+	cases := map[string]string{
+		"":                         "set_live_workload_image",
+		positiveControl:            "set_desired_workload_image",
+		warningControl:             "set_desired_workload_image",
+		inconclusiveControl:        "set_live_workload_image",
+		stage2StepLimitControl:     "set_live_workload_image",
+		stage2TemporalControl:      "set_desired_workload_image",
+		stage2InsufficientControl:  "set_desired_workload_image",
+		stage3AttributedControl:    "set_live_workload_image",
+		stage3ContradictionControl: "set_live_workload_image",
+	}
+	for control, want := range cases {
+		if got := (&runtime{control: control}).imageAction(); got != want {
+			t.Fatalf("control %q: image action=%q want %q", control, got, want)
+		}
 	}
 }
 
@@ -131,8 +166,8 @@ func TestFixtureStateRejectsUnsupportedDesiredImage(t *testing.T) {
 
 func TestUncertaintyControlStartsOnlyAfterSuccessfulRemediation(t *testing.T) {
 	r := &runtime{control: inconclusiveControl}
-	executed := uncertaintyControlActions{delegate: fixedActions{result: actionexec.ActionResult{ActionType: "set_workload_image", Authorized: true, Executed: true, Status: "executed"}}, runtime: r}
-	executed.ExecuteAction(context.Background(), observation.EnvironmentContext{}, agentgateway.ProposedAction{Type: "set_workload_image"})
+	executed := uncertaintyControlActions{delegate: fixedActions{result: actionexec.ActionResult{ActionType: "set_live_workload_image", Authorized: true, Executed: true, Status: "executed"}}, runtime: r}
+	executed.ExecuteAction(context.Background(), observation.EnvironmentContext{}, agentgateway.ProposedAction{Type: "set_live_workload_image"})
 	if !r.evidenceUnavailable.Load() {
 		t.Fatal("successful remediation did not activate the controlled evidence outage")
 	}
@@ -142,6 +177,13 @@ func TestUncertaintyControlStartsOnlyAfterSuccessfulRemediation(t *testing.T) {
 	failed.ExecuteAction(context.Background(), observation.EnvironmentContext{}, agentgateway.ProposedAction{Type: "set_workload_image"})
 	if r.evidenceUnavailable.Load() {
 		t.Fatal("failed agent action incorrectly activated verifier uncertainty")
+	}
+
+	r.evidenceUnavailable.Store(false)
+	desired := uncertaintyControlActions{delegate: fixedActions{result: actionexec.ActionResult{ActionType: "set_desired_workload_image", Authorized: true, Executed: true, Status: "executed"}}, runtime: r}
+	desired.ExecuteAction(context.Background(), observation.EnvironmentContext{}, agentgateway.ProposedAction{Type: "set_desired_workload_image"})
+	if r.evidenceUnavailable.Load() {
+		t.Fatal("desired-state action incorrectly activated the live-mutation evidence outage")
 	}
 }
 

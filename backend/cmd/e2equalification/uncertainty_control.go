@@ -23,7 +23,7 @@ func (a uncertaintyControlActions) Authorize(ctx context.Context, env observatio
 
 func (a uncertaintyControlActions) ExecuteAction(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction) actionexec.ActionResult {
 	result := a.delegate.ExecuteAction(ctx, env, action)
-	if action.Type == "set_workload_image" && result.Authorized && result.Executed && result.Status == "executed" {
+	if (action.Type == "set_workload_image" || action.Type == "set_live_workload_image") && result.Authorized && result.Executed && result.Status == "executed" {
 		a.runtime.evidenceUnavailable.Store(true)
 	}
 	return result

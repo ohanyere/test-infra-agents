@@ -101,7 +101,7 @@ func (e *Executor) executeOne(ctx context.Context, env observation.EnvironmentCo
 	if ctx.Err() != nil {
 		return failed(action.Type, "action cancelled")
 	}
-	if action.Type != "inspect" && action.Type != "no_op" && action.Type != "scale_workload" && action.Type != "restart_pod" && action.Type != "set_workload_image" {
+	if action.Type != "inspect" && action.Type != "no_op" && action.Type != "scale_workload" && action.Type != "restart_pod" && action.Type != "set_workload_image" && action.Type != "set_live_workload_image" && action.Type != "set_desired_workload_image" {
 		return deny("unsupported_action", "unsupported action denied")
 	}
 	verified, err := e.verifier.GetEnvironment(ctx, env.Identity.RunID)
@@ -129,12 +129,20 @@ func (e *Executor) executeOne(ctx context.Context, env observation.EnvironmentCo
 	if action.Type == "scale_workload" {
 		return e.scale(ctx, env, action, deny, dryRun)
 	}
-	if action.Type == "set_workload_image" {
+	if action.Type == "set_workload_image" || action.Type == "set_live_workload_image" {
 		return e.setImage(ctx, env, action, deny, dryRun)
+	}
+	if action.Type == "set_desired_workload_image" {
+		// Fail closed: desired-state mutation requires a Git executor. The live
+		// Kubernetes executor must never silently perform it.
+		return deny("unsupported_action", "desired-state image mutation requires a Git executor")
 	}
 	return e.restart(ctx, env, action, deny, dryRun)
 }
 
+// setImage mutates the live Kubernetes workload directly. The legacy
+// set_workload_image identifier keeps exactly this live-mutation contract;
+// desired-state mutation is never performed here.
 func (e *Executor) setImage(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction, deny func(string, string) ActionResult, dryRun bool) ActionResult {
 	if action.Target.Kind != "Deployment" || action.Target.Name != scenariorunner.ReferenceDeploymentName {
 		return deny("disallowed_resource", "only the reference Deployment image may be changed")

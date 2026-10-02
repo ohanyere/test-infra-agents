@@ -289,7 +289,7 @@ func (w *Worker) persistAction(ctx context.Context, runID, actionID string, resu
 }
 func safeActionType(value string) string {
 	switch value {
-	case "inspect", "no_op", "scale_workload", "restart_pod", "set_workload_image":
+	case "inspect", "no_op", "scale_workload", "restart_pod", "set_workload_image", "set_live_workload_image", "set_desired_workload_image":
 		return value
 	}
 	return "unsupported_action"
@@ -304,7 +304,7 @@ func safeProposal(action agentgateway.ProposedAction) map[string]any {
 			out["replicas"] = n
 		}
 	}
-	if action.Type == "set_workload_image" {
+	if action.Type == "set_workload_image" || action.Type == "set_live_workload_image" || action.Type == "set_desired_workload_image" {
 		if image, ok := action.Parameters["image"].(string); ok && len(image) <= 255 {
 			out["image"] = image
 		}

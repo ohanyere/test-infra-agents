@@ -34,7 +34,10 @@ func decide(request agentgateway.Request) agentgateway.Response {
 		for _, workload := range request.Observation.Workloads {
 			target := agentgateway.ActionTarget{Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name}
 			if workload.Kind == "Deployment" && slices.Contains(targets, target) && strings.HasSuffix(workload.Image, ":v18") {
-				action = agentgateway.ProposedAction{Type: "set_workload_image", Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+				action = agentgateway.ProposedAction{Type: imageActionType(request.AvailableActions), Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+				if action.Type == "" {
+					action = agentgateway.ProposedAction{Type: "no_op"}
+				}
 				break
 			}
 		}
@@ -50,8 +53,10 @@ func decide(request agentgateway.Request) agentgateway.Response {
 			continue
 		}
 		// Fixed conservative policy belongs to this fixture, not the evaluator.
-		if known && errorRate > 0 && strings.HasSuffix(workload.Image, ":v18") && slices.Contains(request.AvailableActions, "set_workload_image") {
-			action = agentgateway.ProposedAction{Type: "set_workload_image", Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+		if known && errorRate > 0 && strings.HasSuffix(workload.Image, ":v18") {
+			if imageAction := imageActionType(request.AvailableActions); imageAction != "" {
+				action = agentgateway.ProposedAction{Type: imageAction, Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+			}
 		} else if known && errorRate > 0 && workload.DesiredReplicas < 4 && slices.Contains(request.AvailableActions, "scale_workload") {
 			action = agentgateway.ProposedAction{Type: "scale_workload", Target: &target, Parameters: map[string]any{"replicas": 4}}
 		} else if known && errorRate == 0 && strings.HasSuffix(workload.Image, ":v17") {
@@ -65,6 +70,22 @@ func decide(request agentgateway.Request) agentgateway.Response {
 		return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{}}
 	}
 	return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{action}}
+}
+
+// imageActionType selects the explicit Stage 5 mutation contract offered to the
+// agent. Direct-live is preferred when offered; the legacy identifier keeps
+// the direct-live contract. Empty means no image mutation is available.
+func imageActionType(available []string) string {
+	if slices.Contains(available, "set_live_workload_image") {
+		return "set_live_workload_image"
+	}
+	if slices.Contains(available, "set_desired_workload_image") {
+		return "set_desired_workload_image"
+	}
+	if slices.Contains(available, "set_workload_image") {
+		return "set_workload_image"
+	}
+	return ""
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {

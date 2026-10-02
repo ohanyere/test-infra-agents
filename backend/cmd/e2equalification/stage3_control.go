@@ -27,7 +27,10 @@ func (a stage3ContradictionActions) Authorize(ctx context.Context, env observati
 
 func (a stage3ContradictionActions) ExecuteAction(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction) actionexec.ActionResult {
 	result := a.delegate.ExecuteAction(ctx, env, action)
-	if action.Type != "set_workload_image" || !result.Executed || result.Status != "executed" {
+	if action.Type != "set_workload_image" && action.Type != "set_live_workload_image" {
+		return result
+	}
+	if !result.Executed || result.Status != "executed" {
 		return result
 	}
 	deployments := a.client.AppsV1().Deployments(env.Environment.Namespace)

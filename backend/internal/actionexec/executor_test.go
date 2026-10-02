@@ -214,3 +214,47 @@ func TestSetWorkloadImageFailureRetainsPreMutationEvidence(t *testing.T) {
 		t.Fatalf("failed execution evidence=%+v", result)
 	}
 }
+
+func TestLiveImageActionDispatchesToLiveExecutorOnly(t *testing.T) {
+	client, _, env, executor := setup(t)
+	d := deployment(env, owned(scenariorunner.ReferenceComponent), 2)
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v18"}}
+	_, _ = client.AppsV1().Deployments(env.Environment.Namespace).Create(context.Background(), d, metav1.CreateOptions{})
+	target := &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName}
+	for _, actionType := range []string{"set_live_workload_image", "set_workload_image"} {
+		action := agentgateway.ProposedAction{Type: actionType, Target: target, Parameters: map[string]any{"image": "evalplane-reference:v17"}}
+		if result := executor.Authorize(context.Background(), env, action); !result.Authorized || result.Executed {
+			t.Fatalf("%s authorization=%+v", actionType, result)
+		}
+		result := executor.ExecuteAction(context.Background(), env, action)
+		if !result.Authorized || !result.Executed || result.Status != "executed" || result.ActionType != actionType {
+			t.Fatalf("%s execution=%+v", actionType, result)
+		}
+		if result.Attribution == nil || result.Attribution.Executor != "kubernetes-client-go" || result.Attribution.ActionType != actionType {
+			t.Fatalf("%s attribution=%+v", actionType, result.Attribution)
+		}
+	}
+	got, _ := client.AppsV1().Deployments(env.Environment.Namespace).Get(context.Background(), scenariorunner.ReferenceDeploymentName, metav1.GetOptions{})
+	if got.Spec.Template.Spec.Containers[0].Image != "evalplane-reference:v17" {
+		t.Fatalf("live image=%s", got.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestDesiredImageActionFailsClosedWithoutGitExecutor(t *testing.T) {
+	client, _, env, executor := setup(t)
+	d := deployment(env, owned(scenariorunner.ReferenceComponent), 2)
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v18"}}
+	_, _ = client.AppsV1().Deployments(env.Environment.Namespace).Create(context.Background(), d, metav1.CreateOptions{})
+	target := &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName}
+	action := agentgateway.ProposedAction{Type: "set_desired_workload_image", Target: target, Parameters: map[string]any{"image": "evalplane-reference:v17"}}
+	if result := executor.Authorize(context.Background(), env, action); result.Code != "unsupported_action" || result.Executed || result.Authorized {
+		t.Fatalf("desired-state authorization=%+v", result)
+	}
+	if result := executor.ExecuteAction(context.Background(), env, action); result.Code != "unsupported_action" || result.Executed || result.Authorized {
+		t.Fatalf("desired-state execution=%+v", result)
+	}
+	got, _ := client.AppsV1().Deployments(env.Environment.Namespace).Get(context.Background(), scenariorunner.ReferenceDeploymentName, metav1.GetOptions{})
+	if got.Spec.Template.Spec.Containers[0].Image != "evalplane-reference:v18" {
+		t.Fatalf("desired-state action mutated live state: image=%s", got.Spec.Template.Spec.Containers[0].Image)
+	}
+}

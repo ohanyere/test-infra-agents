@@ -13,7 +13,7 @@ import (
 )
 
 // stage4CanonicalInput mirrors the hosted canonical run shape: GitOps
-// requirements, an executed set_workload_image remediation, final Git desired
+// requirements, an executed direct-live remediation, final Git desired
 // v18 / live v17 divergence with Argo OutOfSync, and a real environment
 // provider identity as persisted through the managed run lifecycle.
 func stage4CanonicalInput() BuildInput {
@@ -25,7 +25,9 @@ func stage4CanonicalInput() BuildInput {
 	before := healthy("checkout:v18", 3)
 	after := healthy("checkout:v17", 3)
 	in.Events = []evidence.RunEvent{gitopsEvent(1, "verification_baseline_captured", in.Now, before, &gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Desired: desired, Argo: &gitops.ArgoState{Application: "checkout", Namespace: "argocd", SyncStatus: "Synced", Reference: "argo:baseline"}}), gitopsEvent(2, "stability_observation_collected", in.Now.Add(time.Second), after, state), gitopsEvent(3, "final_observation_collected", in.Now.Add(2*time.Second), after, state)}
-	in.Actions = []evidence.AgentAction{{ID: "action", RunID: "run", ActionType: "set_workload_image", Status: "executed", Authorized: true, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"image":"checkout:v17"}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: in.Now}}
+	// Stage 5 typed actions: the canonical negative control performs a DIRECT LIVE
+	// mutation, so its record carries the explicit direct-live contract.
+	in.Actions = []evidence.AgentAction{{ID: "action", RunID: "run", ActionType: "set_live_workload_image", Status: "executed", Authorized: true, TargetType: str("Deployment"), TargetRef: str("run-ns/checkout"), RequestPayload: json.RawMessage(`{"type":"set_live_workload_image","image":"checkout:v17","target":{"kind":"Deployment","namespace":"run-ns","name":"checkout"}}`), ResultPayload: json.RawMessage(`{"status":"executed"}`), CreatedAt: in.Now}}
 	in.Evaluation = Evaluation{Status: "pass", Summary: "All required criteria passed.", ContractVersion: evaluator.ContractVersion}
 	return in
 }

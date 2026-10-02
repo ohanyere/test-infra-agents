@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { PublicNavigation } from "../site-navigation";
+import { SiteFooter } from "../site-footer";
 import styles from "./pricing.module.css";
 
 export const metadata: Metadata = {
@@ -92,5 +93,6 @@ export default function PricingPage() {
       <p>Only the Kubernetes Sandbox is available today. GitOps, dedicated Kubernetes, and AWS sandboxes are planned or future and are not billed until they ship. Features marked “planned” above are not yet implemented.</p>
       <a className={styles.secondaryAction} href="/environments">View environment status</a>
     </section>
+    <SiteFooter />
   </main>;
 }

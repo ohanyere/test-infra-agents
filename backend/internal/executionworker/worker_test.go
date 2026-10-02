@@ -759,3 +759,20 @@ func hasEvent(f *fixture, code string) bool {
 	}
 	return false
 }
+
+func TestSafeActionTypePreservesTypedImageContracts(t *testing.T) {
+	for _, actionType := range []string{"inspect", "no_op", "scale_workload", "restart_pod", "set_workload_image", "set_live_workload_image", "set_desired_workload_image"} {
+		if got := safeActionType(actionType); got != actionType {
+			t.Fatalf("type %q became %q", actionType, got)
+		}
+		proposal := safeProposal(agentgateway.ProposedAction{Type: actionType, Parameters: map[string]any{"image": "evalplane-reference:v17"}})
+		if actionType == "set_workload_image" || actionType == "set_live_workload_image" || actionType == "set_desired_workload_image" {
+			if proposal["image"] != "evalplane-reference:v17" {
+				t.Fatalf("type %q lost image parameter: %+v", actionType, proposal)
+			}
+		}
+	}
+	if got := safeActionType("teleport_workload_image"); got != "unsupported_action" {
+		t.Fatalf("unknown type became %q", got)
+	}
+}

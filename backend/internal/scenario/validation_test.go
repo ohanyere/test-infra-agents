@@ -97,3 +97,15 @@ func TestScenarioAllowsWorkloadImageAction(t *testing.T) {
 		t.Fatalf("GitOps recovery action rejected: %v", err)
 	}
 }
+
+func TestScenarioAllowsTypedImageActions(t *testing.T) {
+	in := validScenario()
+	in.InitialVersion.AllowedActions = []string{"inspect", "set_live_workload_image", "set_desired_workload_image", "no_op"}
+	if _, err := ValidateCreate(in); err != nil {
+		t.Fatalf("typed image actions rejected: %v", err)
+	}
+	in.InitialVersion.AllowedActions = []string{"inspect", "teleport_workload_image", "no_op"}
+	if _, err := ValidateCreate(in); err == nil {
+		t.Fatal("ambiguous image action accepted")
+	}
+}

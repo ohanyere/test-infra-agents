@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-var allowedActions = map[string]struct{}{"inspect": {}, "scale_workload": {}, "restart_pod": {}, "set_workload_image": {}, "no_op": {}}
+var allowedActions = map[string]struct{}{"inspect": {}, "scale_workload": {}, "restart_pod": {}, "set_workload_image": {}, "set_live_workload_image": {}, "set_desired_workload_image": {}, "no_op": {}}
 
 type EndpointPolicy struct {
 	AllowPrivate bool
@@ -228,7 +228,7 @@ func validateAction(action ProposedAction) error {
 		if !ok || replicas < 1 || replicas > 100 || replicas != float64(int(replicas)) {
 			return fmt.Errorf("%w: replicas must be an integer from 1 to 100", ErrInvalidResponse)
 		}
-	case "set_workload_image":
+	case "set_workload_image", "set_live_workload_image", "set_desired_workload_image":
 		if action.Target.Kind != "Deployment" {
 			return fmt.Errorf("%w: image target must be a Deployment", ErrInvalidResponse)
 		}

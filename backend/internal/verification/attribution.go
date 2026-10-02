@@ -3,12 +3,24 @@ package verification
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/evalplane/evalplane/backend/internal/actionattribution"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 )
 
 const AttributionContractVersion = "action-attribution:v1"
+
+// Stage 5 typed actions: the legacy set_workload_image identifier keeps the
+// direct-live mutation contract. Only these types may be attributed against
+// live Kubernetes executor evidence.
+func isLiveImageAction(actionType string) bool {
+	return actionType == "set_workload_image" || actionType == "set_live_workload_image"
+}
+
+func isDesiredImageAction(actionType string) bool {
+	return actionType == "set_desired_workload_image"
+}
 
 const (
 	AttributionAttributed    = "ATTRIBUTED"
@@ -32,11 +44,14 @@ func assessActionAttribution(actions []evidence.AgentAction, final Snapshot, req
 	out.Status = AttributionInconclusive
 	out.Reason = "No attributable Kubernetes workload image action was recorded."
 	for _, action := range actions {
-		if action.ActionType != "set_workload_image" {
-			continue
+		switch {
+		case isLiveImageAction(action.ActionType):
+			assessment := assessImageAction(action, final)
+			out.Actions = append(out.Actions, assessment)
+		case isDesiredImageAction(action.ActionType):
+			assessment := assessDesiredImageAction(action, final)
+			out.Actions = append(out.Actions, assessment)
 		}
-		assessment := assessImageAction(action, final)
-		out.Actions = append(out.Actions, assessment)
 	}
 	if len(out.Actions) == 0 {
 		return out
@@ -99,7 +114,7 @@ func assessImageAction(action evidence.AgentAction, final Snapshot) ActionAttrib
 		out.Status, out.Reason = AttributionNotAttributed, reason
 		return out
 	}
-	if e.ContractVersion != actionattribution.ContractVersion || e.Executor != "kubernetes-client-go" || e.ActionType != "set_workload_image" || requested.Type != "set_workload_image" {
+	if e.ContractVersion != actionattribution.ContractVersion || e.Executor != "kubernetes-client-go" || !isLiveImageAction(e.ActionType) || !isLiveImageAction(requested.Type) || e.ActionType != requested.Type {
 		return contradiction("The persisted executor contract or action type does not match the requested Kubernetes mutation.")
 	}
 	if e.RunID != action.RunID || e.ActionID != action.ID {
@@ -151,6 +166,70 @@ func assessImageAction(action evidence.AgentAction, final Snapshot) ActionAttrib
 	}
 	out.Status = AttributionAttributed
 	out.Reason = fmt.Sprintf("Action %s wrote %s on the same UID and the later observation retained that generation and value.", action.ID, requested.Image)
+	return out
+}
+
+// assessDesiredImageAction attributes a desired-state image mutation against
+// the Git desired-state transition initiated through the authorized executor.
+// Subsequent Argo/live convergence is treated as a controller consequence: a
+// final live value alone is never sufficient evidence.
+func assessDesiredImageAction(action evidence.AgentAction, final Snapshot) ActionAttribution {
+	out := ActionAttribution{ActionID: action.ID, Status: AttributionInconclusive, Reason: "The action lacks complete Git desired-state transition evidence."}
+	if action.TargetRef != nil {
+		out.Resource = "Deployment/" + *action.TargetRef
+	}
+	if action.Status == "failed" || action.Status == "denied" || !action.Authorized {
+		out.Status = AttributionNotAttributed
+		out.Reason = "The action was not successfully authorized and executed by the platform."
+		return out
+	}
+	if action.Status != "executed" {
+		return out
+	}
+	var requested struct {
+		Type   string `json:"type"`
+		Image  string `json:"image"`
+		Target struct {
+			Kind, Namespace, Name string
+		} `json:"target"`
+	}
+	if json.Unmarshal(action.RequestPayload, &requested) != nil {
+		return out
+	}
+	out.RequestedValue = requested.Image
+	if requested.Type != "set_desired_workload_image" {
+		out.Status, out.Reason = AttributionNotAttributed, "The persisted request does not identify the desired-state mutation contract."
+		return out
+	}
+	if requested.Image == "" {
+		return out
+	}
+	if final.GitOps == nil || final.GitOps.Desired == nil || strings.TrimSpace(final.GitOps.Desired.Reference) == "" {
+		return out
+	}
+	desired := final.GitOps.Desired
+	out.Field = desired.Path
+	if desired.Image != requested.Image {
+		out.Status, out.Reason = AttributionNotAttributed, "The Git desired state does not contain the requested image."
+		return out
+	}
+	expected := ""
+	if action.TargetType != nil && action.TargetRef != nil {
+		expected = *action.TargetType + "/" + *action.TargetRef
+	}
+	if expected == "" {
+		return out
+	}
+	if desired.Resource != expected || requested.Target.Kind != "Deployment" || requested.Target.Namespace+"/"+requested.Target.Name != *action.TargetRef {
+		out.Status, out.Reason = AttributionNotAttributed, "The requested and persisted Git desired-state targets do not match."
+		return out
+	}
+	if final.GitOps.Argo == nil || final.GitOps.Argo.SyncStatus != "Synced" {
+		out.Status, out.Reason = AttributionInconclusive, "The Git desired-state transition is recorded but Argo reconciliation is unproven."
+		return out
+	}
+	out.Status = AttributionAttributed
+	out.Reason = fmt.Sprintf("Action %s changed Git desired state to %s and Argo reports Synced.", action.ID, requested.Image)
 	return out
 }
 

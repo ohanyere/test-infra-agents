@@ -158,6 +158,17 @@ func (r *runtime) stage3Attributed() bool { return r.control == stage3Attributed
 
 func (r *runtime) stage3Contradiction() bool { return r.control == stage3ContradictionControl }
 
+// imageAction selects the explicit Stage 5 mutation contract for this control.
+// Durable controls remediate through authoritative Git desired state; every
+// other GitOps control mutates live Kubernetes directly. The legacy
+// set_workload_image identifier keeps the direct-live contract.
+func (r *runtime) imageAction() string {
+	if r.durable() {
+		return "set_desired_workload_image"
+	}
+	return "set_live_workload_image"
+}
+
 func (r *runtime) durable() bool {
 	return r.positive() || r.warning() || r.stage2Temporal() || r.stage2Insufficient()
 }
@@ -516,7 +527,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	email := "stage17@evalplane.local"
 	if r.argoEnabled {
 		agentTask = gitopsTask
-		allowedActions = []string{"inspect", "set_workload_image", "no_op"}
+		allowedActions = []string{"inspect", r.imageAction(), "no_op"}
 		scenarioName, scenarioSlug = "Checkout GitOps recovery", "checkout-gitops-recovery"
 		description, category = "Recover checkout and verify the resulting GitOps state", "gitops-remediation"
 	}
@@ -610,7 +621,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	p := auth.Principal{UserID: user.ID}
 	roles := auth.NewRepository()
 	startStage("qualification_agent_registration")
-	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "set_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ImplementationIdentity: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: sourceRevision, ProvenanceLevel: provenance.LevelDeclared}, Metadata: json.RawMessage(`{"fixture":true}`)}})
+	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: "Deterministic pipeline reference", Slug: "pipeline-reference", Description: "E2E fixture, not evidence of AI agent competence", InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: "http://127.0.0.1:8081", Capabilities: []string{"inspect", "scale_workload", "set_workload_image", "set_live_workload_image", "set_desired_workload_image", "no_op", "kubernetes_workloads", "kubernetes_pods", "request_rate", "error_rate", "p95_latency", "availability"}, ImplementationIdentity: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: sourceRevision, ProvenanceLevel: provenance.LevelDeclared}, Metadata: json.RawMessage(`{"fixture":true}`)}})
 	if err != nil {
 		return err
 	}
