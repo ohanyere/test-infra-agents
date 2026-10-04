@@ -270,7 +270,8 @@ jobs:
           fi
           exec /www/cgi-bin/external-state
           SCRIPT
-          cat > /tmp/git-server/www/cgi-bin/stage2-temporal-state <<'SCRIPT'          #!/bin/sh
+          cat > /tmp/git-server/www/cgi-bin/stage2-temporal-state <<'SCRIPT'
+          #!/bin/sh
           set -eu
           revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-temporal-main)"
           image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"

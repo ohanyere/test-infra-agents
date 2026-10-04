@@ -446,3 +446,59 @@ func TestHostedWorkflowRunsFailedVerifiedInconclusiveAndWarningControls(t *testi
 		}
 	}
 }
+
+// TestFixtureCgiGeneratorsEmitExecutableScripts pins the workflow-embedded Git
+// fixture generators: every heredoc opener must carry no trailing content
+// (which would silently eat the body shebang), and every generated CGI script
+// must start with #!/bin/sh. bash -n and YAML parsing cannot catch a missing
+// shebang; without it the script is chmod +x but unexecutable (ENOEXEC) and
+// the endpoint fails at runtime.
+func TestFixtureCgiGeneratorsEmitExecutableScripts(t *testing.T) {
+	workflow, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "verification-e2e.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(workflow), "\n")
+	generated := 0
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		marker := strings.Index(trimmed, "<<'")
+		if !strings.HasPrefix(trimmed, "cat > ") || marker < 0 {
+			continue
+		}
+		// The opener must end exactly with the quoted delimiter: any
+		// trailing content silently eats generated body lines.
+		rest := trimmed[marker+len("<<'"):]
+		if len(rest) < 3 || !strings.HasSuffix(rest, "'") {
+			t.Fatalf("heredoc opener carries trailing content, swallowing the body: %q", lines[i])
+		}
+		for _, character := range rest[:len(rest)-1] {
+			if character != '\'' && (character < 'A' || character > 'Z') {
+				t.Fatalf("heredoc opener carries trailing content, swallowing the body: %q", lines[i])
+			}
+		}
+		var body []string
+		terminated := false
+		terminator := strings.Trim(rest, "'")
+		for _, candidate := range lines[i+1:] {
+			if strings.TrimSpace(candidate) == terminator {
+				terminated = true
+				break
+			}
+			body = append(body, candidate)
+		}
+		if !terminated || len(body) == 0 {
+			t.Fatalf("heredoc ending at line %d has no terminator or empty body", i+1)
+		}
+		generated++
+		if !strings.Contains(trimmed, "/cgi-bin/") && !strings.Contains(trimmed, "/entrypoint.sh") {
+			continue
+		}
+		if strings.TrimSpace(body[0]) != "#!/bin/sh" {
+			t.Fatalf("generated CGI starting at line %d begins with %q instead of a shebang", i+1, strings.TrimSpace(body[0]))
+		}
+	}
+	if generated < 10 {
+		t.Fatalf("only %d heredoc generators found, expected the fixture set", generated)
+	}
+}

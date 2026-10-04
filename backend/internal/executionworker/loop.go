@@ -264,7 +264,7 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 		w.stage("action_execution", "completed")
 	}
 	if result.Status == "failed" {
-		return platform("action_execution_failed", errors.New("controlled action failed"))
+		return platform("action_execution_failed", fmt.Errorf("controlled action %s failed: %s", result.ActionType, result.Summary))
 	}
 	return nil
 }
