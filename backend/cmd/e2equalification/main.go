@@ -323,16 +323,64 @@ func quotedDiagnostic(value string) string {
 	return string(encoded)
 }
 
+// emitGitDesiredStateDiagnostic records a bounded, secret-free diagnostic so
+// the next hosted run identifies the exact collector failure: which reader
+// ran, which endpoint/ref shape it used, and the sanitized collector error.
+// Evidence.Errors codes and verdict semantics are unchanged.
+func emitGitDesiredStateDiagnostic(r *runtime, gitErr error) {
+	source := "git_reader"
+	endpoint := "local-filesystem"
+	if r.durable() || r.external() {
+		source = "fixture_http"
+		endpoint = sanitizedDiagnosticEndpoint(r.gitStateURL)
+	}
+	refKind := "branch-or-invalid"
+	if fixtureRevisionPattern.MatchString(strings.TrimSpace(r.gitRevision)) {
+		refKind = "sha40"
+	} else if strings.TrimSpace(r.gitRevision) == "" {
+		refKind = "empty"
+	}
+	emit("git_desired_state_diagnostic", map[string]string{
+		"control":  r.control,
+		"source":   source,
+		"endpoint": endpoint,
+		"ref_kind": refKind,
+		"error":    safeQualificationError(gitErr),
+	})
+}
+
+func sanitizedDiagnosticEndpoint(endpoint string) string {
+	trimmed := strings.TrimSpace(endpoint)
+	if trimmed == "" {
+		return "absent"
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "invalid"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 func (r *runtime) ObserveGitOps(ctx context.Context, env observation.EnvironmentContext) (gitops.Evidence, error) {
 	if !r.argoEnabled {
 		return gitops.Evidence{}, nil
 	}
 	var desired gitops.DesiredState
 	var gitErr error
-	if r.durable() {
+	// Durable and external controls remediate through authoritative Git
+	// desired state served by the fixture HTTP control plane, so both read
+	// final desired state from the same endpoint the remediation wrote.
+	// Every other GitOps control reads a pinned filesystem manifest.
+	if r.durable() || r.external() {
 		desired, gitErr = r.readFixtureDesiredState(ctx, env)
 	} else {
 		desired, gitErr = (gitops.GitReader{Root: r.gitRoot, Repository: r.gitRepo, Revision: r.gitRevision, ManifestPath: "desired/checkout.yaml", Target: gitops.WorkloadTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName, Container: "reference-app"}}).Read()
+	}
+	if gitErr != nil {
+		emitGitDesiredStateDiagnostic(r, gitErr)
 	}
 	if r.inconclusive() && r.evidenceUnavailable.Load() {
 		out := gitops.Evidence{ContractVersion: gitops.EvidenceContractVersion, Errors: []string{"argo_state_unavailable_after_remediation"}}

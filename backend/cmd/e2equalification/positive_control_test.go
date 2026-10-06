@@ -265,6 +265,50 @@ func TestFixtureStateRejectsUnsupportedDesiredImage(t *testing.T) {
 	}
 }
 
+func TestExternalObserveGitOpsUsesFixtureDesiredState(t *testing.T) {
+	revision := strings.Repeat("e", 40)
+	client := fixtureHTTPClient(func(*http.Request) fixtureGitState {
+		return fixtureGitState{Revision: revision, Image: "evalplane-reference:v17"}
+	})
+	application := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+		"metadata": map[string]any{"name": argoExternalApplication, "namespace": argoNamespace},
+		"spec":     map[string]any{"source": map[string]any{"targetRevision": "external-main"}},
+		"status":   map[string]any{"sync": map[string]any{"status": "Synced", "revision": revision}, "health": map[string]any{"status": "Healthy"}},
+	}}
+	// The external control tracks the mutable external-main branch and has no
+	// filesystem fixture checkout: the filesystem reader must not run here.
+	r := &runtime{
+		dynamic:     fake.NewSimpleDynamicClient(k8sruntime.NewScheme(), application),
+		gitRoot:     filepath.Join(t.TempDir(), "missing-fixture"),
+		gitRepo:     "git://git-fixture.evalplane-e2e-harness.svc/repo.git",
+		gitRevision: "external-main",
+		gitStateURL: "http://fixture/external-state",
+		gitHTTP:     client,
+		control:     externalControl,
+		application: argoExternalApplication,
+		argoEnabled: true,
+	}
+	env := convergenceTestEnvironment()
+	evidence, err := r.ObserveGitOps(context.Background(), env)
+	if err != nil || evidence.Desired == nil || evidence.Argo == nil || len(evidence.Errors) != 0 {
+		t.Fatalf("external evidence incomplete: evidence=%+v err=%v", evidence, err)
+	}
+	if evidence.Desired.Image != "evalplane-reference:v17" || evidence.Desired.Revision != revision {
+		t.Fatalf("external desired state did not come from the fixture endpoint: %+v", evidence.Desired)
+	}
+}
+
+func TestSanitizedDiagnosticEndpointStripsSecrets(t *testing.T) {
+	got := sanitizedDiagnosticEndpoint("http://user:pass@fixture:8080/cgi-bin/external-state?token=abc#frag")
+	if got != "http://fixture:8080/cgi-bin/external-state" {
+		t.Fatalf("endpoint not sanitized: %q", got)
+	}
+	if sanitizedDiagnosticEndpoint("") != "absent" || sanitizedDiagnosticEndpoint(":::") != "invalid" {
+		t.Fatal("empty/invalid endpoints not labeled")
+	}
+}
+
 func TestUncertaintyControlStartsOnlyAfterSuccessfulRemediation(t *testing.T) {
 	r := &runtime{control: inconclusiveControl}
 	executed := uncertaintyControlActions{delegate: fixedActions{result: actionexec.ActionResult{ActionType: "set_live_workload_image", Authorized: true, Executed: true, Status: "executed"}}, runtime: r}
