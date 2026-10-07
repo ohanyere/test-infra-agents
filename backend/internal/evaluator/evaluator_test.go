@@ -129,6 +129,48 @@ func TestPostActionRecoveryMetricsUseOnlyCompleteEligibleEvidence(t *testing.T) 
 	}
 }
 
+func TestPostActionRecoveryWithoutMetricSeriesIsInconclusive(t *testing.T) {
+	mutatedAt := evaluatorNow.Add(90 * time.Second)
+	input := evaluationInput(
+		[]scenario.Criterion{
+			criterion("error-rate-recovered", "error_rate", "lte", `1`, "pct"),
+			criterion("availability-recovered", "availability", "gte", `99`, "pct"),
+		},
+		// Post-mutation observations exist (including inside the eligible
+		// window) but carry no recovery metric series: only the telemetry
+		// marker and a zero request rate, as emitted when the traffic
+		// profile has already ended.
+		metricEventAt("run-1", 1, mutatedAt.Add(10*time.Second), map[string]any{"telemetry_available": true}),
+		metricEventAt("run-1", 2, mutatedAt.Add(telemetry.RateWindow+5*time.Second), map[string]any{"telemetry_available": true, "request_rate_rps": 0}),
+	)
+	input.Actions = []evidence.AgentAction{{ID: "mutation", RunID: "run-1", ActionType: "set_desired_workload_image", Status: "executed", Authorized: true, CreatedAt: mutatedAt, CompletedAt: &mutatedAt}}
+	result := mustEvaluate(t, input)
+	if result.Status != StatusInconclusive {
+		t.Fatalf("overall result must stay INCONCLUSIVE: %+v", result)
+	}
+	if len(result.CriterionResults) != 2 {
+		t.Fatalf("both recovery criteria must be evaluated: %+v", result)
+	}
+	for _, criterionResult := range result.CriterionResults {
+		if criterionResult.Status != CriterionInconclusive || !strings.Contains(criterionResult.Reason, "no eligible post-action observation contained this metric") {
+			t.Fatalf("criterion without post-action metric evidence must be INCONCLUSIVE: %+v", criterionResult)
+		}
+		if string(criterionEvidence(criterionResult)) == "" {
+			t.Fatal("criterion evidence must serialize")
+		}
+		var persisted struct {
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(criterionEvidence(criterionResult), &persisted); err != nil {
+			t.Fatal(err)
+		}
+		if persisted.Status != CriterionInconclusive || !strings.Contains(persisted.Reason, "no eligible post-action observation contained this metric") {
+			t.Fatalf("persisted criterion evidence must keep the inconclusive distinction: %+v", persisted)
+		}
+	}
+}
+
 func TestPercentageRoundoffAtUpperBoundIsNormalized(t *testing.T) {
 	for _, test := range []struct {
 		metric, rawKey, operator string

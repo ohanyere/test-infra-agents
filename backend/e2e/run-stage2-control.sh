@@ -83,7 +83,7 @@ case "$mode" in
     ;;
   insufficient)
     assert_json "$verification" "incomplete recovery evidence INCONCLUSIVE" '.overall_status == "INCONCLUSIVE"'
-    assert_json "$evaluation" "recovery criterion inconclusive" 'any(.criteria[]?; .evidence.status == "inconclusive" and ((.evidence.reason | contains("complete required lookback")) or (.evidence.reason | contains("positive request traffic"))))'
+    assert_json "$evaluation" "recovery criterion inconclusive" 'any(.criteria[]?; .evidence.status == "inconclusive" and ((.evidence.reason | contains("complete required lookback")) or (.evidence.reason | contains("positive request traffic")) or (.evidence.reason | contains("no eligible post-action observation contained this metric"))))'
     assert_json "$input" "real mutation executed" 'any(.Actions[]?; .action_type == "set_desired_workload_image" and .status == "executed" and .authorized == true)'
     ;;
 esac
