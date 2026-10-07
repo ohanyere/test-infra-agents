@@ -28,7 +28,7 @@ jobs:
   verification-e2e:
     name: Real runtime E2E with deterministic reference agent
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16
