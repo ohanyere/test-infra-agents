@@ -18,6 +18,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/gitops"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -176,14 +177,8 @@ func (a positiveControlActions) waitForReconciliation(ctx context.Context, env o
 		state, stateErr := readFixtureState(ctx, a.client, a.runtime.gitStateURL)
 		argo, argoErr := (gitops.ArgoReader{Client: a.runtime.dynamic, Namespace: argoNamespace, Application: a.runtime.applicationName()}).Read(ctx)
 		deployment, deploymentErr := a.runtime.client.AppsV1().Deployments(env.Environment.Namespace).Get(ctx, scenariorunner.ReferenceDeploymentName, metav1.GetOptions{})
-		if stateErr == nil && argoErr == nil && deploymentErr == nil && state.Image == image && argo.SyncStatus == "Synced" && argo.ObservedRevision == state.Revision && deployment.Generation <= deployment.Status.ObservedGeneration && len(deployment.Spec.Template.Spec.Containers) > 0 && deployment.Spec.Template.Spec.Containers[0].Image == image {
-			desired := int32(1)
-			if deployment.Spec.Replicas != nil {
-				desired = *deployment.Spec.Replicas
-			}
-			if deployment.Status.UpdatedReplicas == desired && deployment.Status.AvailableReplicas == desired {
-				return nil
-			}
+		if stateErr == nil && argoErr == nil && deploymentErr == nil && state.Image == image && argo.SyncStatus == "Synced" && argo.ObservedRevision == state.Revision && deploymentConverged(deployment, image) {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -191,6 +186,20 @@ func (a positiveControlActions) waitForReconciliation(ctx context.Context, env o
 		case <-ticker.C:
 		}
 	}
+}
+
+// deploymentConverged requires the whole rollout to have settled. Updated and
+// available replica counts alone can both equal the desired count while an old
+// ReplicaSet still contributes the available replicas and new pods are pending.
+func deploymentConverged(deployment *appsv1.Deployment, image string) bool {
+	if deployment == nil || len(deployment.Spec.Template.Spec.Containers) == 0 || deployment.Spec.Template.Spec.Containers[0].Image != image || deployment.Status.ObservedGeneration < deployment.Generation {
+		return false
+	}
+	desired := int32(1)
+	if deployment.Spec.Replicas != nil {
+		desired = *deployment.Spec.Replicas
+	}
+	return deployment.Status.Replicas == desired && deployment.Status.UpdatedReplicas == desired && deployment.Status.AvailableReplicas == desired
 }
 
 func positiveActionFailure(actionType, summary string) actionexec.ActionResult {

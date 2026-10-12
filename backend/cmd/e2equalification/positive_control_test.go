@@ -130,7 +130,7 @@ func TestPositiveActionUpdatesGitAndWaitsForArgoReconciliation(t *testing.T) {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "eval-reference-app", Namespace: env.Environment.Namespace, Generation: 2},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v17"}}}}},
-		Status:     appsv1.DeploymentStatus{ObservedGeneration: 2, UpdatedReplicas: 2, AvailableReplicas: 2},
+		Status:     appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2},
 	}
 	application := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
@@ -225,7 +225,7 @@ func TestPositiveDesiredExecutionUsesGitPathWithRealDelegate(t *testing.T) {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "eval-reference-app", Namespace: env.Environment.Namespace, Generation: 2},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v17"}}}}},
-		Status:     appsv1.DeploymentStatus{ObservedGeneration: 2, UpdatedReplicas: 2, AvailableReplicas: 2},
+		Status:     appsv1.DeploymentStatus{ObservedGeneration: 2, Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2},
 	}
 	live := kubernetesfake.NewSimpleClientset(deployment)
 	manager, err := kubeenv.NewManager(live)
@@ -253,6 +253,37 @@ func TestPositiveDesiredExecutionUsesGitPathWithRealDelegate(t *testing.T) {
 		if (action.GetVerb() == "update" || action.GetVerb() == "patch") && action.GetResource().Resource == "deployments" {
 			t.Fatalf("desired-state remediation secretly mutated live state: %s %s", action.GetVerb(), action.GetResource().Resource)
 		}
+	}
+}
+
+func TestDeploymentConvergedWaitsForOldReplicaSetToDrain(t *testing.T) {
+	replicas := int32(2)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 3},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: "evalplane-reference:v17"}}}},
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 3,
+			Replicas:           3, // old ReplicaSet still contributes one pod
+			UpdatedReplicas:    2,
+			AvailableReplicas:  2, // one new pod is pending; one old pod is available
+		},
+	}
+	if deploymentConverged(deployment, "evalplane-reference:v17") {
+		t.Fatal("rollout with an old ReplicaSet pod must not be reported as converged")
+	}
+
+	deployment.Status.Replicas = 2
+	deployment.Status.AvailableReplicas = 2
+	if !deploymentConverged(deployment, "evalplane-reference:v17") {
+		t.Fatal("fully updated and available rollout should be reported as converged")
+	}
+
+	deployment.Status.ObservedGeneration = 2
+	if deploymentConverged(deployment, "evalplane-reference:v17") {
+		t.Fatal("stale Deployment status must not be reported as converged")
 	}
 }
 
