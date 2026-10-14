@@ -146,7 +146,7 @@ func scaleTrafficProfile(profile scenariorunner.TrafficSpikeProfile, peak int) s
 	if basePeak == 0 {
 		return profile
 	}
-	out := scenariorunner.TrafficSpikeProfile{Stages: make([]scenariorunner.TrafficStage, len(profile.Stages)), StartVUs: profile.StartVUs}
+	out := scenariorunner.TrafficSpikeProfile{Stages: make([]scenariorunner.TrafficStage, len(profile.Stages)), StartVUs: profile.StartVUs, RequestPath: profile.RequestPath}
 	for index, stage := range profile.Stages {
 		target := 0
 		if stage.Target > 0 {
@@ -184,8 +184,9 @@ func executionProfile(version scenario.Version) (scenariorunner.TrafficSpikeProf
 		Type     string `json:"type"`
 		Runnable *bool  `json:"runnable_now"`
 		Profile  *struct {
-			StartVUs *int `json:"start_vus"`
-			Stages   []struct {
+			StartVUs    *int   `json:"start_vus"`
+			RequestPath string `json:"request_path"`
+			Stages      []struct {
 				Target          int `json:"target"`
 				DurationSeconds int `json:"duration_seconds"`
 			} `json:"stages"`
@@ -204,6 +205,7 @@ func executionProfile(version scenario.Version) (scenariorunner.TrafficSpikeProf
 		}
 		out.StartVUs = spec.Profile.StartVUs
 	}
+	out.RequestPath = spec.Profile.RequestPath
 	if len(spec.Profile.Stages) == 0 || len(spec.Profile.Stages) > 20 {
 		return out, ErrUnsupported
 	}

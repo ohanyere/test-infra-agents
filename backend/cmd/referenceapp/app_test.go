@@ -44,3 +44,24 @@ func TestControlledLatencyAndErrorsDoNotAffectHealth(t *testing.T) {
 		t.Fatal("health affected by workload injection")
 	}
 }
+
+func TestHealthOnlyTrafficDoesNotCreateRecoveryMetricSeries(t *testing.T) {
+	a := newApp(config{Name: "test", Version: "v1"})
+	handler := a.handler()
+
+	healthResponse := httptest.NewRecorder()
+	handler.ServeHTTP(healthResponse, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if healthResponse.Code != http.StatusOK {
+		t.Fatalf("health status=%d", healthResponse.Code)
+	}
+
+	metricsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics, err := io.ReadAll(metricsResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metrics), `http_requests_total{route="root"`) || strings.Contains(string(metrics), `http_requests_total{route="work"`) {
+		t.Fatalf("health-only request unexpectedly created recovery metrics: %s", metrics)
+	}
+}

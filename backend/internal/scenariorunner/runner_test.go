@@ -121,13 +121,21 @@ func TestTrafficSpikeCreatesOwnedK6Resources(t *testing.T) {
 	}
 }
 
-func TestTrafficSpikeCanExplicitlyStartWithZeroVUs(t *testing.T) {
-	startVUs := 0
-	script := k6Script(TrafficSpikeProfile{StartVUs: &startVUs, Stages: []TrafficStage{{Target: 0, Duration: 15 * time.Second}}})
-	for _, required := range []string{"executor: 'ramping-vus'", "startVUs: 0", "{ duration: '15s', target: 0 }"} {
+func TestTrafficSpikeCanUseHealthOnlyProfileWithoutRecoveryMetrics(t *testing.T) {
+	startVUs := 1
+	script := k6Script(TrafficSpikeProfile{StartVUs: &startVUs, RequestPath: "/healthz", Stages: []TrafficStage{{Target: 1, Duration: 15 * time.Second}}})
+	for _, required := range []string{"executor: 'ramping-vus'", "startVUs: 1", "{ duration: '15s', target: 1 }", "http://" + ReferenceServiceName + "/healthz"} {
 		if !strings.Contains(script, required) {
-			t.Fatalf("explicit zero-VU script lacks %q: %s", required, script)
+			t.Fatalf("health-only script lacks %q: %s", required, script)
 		}
+	}
+}
+
+func TestTrafficSpikeRejectsNoWorkProfile(t *testing.T) {
+	zero := 0
+	err := validateProfile(TrafficSpikeProfile{StartVUs: &zero, Stages: []TrafficStage{{Target: 0, Duration: 15 * time.Second}}})
+	if err == nil || !strings.Contains(err.Error(), "at least one start or stage VU") {
+		t.Fatalf("all-zero k6 profile should be rejected before job creation, got %v", err)
 	}
 }
 

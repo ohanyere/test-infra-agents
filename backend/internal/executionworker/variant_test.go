@@ -30,17 +30,17 @@ func TestHiddenVariantRuntimeValidationAndTrafficScaling(t *testing.T) {
 	}
 }
 
-func TestExecutionProfilePreservesExplicitZeroStartVUs(t *testing.T) {
-	profile, err := executionProfile(scenario.Version{ExecutionSpec: json.RawMessage(`{"type":"traffic_spike","runnable_now":true,"profile":{"start_vus":0,"stages":[{"target":0,"duration_seconds":15}]}}`)})
+func TestExecutionProfilePreservesHealthOnlyTrafficSettings(t *testing.T) {
+	profile, err := executionProfile(scenario.Version{ExecutionSpec: json.RawMessage(`{"type":"traffic_spike","runnable_now":true,"profile":{"start_vus":1,"request_path":"/healthz","stages":[{"target":1,"duration_seconds":15}]}}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.StartVUs == nil || *profile.StartVUs != 0 || len(profile.Stages) != 1 || profile.Stages[0].Target != 0 {
-		t.Fatalf("zero-start traffic profile was not preserved: %+v", profile)
+	if profile.StartVUs == nil || *profile.StartVUs != 1 || len(profile.Stages) != 1 || profile.Stages[0].Target != 1 || profile.RequestPath != "/healthz" {
+		t.Fatalf("health-only traffic profile was not preserved: %+v", profile)
 	}
 	scaled := scaleTrafficProfile(profile, 12)
-	if scaled.StartVUs == nil || *scaled.StartVUs != 0 {
-		t.Fatalf("hidden traffic scaling dropped explicit zero start VUs: %+v", scaled)
+	if scaled.StartVUs == nil || *scaled.StartVUs != 1 || scaled.RequestPath != "/healthz" {
+		t.Fatalf("hidden traffic scaling dropped health-only profile settings: %+v", scaled)
 	}
 }
 

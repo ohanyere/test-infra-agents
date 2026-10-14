@@ -17,6 +17,11 @@ input="$ARTIFACT_DIR/$pod-input.json"
 
 diagnostics() {
   timeout 30s kubectl -n "$namespace" get pod "$pod" -o yaml > "$ARTIFACT_DIR/$pod.yaml" 2>&1 || true
+  timeout 30s kubectl -n "$namespace" get pod "$pod" -o json | jq -c '{phase: .status.phase, containers: [.status.containerStatuses[]? | {name, restartCount, state, lastState}]}' > "$ARTIFACT_DIR/$pod-container-status.json" 2>/dev/null || true
+  if [[ -s "$ARTIFACT_DIR/$pod-container-status.json" ]]; then
+    echo "Qualification container termination status:" >&2
+    cat "$ARTIFACT_DIR/$pod-container-status.json" >&2
+  fi
   timeout 30s kubectl -n "$namespace" describe pod "$pod" > "$ARTIFACT_DIR/$pod-describe.txt" 2>&1 || true
   timeout 30s kubectl -n "$namespace" logs "$pod" --all-containers=true > "$log" 2>&1 || true
   timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/$pod-all-pods.txt" 2>&1 || true

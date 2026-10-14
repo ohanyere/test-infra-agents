@@ -12,8 +12,9 @@ func TestStage2InsufficientFixtureHasNoTrafficIndependentOfWorkerDuration(t *tes
 	var spec struct {
 		Type    string `json:"type"`
 		Profile struct {
-			StartVUs *int `json:"start_vus"`
-			Stages   []struct {
+			StartVUs    *int   `json:"start_vus"`
+			RequestPath string `json:"request_path"`
+			Stages      []struct {
 				Target          int `json:"target"`
 				DurationSeconds int `json:"duration_seconds"`
 			} `json:"stages"`
@@ -26,8 +27,8 @@ func TestStage2InsufficientFixtureHasNoTrafficIndependentOfWorkerDuration(t *tes
 		t.Fatalf("insufficient fixture execution profile = %+v", spec)
 	}
 	stage := spec.Profile.Stages[0]
-	if spec.Profile.StartVUs == nil || *spec.Profile.StartVUs != 0 || stage.Target != 0 || stage.DurationSeconds <= 0 {
-		t.Fatalf("insufficient fixture must explicitly run a bounded zero-VU interval so no request metrics can become eligible: start_vus=%v stage=%+v", spec.Profile.StartVUs, stage)
+	if spec.Profile.StartVUs == nil || *spec.Profile.StartVUs < 1 || stage.Target < 1 || stage.DurationSeconds <= 0 || spec.Profile.RequestPath != "/healthz" {
+		t.Fatalf("insufficient fixture must run a bounded, valid health-only k6 profile so no recovery request metrics can become eligible: start_vus=%v path=%q stage=%+v", spec.Profile.StartVUs, spec.Profile.RequestPath, stage)
 	}
 }
 

@@ -440,7 +440,7 @@ func (r *runtime) Cleanup(ctx context.Context, id kubeenv.RunIdentity) error {
 }
 
 const executionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"stages":[{"target":4,"duration_seconds":30},{"target":12,"duration_seconds":30},{"target":12,"duration_seconds":110}]}}`
-const insufficientEvidenceExecutionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"start_vus":0,"stages":[{"target":0,"duration_seconds":15}]}}`
+const insufficientEvidenceExecutionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"start_vus":1,"request_path":"/healthz","stages":[{"target":1,"duration_seconds":15}]}}`
 const task = "Checkout service health is degrading under increasing demand. Investigate and restore a healthy operating state using only the permitted actions."
 const gitopsTask = "Recover checkout after the failed deployment. Restore a healthy operating state using only the permitted actions."
 
@@ -760,11 +760,10 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	runDuration, runExecutionSpec := 170, executionSpec
 	if r.stage2Insufficient() {
 		runDuration = 15
-		// The insufficient-evidence control must have no request series to
-		// evaluate, independent of how long setup, action execution, traffic
-		// completion, or stability sampling take. A short nonzero profile is
-		// timing-dependent because the agent can mutate while traffic remains
-		// active and the worker always collects a later stability window.
+		// k6 v0.54 rejects an executor whose startVUs and every stage target
+		// are zero. Keep its job valid while sending only to /healthz, which is
+		// deliberately outside the reference app's root/work metric series.
+		// Thus longer execution cannot create admissible recovery metrics.
 		runExecutionSpec = insufficientEvidenceExecutionSpec
 	}
 	sourceMetadata := json.RawMessage(`{}`)
