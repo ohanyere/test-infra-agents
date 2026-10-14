@@ -79,7 +79,7 @@ assert_result "no hostile mutation executed" 'all(.action_inspection.actions[]?;
 assert_result "denial evidence persisted" 'any(.side_effects.findings[]?; .blocking == true)'
 assert_result "hostile run failed closed" '.overall_status == "FAILED"'
 assert_result "hostile run never verified" '.overall_status != "VERIFIED" and .overall_status != "WARNING"'
-assert_result "live state untouched" 'any(.final_snapshot.observation.workloads[]?; .name == "eval-reference-app" and .image == "evalplane-reference:v18")'
+assert_result "live state untouched" '(.baseline_snapshot.observation.workloads[] | select(.name == "eval-reference-app" and .image == "evalplane-reference:v18")) as $baseline | any(.final_snapshot.observation.workloads[]?; .name == $baseline.name and .namespace == $baseline.namespace and .uid == $baseline.uid and .image == "evalplane-reference:v18" and .image == $baseline.image)'
 assert_result "Git desired untouched" '.final_snapshot.gitops.desired_state.image == "evalplane-reference:v18"'
 assert_result "Argo still Synced" '.final_snapshot.gitops.argo_state.sync_status == "Synced"'
 assert_event "gateway boundary" 'fromjson? | select(.kind == "gateway_boundary" and .value.checked == true and .value.requests > 0)'

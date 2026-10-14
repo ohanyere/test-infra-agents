@@ -20,10 +20,12 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/billing"
 	"github.com/evalplane/evalplane/backend/internal/config"
 	"github.com/evalplane/evalplane/backend/internal/coverage"
+	"github.com/evalplane/evalplane/backend/internal/customercollector"
 	"github.com/evalplane/evalplane/backend/internal/database"
 	"github.com/evalplane/evalplane/backend/internal/environment"
 	"github.com/evalplane/evalplane/backend/internal/evaluationbatch"
 	"github.com/evalplane/evalplane/backend/internal/evaluationsuite"
+	"github.com/evalplane/evalplane/backend/internal/evaluator"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/execution"
 	"github.com/evalplane/evalplane/backend/internal/failuretaxonomy"
@@ -108,6 +110,12 @@ func run() error {
 	qualificationService := qualification.NewService(pool, qualification.NewRepository(), auth.NewRepository(), evaluationSuiteService, agentRegressionService, failureTaxonomyService)
 	evidenceService := evidence.NewService(pool, evidence.NewRepository(), auth.NewRepository())
 	verificationService := verification.NewService(pool, verification.NewRepository(), auth.NewRepository())
+	canonicalEvaluator := evaluator.NewService(evaluator.NewRepository(pool))
+	collectorFinalizer := customerCollectorFinalizer{evaluator: canonicalEvaluator, verifier: verificationService}
+	customerCollectorService, err := customercollector.NewService(pool, auth.NewRepository(), collectorFinalizer)
+	if err != nil {
+		return fmt.Errorf("initialize customer Kubernetes collector: %w", err)
+	}
 	trajectoryService := trajectory.NewService(pool, trajectory.NewRepository(), auth.NewRepository())
 	executionService := execution.NewService(pool, execution.NewRepository(), auth.NewRepository())
 	coverageService := coverage.NewService(pool, coverage.NewRepository(), auth.NewRepository(), &agentClaimAdapter{service: agentService}, &executionMembership{pool: pool})
@@ -118,7 +126,7 @@ func run() error {
 	qualificationPlanService := qualplan.NewService(pool, qualplan.NewRepository(), auth.NewRepository(), agentService, scenarioService, scenario.NewRepository(), coverage.NewRepository(), environment.NewRepository(), environmentService, certificationService, evaluationSuiteService)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
-		Handler:           httpapi.NewRouter(pool, logger, httpapi.WithIdentityService(identityService), httpapi.WithAuthentication(authService, authService, cfg.CookieSecure, cfg.SessionTTL, cfg.AppOrigin), httpapi.WithAgentService(agentService), httpapi.WithAgentConnectionService(agentConnectionService), httpapi.WithScenarioService(scenarioService), httpapi.WithScenarioAuthoringService(scenarioAuthoringService), httpapi.WithIncidentSourceService(incidentSourceService), httpapi.WithEvaluationBatchService(evaluationBatchService), httpapi.WithEvaluationSuiteService(evaluationSuiteService), httpapi.WithAgentRegressionService(agentRegressionService), httpapi.WithQualificationService(qualificationService), httpapi.WithQualificationPlanService(qualificationPlanService), httpapi.WithCoverageService(coverageService), httpapi.WithReliabilityService(reliabilityService), httpapi.WithFailureTaxonomyService(failureTaxonomyService), httpapi.WithEvidenceService(evidenceService), httpapi.WithVerificationService(verificationService), httpapi.WithTrajectoryService(trajectoryService), httpapi.WithExecutionService(executionService), httpapi.WithCertificationService(certificationService), httpapi.WithEnvironmentService(environmentService), httpapi.WithBillingService(billingService)),
+		Handler:           httpapi.NewRouter(pool, logger, httpapi.WithIdentityService(identityService), httpapi.WithAuthentication(authService, authService, cfg.CookieSecure, cfg.SessionTTL, cfg.AppOrigin), httpapi.WithAgentService(agentService), httpapi.WithAgentConnectionService(agentConnectionService), httpapi.WithScenarioService(scenarioService), httpapi.WithScenarioAuthoringService(scenarioAuthoringService), httpapi.WithIncidentSourceService(incidentSourceService), httpapi.WithEvaluationBatchService(evaluationBatchService), httpapi.WithEvaluationSuiteService(evaluationSuiteService), httpapi.WithAgentRegressionService(agentRegressionService), httpapi.WithQualificationService(qualificationService), httpapi.WithQualificationPlanService(qualificationPlanService), httpapi.WithCoverageService(coverageService), httpapi.WithReliabilityService(reliabilityService), httpapi.WithFailureTaxonomyService(failureTaxonomyService), httpapi.WithEvidenceService(evidenceService), httpapi.WithVerificationService(verificationService), httpapi.WithTrajectoryService(trajectoryService), httpapi.WithExecutionService(executionService), httpapi.WithCertificationService(certificationService), httpapi.WithEnvironmentService(environmentService), httpapi.WithBillingService(billingService), httpapi.WithCustomerCollectorService(customerCollectorService)),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

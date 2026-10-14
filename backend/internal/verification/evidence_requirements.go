@@ -39,7 +39,14 @@ func assessEvidence(requirements evidencecontract.Requirements, baseline, final 
 	if !workloadsAvailable {
 		workloadReason = "Required baseline and final owned workload state could not both be established."
 	}
-	add("workload_state", requirements.WorkloadState, "kubernetes-api", workloadsAvailable, workloadReason, []string{baseline.Reference, final.Reference})
+	workloadProvider := final.SourceProvider
+	if workloadProvider == "" {
+		workloadProvider = baseline.SourceProvider
+	}
+	if workloadProvider == "" {
+		workloadProvider = "kubernetes-api"
+	}
+	add("workload_state", requirements.WorkloadState, workloadProvider, workloadsAvailable, workloadReason, []string{baseline.Reference, final.Reference})
 
 	telemetryOK, telemetryReason := requiredTelemetryAvailable(final, stabilitySamples)
 	telemetryRefs := []string{final.Reference}

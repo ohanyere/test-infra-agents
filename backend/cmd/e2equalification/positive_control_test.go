@@ -330,6 +330,39 @@ func TestExternalObserveGitOpsUsesFixtureDesiredState(t *testing.T) {
 	}
 }
 
+func TestHostileObserveGitOpsUsesFixtureDesiredState(t *testing.T) {
+	revision := strings.Repeat("f", 40)
+	client := fixtureHTTPClient(func(*http.Request) fixtureGitState {
+		return fixtureGitState{Revision: revision, Image: "evalplane-reference:v18"}
+	})
+	application := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+		"metadata": map[string]any{"name": argoHostileApplication, "namespace": argoNamespace},
+		"spec":     map[string]any{"source": map[string]any{"targetRevision": "hostile-main"}},
+		"status":   map[string]any{"sync": map[string]any{"status": "Synced", "revision": revision}, "health": map[string]any{"status": "Healthy"}},
+	}}
+	// The hostile control's independent v18 branch is served over the fixture
+	// endpoint; a branch name must not be passed to the pinned-SHA reader.
+	r := &runtime{
+		dynamic:     fake.NewSimpleDynamicClient(k8sruntime.NewScheme(), application),
+		gitRoot:     filepath.Join(t.TempDir(), "missing-fixture"),
+		gitRepo:     "git://git-fixture.evalplane-e2e-harness.svc/repo.git",
+		gitRevision: "hostile-main",
+		gitStateURL: "http://fixture/hostile-state",
+		gitHTTP:     client,
+		control:     hostileControl,
+		application: argoHostileApplication,
+		argoEnabled: true,
+	}
+	evidence, err := r.ObserveGitOps(context.Background(), convergenceTestEnvironment())
+	if err != nil || evidence.Desired == nil || evidence.Argo == nil || len(evidence.Errors) != 0 {
+		t.Fatalf("hostile evidence incomplete: evidence=%+v err=%v", evidence, err)
+	}
+	if evidence.Desired.Image != "evalplane-reference:v18" || evidence.Desired.Revision != revision {
+		t.Fatalf("hostile desired state did not come from its isolated fixture endpoint: %+v", evidence.Desired)
+	}
+}
+
 func TestSanitizedDiagnosticEndpointStripsSecrets(t *testing.T) {
 	got := sanitizedDiagnosticEndpoint("http://user:pass@fixture:8080/cgi-bin/external-state?token=abc#frag")
 	if got != "http://fixture:8080/cgi-bin/external-state" {
@@ -425,7 +458,7 @@ func TestHostedWorkflowRunsFailedVerifiedInconclusiveAndWarningControls(t *testi
 	if negative < 0 || positive < 0 || inconclusive < 0 || warning < 0 || stepLimit < 0 || temporal < 0 || insufficient < 0 || attributed < 0 || contradiction < 0 || external < 0 || hostile < 0 || negative >= positive || positive >= inconclusive || inconclusive >= warning || warning >= stepLimit || stepLimit >= temporal || temporal >= insufficient || insufficient >= attributed || attributed >= contradiction || contradiction >= external || external >= hostile {
 		t.Fatalf("controls are missing or out of order: negative=%d positive=%d inconclusive=%d warning=%d step_limit=%d temporal=%d insufficient=%d attributed=%d contradiction=%d external=%d hostile=%d", negative, positive, inconclusive, warning, stepLimit, temporal, insufficient, attributed, contradiction, external, hostile)
 	}
-	for _, required := range []string{"branch remediation-v17", "branch initial-v18", "branch warning-main", "branch external-main", "branch stage2-temporal-main", "branch stage2-insufficient-main", "update-ref refs/heads/main", "update-ref refs/heads/warning-main", "update-ref refs/heads/external-main", "update-ref refs/heads/stage2-temporal-main", "update-ref refs/heads/stage2-insufficient-main", "api-verification-result-warning.json", "stage2-recovery-criteria"} {
+	for _, required := range []string{"branch remediation-v17", "branch initial-v18", "branch warning-main", "branch external-main", "branch hostile-main", "branch stage2-temporal-main", "branch stage2-insufficient-main", "update-ref refs/heads/main", "update-ref refs/heads/warning-main", "update-ref refs/heads/external-main", "update-ref refs/heads/stage2-temporal-main", "update-ref refs/heads/stage2-insufficient-main", "cgi-bin/hostile-state", "api-verification-result-warning.json", "stage2-recovery-criteria"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("workflow fixture lacks %q", required)
 		}

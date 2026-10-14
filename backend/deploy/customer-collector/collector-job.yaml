@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: realverax-collector
+  namespace: realverax-system
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 86400
+  template:
+    spec:
+      serviceAccountName: realverax-collector
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: collector
+          image: realverax/kubecollector:REPLACE_WITH_PINNED_VERSION
+          imagePullPolicy: IfNotPresent
+          args: ["-interval=30s", "-duration=10m"]
+          env:
+            - name: REALVERAX_API_URL
+              valueFrom:
+                secretKeyRef:
+                  name: realverax-collector-credentials
+                  key: api-url
+            - name: REALVERAX_OBSERVATION_SESSION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: realverax-collector-credentials
+                  key: session-id
+            - name: REALVERAX_COLLECTOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: realverax-collector-credentials
+                  key: collector-token
+            - name: REALVERAX_NAMESPACES
+              valueFrom:
+                secretKeyRef:
+                  name: realverax-collector-credentials
+                  key: namespaces
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

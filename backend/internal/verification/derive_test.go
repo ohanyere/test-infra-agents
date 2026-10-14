@@ -66,6 +66,24 @@ func TestStatusSemantics(t *testing.T) {
 	}
 }
 
+func TestCustomerObservationSourceRequiresCausalAttribution(t *testing.T) {
+	in := validInput()
+	in.SourceMetadata = json.RawMessage(`{"source":"customer_collector","execution_mode":"observation_only","action_attribution":"required"}`)
+	for index := range in.Events {
+		var payload map[string]any
+		_ = json.Unmarshal(in.Events[index].Payload, &payload)
+		payload["source_provider"] = "customer-kubernetes-collector:v1"
+		in.Events[index].Payload, _ = json.Marshal(payload)
+	}
+	got := Derive(in)
+	if !got.ActionInspection.Attribution.Required || got.ActionInspection.Attribution.Status != AttributionInconclusive || got.OverallStatus != StatusInconclusive {
+		t.Fatalf("observation-only evidence must not establish causation: attribution=%+v status=%s reason=%s", got.ActionInspection.Attribution, got.OverallStatus, got.Reason)
+	}
+	if got.Baseline.SourceProvider != "customer-kubernetes-collector:v1" || got.EvidenceAssessment.Dimensions[0].SourceProvider != "customer-kubernetes-collector:v1" {
+		t.Fatalf("collector provenance missing from canonical result: snapshot=%+v evidence=%+v", got.Baseline, got.EvidenceAssessment.Dimensions[0])
+	}
+}
+
 func TestVerificationProvenancePinsContractsAndProvidersWithoutChangingVerdict(t *testing.T) {
 	got := Derive(validInput())
 	if got.OverallStatus != StatusVerified {

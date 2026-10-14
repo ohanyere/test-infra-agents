@@ -28,6 +28,7 @@ type Snapshot struct {
 	ContractVersion string                   `json:"contract_version"`
 	Reference       string                   `json:"reference"`
 	CapturedAt      time.Time                `json:"captured_at"`
+	SourceProvider  string                   `json:"source_provider,omitempty"`
 	Observation     agentgateway.Observation `json:"observation"`
 	GitOps          *gitops.Evidence         `json:"gitops,omitempty"`
 }

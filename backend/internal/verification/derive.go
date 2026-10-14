@@ -52,7 +52,8 @@ func Derive(in BuildInput, analyzers ...Analyzer) Result {
 	}
 	baseline, final, stabilitySamples := snapshots(in.Events, in.RunID)
 	out.Baseline, out.Final = baseline, final
-	out.ActionInspection = inspectActions(in.Actions, final, attributionRequired(in.ScenarioSourceMetadata))
+	requireAttribution := attributionRequired(in.ScenarioSourceMetadata) || observationOnly(in.SourceMetadata)
+	out.ActionInspection = inspectActions(in.Actions, final, requireAttribution)
 	out.EvidenceAssessment = assessEvidence(in.EvidenceRequirements, baseline, final, stabilitySamples)
 	out.Provenance = buildProvenance(in, out.EvidenceAssessment)
 	out.InfrastructureDiff = diff(baseline, final, out.ActionInspection)
@@ -138,11 +139,12 @@ func snapshots(events []evidence.RunEvent, runID string) (Snapshot, Snapshot, []
 		var payload struct {
 			Observation agentgateway.Observation `json:"observation"`
 			GitOps      *gitops.Evidence         `json:"gitops_evidence,omitempty"`
+			Source      string                   `json:"source_provider,omitempty"`
 		}
 		if json.Unmarshal(event.Payload, &payload) != nil {
 			continue
 		}
-		s := Snapshot{ContractVersion: SnapshotVersion, Reference: fmt.Sprintf("run_event:%d", event.ID), CapturedAt: event.OccurredAt.UTC(), Observation: safeObservation(payload.Observation), GitOps: safeGitOps(payload.GitOps)}
+		s := Snapshot{ContractVersion: SnapshotVersion, Reference: fmt.Sprintf("run_event:%d", event.ID), CapturedAt: event.OccurredAt.UTC(), SourceProvider: payload.Source, Observation: safeObservation(payload.Observation), GitOps: safeGitOps(payload.GitOps)}
 		switch event.Summary {
 		case "verification_baseline_captured":
 			baseline = s
@@ -153,6 +155,13 @@ func snapshots(events []evidence.RunEvent, runID string) (Snapshot, Snapshot, []
 		}
 	}
 	return baseline, final, stabilitySamples
+}
+
+func observationOnly(metadata json.RawMessage) bool {
+	var value struct {
+		ExecutionMode string `json:"execution_mode"`
+	}
+	return json.Unmarshal(metadata, &value) == nil && value.ExecutionMode == "observation_only"
 }
 
 func inspectActions(actions []evidence.AgentAction, final Snapshot, attributionIsRequired bool) ActionInspection {

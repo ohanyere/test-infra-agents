@@ -3,6 +3,7 @@ import localFont from "next/font/local";
 import "./globals.css";
 import "./hero-scale.css";
 import "./verification-proof.css";
+import "./homepage.css";
 import { Providers } from "./providers";
 
 const geistSans = localFont({
@@ -18,7 +19,7 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Realverax — Independent infrastructure agent verification",
+  title: "realverax — Independent infrastructure agent verification",
   description:
     "Inspect what infrastructure agents change and independently verify outcomes, side effects, stability, and evidence-backed forward risk.",
 };

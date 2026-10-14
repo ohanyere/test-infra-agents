@@ -330,7 +330,7 @@ func quotedDiagnostic(value string) string {
 func emitGitDesiredStateDiagnostic(r *runtime, gitErr error) {
 	source := "git_reader"
 	endpoint := "local-filesystem"
-	if r.durable() || r.external() {
+	if r.durable() || r.external() || r.hostile() {
 		source = "fixture_http"
 		endpoint = sanitizedDiagnosticEndpoint(r.gitStateURL)
 	}
@@ -370,11 +370,11 @@ func (r *runtime) ObserveGitOps(ctx context.Context, env observation.Environment
 	}
 	var desired gitops.DesiredState
 	var gitErr error
-	// Durable and external controls remediate through authoritative Git
-	// desired state served by the fixture HTTP control plane, so both read
-	// final desired state from the same endpoint the remediation wrote.
-	// Every other GitOps control reads a pinned filesystem manifest.
-	if r.durable() || r.external() {
+	// Durable and external controls remediate through authoritative Git,
+	// while the hostile control independently observes its isolated branch.
+	// All three use the fixture HTTP control plane; every other GitOps control
+	// reads a pinned filesystem manifest.
+	if r.durable() || r.external() || r.hostile() {
 		desired, gitErr = r.readFixtureDesiredState(ctx, env)
 	} else {
 		desired, gitErr = (gitops.GitReader{Root: r.gitRoot, Repository: r.gitRepo, Revision: r.gitRevision, ManifestPath: "desired/checkout.yaml", Target: gitops.WorkloadTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName, Container: "reference-app"}}).Read()

@@ -36,6 +36,7 @@ type routerConfig struct {
 	environment        EnvironmentService
 	billing            BillingService
 	verification       VerificationService
+	customerCollector  CustomerCollectorService
 }
 type RouterOption func(*routerConfig)
 
@@ -102,6 +103,9 @@ func WithBillingService(service BillingService) RouterOption {
 func WithVerificationService(service VerificationService) RouterOption {
 	return func(config *routerConfig) { config.verification = service }
 }
+func WithCustomerCollectorService(service CustomerCollectorService) RouterOption {
+	return func(config *routerConfig) { config.customerCollector = service }
+}
 func WithAuthentication(service AuthService, authorization WorkspaceAuthorization, cookieSecure bool, sessionTTL time.Duration, appOrigin string) RouterOption {
 	return func(config *routerConfig) {
 		config.auth = service
@@ -152,6 +156,9 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 			v1.Get("/qualification-tasks/{taskID}", qualificationTasksAPI.getTask)
 			if config.billing != nil {
 				v1.Post("/billing/webhooks/{provider}", billingHandlers{service: config.billing, logger: logger}.webhook)
+			}
+			if config.customerCollector != nil {
+				v1.Post("/collector/observation-sessions/{sessionID}/evidence", customerCollectorHandlers{service: config.customerCollector, logger: logger}.ingest)
 			}
 			v1.Group(func(protected chi.Router) {
 				protected.Use(authenticationMiddleware(config.auth))
@@ -338,6 +345,14 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 					protected.Post("/workspaces/{workspaceID}/environment-selection/resolve", environmentAPI.resolveSelection)
 					protected.Get("/workspaces/{workspaceID}/scenarios/{scenarioID}/versions/{versionID}/environment", environmentAPI.getVersionEnvironment)
 					protected.Put("/workspaces/{workspaceID}/scenarios/{scenarioID}/versions/{versionID}/environment", environmentAPI.putVersionRequirements)
+				}
+				if config.customerCollector != nil {
+					collectorAPI := customerCollectorHandlers{service: config.customerCollector, logger: logger}
+					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments", collectorAPI.register)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments", collectorAPI.list)
+					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/rotate", collectorAPI.rotate)
+					protected.Delete("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}", collectorAPI.revoke)
+					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions", collectorAPI.startSession)
 				}
 			})
 		})

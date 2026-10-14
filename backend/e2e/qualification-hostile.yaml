@@ -18,9 +18,8 @@ spec:
         - {name: E2E_GITOPS_CONTROL, value: "hostile"}
         - {name: GITOPS_REPOSITORY_ROOT, value: "/git-fixture"}
         - {name: GITOPS_REPOSITORY_URL, value: "git://git-fixture.evalplane-e2e-harness.svc/repo.git"}
-        - {name: GITOPS_REVISION, value: "external-main"}
-        - {name: GITOPS_STATE_URL, value: "http://git-fixture.evalplane-e2e-harness.svc:8080/cgi-bin/external-state"}
-        - {name: GITOPS_UPDATE_URL, value: "http://git-fixture.evalplane-e2e-harness.svc:8080/cgi-bin/remediate-external-v17"}
+        - {name: GITOPS_REVISION, value: "hostile-main"}
+        - {name: GITOPS_STATE_URL, value: "http://git-fixture.evalplane-e2e-harness.svc:8080/cgi-bin/hostile-state"}
         - {name: EXTERNAL_AGENT_URL, value: "http://external-agent-hostile.evalplane-e2e-harness.svc:8081"}
         - name: DATABASE_URL
           valueFrom:

@@ -184,6 +184,9 @@ jobs:
           git -C "$source_dir" branch initial-v18
           git -C "$source_dir" branch warning-main
           git -C "$source_dir" branch external-main
+          # The hostile control runs after external-main has been advanced by
+          # the external positive control; keep its untouched v18 baseline isolated.
+          git -C "$source_dir" branch hostile-main
           git -C "$source_dir" branch stage2-temporal-main
           git -C "$source_dir" branch stage2-insufficient-main
           git clone --bare "$source_dir" /tmp/repo.git
@@ -270,6 +273,16 @@ jobs:
           fi
           exec /www/cgi-bin/external-state
           SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/hostile-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/hostile-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
           cat > /tmp/git-server/www/cgi-bin/stage2-temporal-state <<'SCRIPT'
           #!/bin/sh
           set -eu
@@ -330,7 +343,7 @@ jobs:
           COPY repo.git /srv/repo.git
           COPY www /www
           COPY entrypoint.sh /entrypoint.sh
-          RUN chmod 0755 /entrypoint.sh /www/cgi-bin/state /www/cgi-bin/remediate-v17 /www/cgi-bin/warning-state /www/cgi-bin/remediate-warning-v17 /www/cgi-bin/external-state /www/cgi-bin/remediate-external-v17 /www/cgi-bin/stage2-temporal-state /www/cgi-bin/remediate-stage2-temporal-v17 /www/cgi-bin/stage2-insufficient-state /www/cgi-bin/remediate-stage2-insufficient-v17
+          RUN chmod 0755 /entrypoint.sh /www/cgi-bin/state /www/cgi-bin/remediate-v17 /www/cgi-bin/warning-state /www/cgi-bin/remediate-warning-v17 /www/cgi-bin/external-state /www/cgi-bin/remediate-external-v17 /www/cgi-bin/hostile-state /www/cgi-bin/stage2-temporal-state /www/cgi-bin/remediate-stage2-temporal-v17 /www/cgi-bin/stage2-insufficient-state /www/cgi-bin/remediate-stage2-insufficient-v17
           EXPOSE 9418 8080
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
