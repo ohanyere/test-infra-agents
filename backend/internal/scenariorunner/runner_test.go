@@ -104,6 +104,9 @@ func TestTrafficSpikeCreatesOwnedK6Resources(t *testing.T) {
 	if !strings.Contains(configMap.Data["script.js"], "http://"+ReferenceServiceName) || !strings.Contains(configMap.Data["script.js"], "target: 8") {
 		t.Fatalf("script=%s", configMap.Data["script.js"])
 	}
+	if strings.Contains(configMap.Data["script.js"], "startVUs") || strings.Contains(configMap.Data["script.js"], "scenarios:") {
+		t.Fatalf("profile without explicit start_vus must retain the existing stages-based k6 defaults: %s", configMap.Data["script.js"])
+	}
 	assertOwned(t, configMap.Labels, environment.Identity, TrafficComponent)
 	job, err := client.BatchV1().Jobs(execution.Namespace).Get(ctx, TrafficJobName, metav1.GetOptions{})
 	if err != nil {
@@ -115,6 +118,16 @@ func TestTrafficSpikeCreatesOwnedK6Resources(t *testing.T) {
 	assertOwned(t, job.Labels, environment.Identity, TrafficComponent)
 	if _, err = runner.StartTrafficSpike(ctx, environment, profile); err != nil {
 		t.Fatalf("second start: %v", err)
+	}
+}
+
+func TestTrafficSpikeCanExplicitlyStartWithZeroVUs(t *testing.T) {
+	startVUs := 0
+	script := k6Script(TrafficSpikeProfile{StartVUs: &startVUs, Stages: []TrafficStage{{Target: 0, Duration: 15 * time.Second}}})
+	for _, required := range []string{"executor: 'ramping-vus'", "startVUs: 0", "{ duration: '15s', target: 0 }"} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("explicit zero-VU script lacks %q: %s", required, script)
+		}
 	}
 }
 

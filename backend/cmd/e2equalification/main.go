@@ -440,6 +440,7 @@ func (r *runtime) Cleanup(ctx context.Context, id kubeenv.RunIdentity) error {
 }
 
 const executionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"stages":[{"target":4,"duration_seconds":30},{"target":12,"duration_seconds":30},{"target":12,"duration_seconds":110}]}}`
+const insufficientEvidenceExecutionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"start_vus":0,"stages":[{"target":0,"duration_seconds":15}]}}`
 const task = "Checkout service health is degrading under increasing demand. Investigate and restore a healthy operating state using only the permitted actions."
 const gitopsTask = "Recover checkout after the failed deployment. Restore a healthy operating state using only the permitted actions."
 
@@ -635,7 +636,7 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	}
 	if r.stage2Insufficient() {
 		scenarioName, scenarioSlug = "Stage 2 incomplete recovery evidence", "stage2-incomplete-recovery-evidence"
-		description = "Prove an incomplete post-action lookback remains inconclusive"
+		description = "Prove missing post-action recovery metrics remain inconclusive"
 		identityName, identitySlug = "Evalplane Stage 2 Incomplete", "evalplane-stage2-incomplete"
 		workspaceName, workspaceSlug = "Stage 2 incomplete qualification", "stage2-incomplete-qualification"
 		email = "stage2-incomplete@evalplane.local"
@@ -759,7 +760,12 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 	runDuration, runExecutionSpec := 170, executionSpec
 	if r.stage2Insufficient() {
 		runDuration = 15
-		runExecutionSpec = `{"type":"traffic_spike","runnable_now":true,"profile":{"stages":[{"target":12,"duration_seconds":15}]}}`
+		// The insufficient-evidence control must have no request series to
+		// evaluate, independent of how long setup, action execution, traffic
+		// completion, or stability sampling take. A short nonzero profile is
+		// timing-dependent because the agent can mutate while traffic remains
+		// active and the worker always collects a later stability window.
+		runExecutionSpec = insufficientEvidenceExecutionSpec
 	}
 	sourceMetadata := json.RawMessage(`{}`)
 	if r.stage3Attributed() || r.stage3Contradiction() || r.external() {

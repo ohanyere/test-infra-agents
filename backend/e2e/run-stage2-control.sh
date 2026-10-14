@@ -23,9 +23,25 @@ diagnostics() {
   jq -Rrc 'fromjson? | select(.kind == "qualification_stage" or .kind == "qualification_failure" or .kind == "worker_failure" or .kind == "persistence_failure")' "$log" >&2 || true
 }
 
+proof_diagnostics() {
+  if [[ -s "$verification" ]]; then
+    echo "Persisted verification summary:" >&2
+    jq -c '{overall_status, validity, reason, outcome: .outcome.status, evidence_assessment: {contract_version: .evidence_assessment.contract_version, requirements: .evidence_assessment.requirements, dimensions: [.evidence_assessment.dimensions[]? | {evidence_type, requirement_status, availability, reason, source_provider, evidence_references}]}, attribution: .action_inspection.attribution.status}' "$verification" >&2 || true
+  fi
+  if [[ -s "$evaluation" ]]; then
+    echo "Persisted recovery criterion summary:" >&2
+    jq -c '{status, criteria: [.criteria[]? | {key, name, metric_key, evidence: {status: .evidence.status, reason: .evidence.reason, observed_state: .evidence.observed_state, observed_value: .evidence.observed_value, evidence_ids: .evidence.evidence_ids, evidence_selection: .evidence.evidence_selection}}]}' "$evaluation" >&2 || true
+  fi
+  if [[ -s "$input" ]]; then
+    echo "Persisted action and observation timeline:" >&2
+    jq -c '{actions: [.Actions[]? | {id, action_type, status, authorized, started_at, completed_at, created_at}], events: [.Events[]? | select(.event_type == "observation" or .event_type == "telemetry" or .event_type == "action" or .event_type == "decision") | {id, sequence, event_type, occurred_at, summary, payload}]}' "$input" >&2 || true
+  fi
+}
+
 fail() {
   echo "STAGE 2 ${mode^^} PROOF ASSERTION FAILED: $1" >&2
   printf '%s\n' "$1" > "$ARTIFACT_DIR/$pod-assertion-failure.txt" || true
+  proof_diagnostics
   diagnostics
   exit 1
 }
@@ -33,7 +49,10 @@ fail() {
 assert_json() {
   local file="$1" name="$2" expression="$3"
   echo "Stage 2 $mode proof assertion: $name"
-  jq -e "$expression" "$file" >/dev/null || fail "$name"
+  if ! jq -e "$expression" "$file" >/dev/null; then
+    echo "Failed JSON assertion in $(basename "$file"): $expression" >&2
+    fail "$name"
+  fi
 }
 
 timeout 30s kubectl apply -f "$manifest" || fail "qualification pod applied"
@@ -83,7 +102,7 @@ case "$mode" in
     ;;
   insufficient)
     assert_json "$verification" "incomplete recovery evidence INCONCLUSIVE" '.overall_status == "INCONCLUSIVE"'
-    assert_json "$evaluation" "recovery criterion inconclusive" 'any(.criteria[]?; .evidence.status == "inconclusive" and ((.evidence.reason | contains("complete required lookback")) or (.evidence.reason | contains("positive request traffic")) or (.evidence.reason | contains("no eligible post-action observation contained this metric"))))'
+    assert_json "$evaluation" "recovery metric unavailable after action" 'any(.criteria[]?; .evidence.status == "inconclusive" and (.evidence.reason | contains("no eligible post-action observation contained this metric")))'
     assert_json "$input" "real mutation executed" 'any(.Actions[]?; .action_type == "set_desired_workload_image" and .status == "executed" and .authorized == true)'
     ;;
 esac

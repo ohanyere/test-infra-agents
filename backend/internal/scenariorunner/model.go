@@ -52,7 +52,8 @@ type TrafficStage struct {
 }
 
 type TrafficSpikeProfile struct {
-	Stages []TrafficStage
+	Stages   []TrafficStage
+	StartVUs *int
 }
 
 func DevelopmentTrafficSpikeProfile() TrafficSpikeProfile {

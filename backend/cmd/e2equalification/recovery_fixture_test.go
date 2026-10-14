@@ -1,11 +1,35 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestStage2InsufficientFixtureHasNoTrafficIndependentOfWorkerDuration(t *testing.T) {
+	var spec struct {
+		Type    string `json:"type"`
+		Profile struct {
+			StartVUs *int `json:"start_vus"`
+			Stages   []struct {
+				Target          int `json:"target"`
+				DurationSeconds int `json:"duration_seconds"`
+			} `json:"stages"`
+		} `json:"profile"`
+	}
+	if err := json.Unmarshal([]byte(insufficientEvidenceExecutionSpec), &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Type != "traffic_spike" || len(spec.Profile.Stages) != 1 {
+		t.Fatalf("insufficient fixture execution profile = %+v", spec)
+	}
+	stage := spec.Profile.Stages[0]
+	if spec.Profile.StartVUs == nil || *spec.Profile.StartVUs != 0 || stage.Target != 0 || stage.DurationSeconds <= 0 {
+		t.Fatalf("insufficient fixture must explicitly run a bounded zero-VU interval so no request metrics can become eligible: start_vus=%v stage=%+v", spec.Profile.StartVUs, stage)
+	}
+}
 
 func TestHostedVersionedImagesShareSufficientCapacity(t *testing.T) {
 	root := filepath.Join("..", "..", "..")

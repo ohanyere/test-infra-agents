@@ -42,6 +42,9 @@ func validateProfile(profile TrafficSpikeProfile) error {
 	if len(profile.Stages) == 0 {
 		return errors.New("traffic spike profile requires at least one stage")
 	}
+	if profile.StartVUs != nil && (*profile.StartVUs < 0 || *profile.StartVUs > 1000) {
+		return errors.New("traffic spike start VUs must be between 0 and 1000")
+	}
 	for index, stage := range profile.Stages {
 		if stage.Target < 0 || stage.Duration <= 0 {
 			return fmt.Errorf("traffic stage %d must have a non-negative target and positive duration", index+1)

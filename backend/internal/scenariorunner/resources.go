@@ -68,6 +68,26 @@ func k6Script(profile TrafficSpikeProfile) string {
 	for _, stage := range profile.Stages {
 		stages = append(stages, fmt.Sprintf("{ duration: '%s', target: %d }", stage.Duration.String(), stage.Target))
 	}
+	if profile.StartVUs != nil {
+		return fmt.Sprintf(`import http from 'k6/http';
+import { check } from 'k6';
+
+export const options = {
+  scenarios: {
+    default: {
+      executor: 'ramping-vus',
+      startVUs: %d,
+      stages: [%s],
+    },
+  },
+};
+
+export default function () {
+  const response = http.get('http://%s');
+  check(response, { 'status is 200': (r) => r.status === 200 });
+}
+`, *profile.StartVUs, strings.Join(stages, ", "), ReferenceServiceName)
+	}
 	return fmt.Sprintf(`import http from 'k6/http';
 import { check } from 'k6';
 
