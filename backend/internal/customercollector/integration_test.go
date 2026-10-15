@@ -116,11 +116,14 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	if err != nil || rotated.CollectorCredential == registered.CollectorCredential || rotated.Environment.ConnectionStatus != "pending" {
 		t.Fatalf("credential rotation failed: err=%v", err)
 	}
-	base := time.Now().UTC().Add(-time.Second)
+	// Keep synthetic observations safely behind server receipt time. Claims
+	// ending after the current server time are correctly rejected, even when
+	// their client-side timestamps are otherwise close to the baseline.
+	base := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Microsecond)
 	phases := []string{"baseline", "stability", "stability", "final"}
 	var finalBatch EvidenceBatch
 	for index, phase := range phases {
-		captured := base.Add(time.Duration(index+1) * time.Second)
+		captured := base.Add(time.Duration(index+1) * time.Second).Truncate(time.Microsecond)
 		obs := agentgateway.Observation{Timestamp: captured, Workloads: []agentgateway.WorkloadObservation{{Kind: "Deployment", Name: "checkout", Namespace: "checkout", DesiredReplicas: 2, ReadyReplicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2, UID: "uid-checkout", ResourceVersion: time.Now().Format("150405")}}, Pods: []agentgateway.PodObservation{}, Metrics: map[string]any{}, RecentEvents: []agentgateway.RecentEvent{}}
 		batch := EvidenceBatch{BatchID: uuid.NewString(), Sequence: int64(index + 1), SchemaVersion: ContractVersion, Phase: phase, CapturedAt: captured, Observation: obs}
 		if phase == "final" {
@@ -160,6 +163,24 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 				Resource:   ClaimedResource{Kind: "Deployment", Namespace: "checkout", Name: "checkout", UID: "uid-checkout"},
 				StartedAt:  captured, CompletedAt: captured.Add(100 * time.Millisecond),
 				Outcome: "executed", ExternalTrace: "abcdef0123456789",
+			}
+			beforeWindow := claimInput
+			beforeWindow.ClaimID = uuid.NewString()
+			beforeWindow.IdempotencyKey = uuid.NewString()
+			beforeWindow.StartedAt = captured.Add(-time.Microsecond)
+			if _, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, registered.Environment.ID, session.ID, beforeWindow); !errors.Is(claimErr, identity.ErrValidation) {
+				t.Fatalf("claim starting before baseline error=%v, want validation error", claimErr)
+			}
+			afterWindow := claimInput
+			afterWindow.ClaimID = uuid.NewString()
+			afterWindow.IdempotencyKey = uuid.NewString()
+			afterWindow.CompletedAt = time.Now().UTC().Add(time.Second)
+			if _, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, registered.Environment.ID, session.ID, afterWindow); !errors.Is(claimErr, identity.ErrValidation) {
+				t.Fatalf("claim ending after server receipt time error=%v, want validation error", claimErr)
+			}
+			var rejectedClaims int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM customer_agent_action_claims WHERE session_id=$1`, session.ID).Scan(&rejectedClaims); err != nil || rejectedClaims != 0 {
+				t.Fatalf("rejected claims persisted: count=%d error=%v", rejectedClaims, err)
 			}
 			if _, claimErr := service.SubmitActionClaim(ctx, auth.Principal{UserID: viewer.ID}, workspace.ID, registered.Environment.ID, session.ID, claimInput); !errors.Is(claimErr, auth.ErrForbidden) {
 				t.Fatalf("viewer action claim error=%v, want forbidden", claimErr)

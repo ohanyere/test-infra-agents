@@ -166,6 +166,23 @@ func validateActionClaimClock(in SubmitActionClaimInput, now time.Time) error {
 	return nil
 }
 
+func validateActionClaimWindow(in SubmitActionClaimInput, baselineAt, finalAt *time.Time, now time.Time, observationWindowSeconds int) error {
+	if baselineAt == nil || in.StartedAt.Before(*baselineAt) {
+		return fmt.Errorf("%w: claimed action must fall within the observed session window", identity.ErrValidation)
+	}
+	upperBound := now
+	if finalAt != nil {
+		upperBound = *finalAt
+	}
+	if in.CompletedAt.After(upperBound) || in.StartedAt.After(upperBound) {
+		return fmt.Errorf("%w: claimed action must fall within the observed session window", identity.ErrValidation)
+	}
+	if observationWindowSeconds < 1 || in.CompletedAt.Sub(in.StartedAt) > time.Duration(observationWindowSeconds+300)*time.Second {
+		return fmt.Errorf("%w: claimed action duration exceeds the bounded session window", identity.ErrValidation)
+	}
+	return nil
+}
+
 func normalizeEnvironment(in CreateEnvironmentInput) (CreateEnvironmentInput, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	in.ClusterIdentifier = strings.TrimSpace(in.ClusterIdentifier)

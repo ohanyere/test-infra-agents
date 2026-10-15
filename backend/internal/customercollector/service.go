@@ -132,18 +132,8 @@ func (s *Service) SubmitActionClaim(ctx context.Context, p auth.Principal, works
 	if err = validateActionClaimClock(input, databaseNow.UTC()); err != nil {
 		return ActionClaim{}, err
 	}
-	if baselineAt == nil || input.StartedAt.Before(*baselineAt) {
-		return ActionClaim{}, validation("claimed action must fall within the observed session window")
-	}
-	upperBound := databaseNow
-	if finalAt != nil {
-		upperBound = *finalAt
-	}
-	if input.CompletedAt.After(upperBound) || input.StartedAt.After(upperBound) {
-		return ActionClaim{}, validation("claimed action must fall within the observed session window")
-	}
-	if observationWindow < 1 || input.CompletedAt.Sub(input.StartedAt) > time.Duration(observationWindow+300)*time.Second {
-		return ActionClaim{}, validation("claimed action duration exceeds the bounded session window")
+	if err = validateActionClaimWindow(input, baselineAt, finalAt, databaseNow.UTC(), observationWindow); err != nil {
+		return ActionClaim{}, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO customer_agent_action_claims(contract_version,workspace_id,environment_id,session_id,run_id,agent_version_id,claim_id,idempotency_key,action_type,resource_kind,resource_namespace,resource_name,resource_uid,claimed_started_at,claimed_completed_at,claimed_outcome,external_trace_reference,submitted_at,submitter_user_id,trust_classification)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NULLIF($17,''),$18,$19,$20)`, derived.ContractVersion, derived.WorkspaceID, derived.EnvironmentID, derived.SessionID, derived.RunID, derived.AgentVersionID, derived.ClaimID, derived.IdempotencyKey, derived.ActionType, derived.Resource.Kind, derived.Resource.Namespace, derived.Resource.Name, derived.Resource.UID, derived.StartedAt, derived.CompletedAt, derived.Outcome, derived.ExternalTrace, derived.SubmittedAt, derived.SubmitterUserID, derived.Trust)

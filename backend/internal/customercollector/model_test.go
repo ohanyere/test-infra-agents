@@ -169,3 +169,45 @@ func TestActionClaimValidationRejectsMalformedAndUnboundedClaims(t *testing.T) {
 		t.Fatal("future claim accepted")
 	}
 }
+
+func TestActionClaimWindowBoundariesAndUTCNormalization(t *testing.T) {
+	baseline := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	final := baseline.Add(10 * time.Second)
+	input := SubmitActionClaimInput{StartedAt: baseline, CompletedAt: final}
+	if err := validateActionClaimWindow(input, &baseline, &final, final.Add(time.Second), 15); err != nil {
+		t.Fatalf("inclusive baseline/final boundaries rejected: %v", err)
+	}
+	before := input
+	before.StartedAt = baseline.Add(-time.Microsecond)
+	if err := validateActionClaimWindow(before, &baseline, &final, final, 15); err == nil {
+		t.Fatal("action starting before the baseline was accepted")
+	}
+	after := input
+	after.CompletedAt = final.Add(time.Microsecond)
+	if err := validateActionClaimWindow(after, &baseline, &final, final.Add(time.Minute), 15); err == nil {
+		t.Fatal("action completing after the final observation was accepted")
+	}
+	if err := validateActionClaimWindow(input, nil, &final, final, 15); err == nil {
+		t.Fatal("claim without an observed baseline was accepted")
+	}
+
+	zone := time.FixedZone("customer-agent", -7*60*60)
+	local := SubmitActionClaimInput{
+		ContractVersion: ActionClaimContractVersion,
+		AgentVersionID:  "11111111-1111-4111-8111-111111111111",
+		ClaimID:         "22222222-2222-4222-8222-222222222222",
+		IdempotencyKey:  "33333333-3333-4333-8333-333333333333",
+		ActionType:      "set_workload_image",
+		Resource:        ClaimedResource{Kind: "Deployment", Namespace: "checkout", Name: "api", UID: "e47ac8b1-5509-4e5c-a321-9dd3bc8ef012"},
+		Outcome:         "executed",
+	}
+	local.StartedAt = baseline.In(zone)
+	local.CompletedAt = final.In(zone)
+	normalized, err := validateActionClaim(local)
+	if err != nil {
+		t.Fatalf("valid offset timestamps rejected: %v", err)
+	}
+	if normalized.StartedAt.Location() != time.UTC || normalized.CompletedAt.Location() != time.UTC || !normalized.StartedAt.Equal(baseline) || !normalized.CompletedAt.Equal(final) {
+		t.Fatalf("timestamps were not normalized without changing instants: start=%s complete=%s", normalized.StartedAt, normalized.CompletedAt)
+	}
+}
