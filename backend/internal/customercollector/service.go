@@ -50,6 +50,159 @@ type IngestResult struct {
 	VerificationStatus string    `json:"verification_status,omitempty"`
 }
 
+func (s *Service) SubmitActionClaim(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string, input SubmitActionClaimInput) (ActionClaim, error) {
+	if identity.ValidateUUID(workspaceID) != nil || identity.ValidateUUID(environmentID) != nil || identity.ValidateUUID(sessionID) != nil {
+		return ActionClaim{}, validation("workspace, environment, and session identifiers must be UUIDs")
+	}
+	role, err := s.role(ctx, p, workspaceID)
+	if err != nil {
+		return ActionClaim{}, err
+	}
+	if role == "viewer" {
+		return ActionClaim{}, auth.ErrForbidden
+	}
+	input, err = validateActionClaim(input)
+	if err != nil {
+		return ActionClaim{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return ActionClaim{}, err
+	}
+	defer tx.Rollback(ctx)
+	var derived ActionClaim
+	var sessionStatus string
+	var observationWindow int
+	var baselineAt, finalAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT s.workspace_id,s.environment_id,s.id,s.run_id,r.agent_version_id,s.status,s.observation_window_seconds,
+		(SELECT captured_at FROM customer_observation_batches WHERE session_id=s.id AND sequence=1 AND phase='baseline'),
+		(SELECT captured_at FROM customer_observation_batches WHERE session_id=s.id AND phase='final')
+		FROM customer_observation_sessions s
+		JOIN customer_kubernetes_environments e ON e.id=s.environment_id AND e.workspace_id=s.workspace_id
+		JOIN runs r ON r.id=s.run_id
+		JOIN evaluation_batches b ON b.id=r.batch_id AND b.workspace_id=s.workspace_id
+		JOIN agent_versions av ON av.id=r.agent_version_id
+		JOIN agents a ON a.id=av.agent_id AND a.owner_workspace_id=s.workspace_id
+		WHERE s.workspace_id=$1 AND e.id=$2 AND s.id=$3
+		FOR UPDATE OF s`, workspaceID, environmentID, sessionID).
+		Scan(&derived.WorkspaceID, &derived.EnvironmentID, &derived.SessionID, &derived.RunID, &derived.AgentVersionID, &sessionStatus, &observationWindow, &baselineAt, &finalAt)
+	if err != nil {
+		return ActionClaim{}, auth.ErrForbidden
+	}
+	if derived.AgentVersionID != input.AgentVersionID {
+		return ActionClaim{}, auth.ErrForbidden
+	}
+	derived.ContractVersion = input.ContractVersion
+	derived.ClaimID = input.ClaimID
+	derived.IdempotencyKey = input.IdempotencyKey
+	derived.ActionType = input.ActionType
+	derived.Resource = input.Resource
+	derived.StartedAt = input.StartedAt
+	derived.CompletedAt = input.CompletedAt
+	derived.Outcome = input.Outcome
+	derived.ExternalTrace = input.ExternalTrace
+	derived.SubmitterUserID = p.UserID
+	derived.Trust = ActionClaimTrust
+	var databaseNow time.Time
+	if err = tx.QueryRow(ctx, `SELECT now()`).Scan(&databaseNow); err != nil {
+		return ActionClaim{}, err
+	}
+	derived.SubmittedAt = databaseNow.UTC()
+
+	// Either identifier may be retried. Locking the session serializes claim
+	// insertion with other claims and the collector's final-session transition.
+	prior, priorErr := scanActionClaim(tx.QueryRow(ctx, `SELECT contract_version,workspace_id,environment_id,session_id,run_id,agent_version_id,claim_id,idempotency_key,action_type,resource_kind,resource_namespace,resource_name,resource_uid,claimed_started_at,claimed_completed_at,claimed_outcome,COALESCE(external_trace_reference,''),submitted_at,submitter_user_id,trust_classification
+		FROM customer_agent_action_claims WHERE session_id=$1 AND (claim_id=$2 OR idempotency_key=$3) FOR UPDATE`, sessionID, input.ClaimID, input.IdempotencyKey))
+	if priorErr == nil {
+		if !sameActionClaim(prior, derived) {
+			return ActionClaim{}, identity.ErrConflict
+		}
+		prior.Duplicate = true
+		if err = tx.Commit(ctx); err != nil {
+			return ActionClaim{}, err
+		}
+		return prior, nil
+	}
+	if !errors.Is(priorErr, pgx.ErrNoRows) {
+		return ActionClaim{}, priorErr
+	}
+	if sessionStatus != "active" && sessionStatus != "completed" {
+		return ActionClaim{}, identity.ErrConflict
+	}
+	if err = validateActionClaimClock(input, databaseNow.UTC()); err != nil {
+		return ActionClaim{}, err
+	}
+	if baselineAt == nil || input.StartedAt.Before(*baselineAt) {
+		return ActionClaim{}, validation("claimed action must fall within the observed session window")
+	}
+	upperBound := databaseNow
+	if finalAt != nil {
+		upperBound = *finalAt
+	}
+	if input.CompletedAt.After(upperBound) || input.StartedAt.After(upperBound) {
+		return ActionClaim{}, validation("claimed action must fall within the observed session window")
+	}
+	if observationWindow < 1 || input.CompletedAt.Sub(input.StartedAt) > time.Duration(observationWindow+300)*time.Second {
+		return ActionClaim{}, validation("claimed action duration exceeds the bounded session window")
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO customer_agent_action_claims(contract_version,workspace_id,environment_id,session_id,run_id,agent_version_id,claim_id,idempotency_key,action_type,resource_kind,resource_namespace,resource_name,resource_uid,claimed_started_at,claimed_completed_at,claimed_outcome,external_trace_reference,submitted_at,submitter_user_id,trust_classification)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NULLIF($17,''),$18,$19,$20)`, derived.ContractVersion, derived.WorkspaceID, derived.EnvironmentID, derived.SessionID, derived.RunID, derived.AgentVersionID, derived.ClaimID, derived.IdempotencyKey, derived.ActionType, derived.Resource.Kind, derived.Resource.Namespace, derived.Resource.Name, derived.Resource.UID, derived.StartedAt, derived.CompletedAt, derived.Outcome, derived.ExternalTrace, derived.SubmittedAt, derived.SubmitterUserID, derived.Trust)
+	if err != nil {
+		return ActionClaim{}, mapError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ActionClaim{}, err
+	}
+	return derived, nil
+}
+
+func (s *Service) ListActionClaims(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string) ([]ActionClaim, error) {
+	if _, err := s.role(ctx, p, workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT contract_version,workspace_id,environment_id,session_id,run_id,agent_version_id,claim_id,idempotency_key,action_type,resource_kind,resource_namespace,resource_name,resource_uid,claimed_started_at,claimed_completed_at,claimed_outcome,COALESCE(external_trace_reference,''),submitted_at,submitter_user_id,trust_classification
+		FROM customer_agent_action_claims WHERE workspace_id=$1 AND environment_id=$2 AND session_id=$3 ORDER BY submitted_at,id`, workspaceID, environmentID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	claims := make([]ActionClaim, 0)
+	for rows.Next() {
+		claim, scanErr := scanActionClaim(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		claims = append(claims, claim)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	// An empty result must not reveal whether the supplied session belongs to
+	// another workspace/environment.
+	if len(claims) == 0 {
+		var exists bool
+		if err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_observation_sessions WHERE workspace_id=$1 AND environment_id=$2 AND id=$3)`, workspaceID, environmentID, sessionID).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, auth.ErrForbidden
+		}
+	}
+	return claims, nil
+}
+
+type actionClaimScanner interface{ Scan(...any) error }
+
+func scanActionClaim(row actionClaimScanner) (ActionClaim, error) {
+	var claim ActionClaim
+	err := row.Scan(&claim.ContractVersion, &claim.WorkspaceID, &claim.EnvironmentID, &claim.SessionID, &claim.RunID, &claim.AgentVersionID, &claim.ClaimID, &claim.IdempotencyKey, &claim.ActionType, &claim.Resource.Kind, &claim.Resource.Namespace, &claim.Resource.Name, &claim.Resource.UID, &claim.StartedAt, &claim.CompletedAt, &claim.Outcome, &claim.ExternalTrace, &claim.SubmittedAt, &claim.SubmitterUserID, &claim.Trust)
+	return claim, err
+}
+
+func sameActionClaim(left, right ActionClaim) bool {
+	return left.ContractVersion == right.ContractVersion && left.WorkspaceID == right.WorkspaceID && left.EnvironmentID == right.EnvironmentID && left.SessionID == right.SessionID && left.RunID == right.RunID && left.AgentVersionID == right.AgentVersionID && left.ClaimID == right.ClaimID && left.IdempotencyKey == right.IdempotencyKey && left.ActionType == right.ActionType && left.Resource == right.Resource && left.StartedAt.Equal(right.StartedAt) && left.CompletedAt.Equal(right.CompletedAt) && left.Outcome == right.Outcome && left.ExternalTrace == right.ExternalTrace && left.SubmitterUserID == right.SubmitterUserID && left.Trust == right.Trust
+}
+
 func (s *Service) Register(ctx context.Context, p auth.Principal, workspaceID string, input CreateEnvironmentInput) (RegisteredEnvironment, error) {
 	if err := identity.ValidateUUID(workspaceID); err != nil {
 		return RegisteredEnvironment{}, validation("workspace_id must be a UUID")

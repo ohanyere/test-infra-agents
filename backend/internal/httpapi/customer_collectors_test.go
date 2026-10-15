@@ -14,7 +14,12 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-type collectorHandlerFake struct{ called bool }
+type collectorHandlerFake struct {
+	called      bool
+	claimCalled bool
+	claimInput  customercollector.SubmitActionClaimInput
+	claimActor  auth.Principal
+}
 
 func (f *collectorHandlerFake) Register(context.Context, auth.Principal, string, customercollector.CreateEnvironmentInput) (customercollector.RegisteredEnvironment, error) {
 	return customercollector.RegisteredEnvironment{}, nil
@@ -34,6 +39,54 @@ func (f *collectorHandlerFake) StartSession(context.Context, auth.Principal, str
 func (f *collectorHandlerFake) Ingest(_ context.Context, _ string, token string, _ customercollector.EvidenceBatch) (customercollector.IngestResult, error) {
 	f.called = token != ""
 	return customercollector.IngestResult{Accepted: true}, nil
+}
+func (f *collectorHandlerFake) SubmitActionClaim(_ context.Context, p auth.Principal, workspaceID, environmentID, sessionID string, in customercollector.SubmitActionClaimInput) (customercollector.ActionClaim, error) {
+	f.claimCalled = true
+	f.claimInput = in
+	f.claimActor = p
+	return customercollector.ActionClaim{WorkspaceID: workspaceID, EnvironmentID: environmentID, SessionID: sessionID, ClaimID: in.ClaimID, Trust: customercollector.ActionClaimTrust}, nil
+}
+
+func TestActionClaimEndpointDerivesTenantAndLabelsUnverified(t *testing.T) {
+	fake := &collectorHandlerFake{}
+	handler := customerCollectorHandlers{service: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	workspaceID := "11111111-1111-4111-8111-111111111111"
+	environmentID := "22222222-2222-4222-8222-222222222222"
+	sessionID := "33333333-3333-4333-8333-333333333333"
+	claimID := "44444444-4444-4444-8444-444444444444"
+	route := chi.NewRouteContext()
+	route = chi.NewRouteContext()
+	for key, value := range map[string]string{"workspaceID": workspaceID, "environmentID": environmentID, "sessionID": sessionID} {
+		route.URLParams.Add(key, value)
+	}
+	body := `{"contract_version":"customer-agent-action-claim:v1","agent_version_id":"55555555-5555-4555-8555-555555555555","claim_id":"` + claimID + `","idempotency_key":"66666666-6666-4666-8666-666666666666","action_type":"set_workload_image","resource":{"kind":"Deployment","namespace":"apps","name":"checkout","uid":"e47ac8b1-5509-4e5c-a321-9dd3bc8ef012"},"started_at":"2026-10-13T12:00:00Z","completed_at":"2026-10-13T12:00:01Z","outcome":"executed"}`
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(auth.ContextWithPrincipal(context.WithValue(request.Context(), chi.RouteCtxKey, route), auth.Principal{UserID: "77777777-7777-4777-8777-777777777777"}))
+	response := httptest.NewRecorder()
+	handler.submitActionClaim(response, request)
+	if response.Code != http.StatusCreated || !fake.claimCalled || fake.claimActor.UserID == "" || fake.claimInput.AgentVersionID == "" {
+		t.Fatalf("status=%d called=%t body=%s", response.Code, fake.claimCalled, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"trust_classification":"UNVERIFIED_AGENT_CLAIM"`) || !strings.Contains(response.Body.String(), `"workspace_id":"`+workspaceID+`"`) {
+		t.Fatalf("server-derived claim provenance missing: %s", response.Body.String())
+	}
+
+	for key, value := range map[string]string{"workspaceID": workspaceID, "environmentID": environmentID, "sessionID": sessionID} {
+		route.URLParams.Add(key, value)
+	}
+	spoofed := strings.TrimSuffix(body, "}") + `,"workspace_id":"88888888-8888-4888-8888-888888888888"}`
+	request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(spoofed))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(auth.ContextWithPrincipal(context.WithValue(request.Context(), chi.RouteCtxKey, route), auth.Principal{UserID: "77777777-7777-4777-8777-777777777777"}))
+	response = httptest.NewRecorder()
+	handler.submitActionClaim(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("caller-supplied workspace identity was not rejected: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+func (f *collectorHandlerFake) ListActionClaims(context.Context, auth.Principal, string, string, string) ([]customercollector.ActionClaim, error) {
+	return nil, nil
 }
 
 func TestCollectorIngestionRequiresBearerCredential(t *testing.T) {

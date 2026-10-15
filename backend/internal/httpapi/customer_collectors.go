@@ -20,6 +20,8 @@ type CustomerCollectorService interface {
 	Revoke(ctx context.Context, p auth.Principal, workspaceID, environmentID string) error
 	StartSession(ctx context.Context, p auth.Principal, workspaceID, environmentID string, input customercollector.CreateSessionInput) (customercollector.Session, error)
 	Ingest(ctx context.Context, sessionID, token string, input customercollector.EvidenceBatch) (customercollector.IngestResult, error)
+	SubmitActionClaim(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string, input customercollector.SubmitActionClaimInput) (customercollector.ActionClaim, error)
+	ListActionClaims(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string) ([]customercollector.ActionClaim, error)
 }
 
 type customerCollectorHandlers struct {
@@ -125,6 +127,54 @@ func (h customerCollectorHandlers) ingest(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusAccepted, out)
+}
+func (h customerCollectorHandlers) submitActionClaim(w http.ResponseWriter, r *http.Request) {
+	wid, ok := pathUUID(w, r, "workspaceID")
+	if !ok {
+		return
+	}
+	eid, ok := pathUUID(w, r, "environmentID")
+	if !ok {
+		return
+	}
+	sid, ok := pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	var in customercollector.SubmitActionClaimInput
+	if !decodeLimited(w, r, &in, 16<<10) {
+		return
+	}
+	p, _ := auth.PrincipalFromContext(r.Context())
+	claim, err := h.service.SubmitActionClaim(r.Context(), p, wid, eid, sid, in)
+	if h.handle(w, err) {
+		return
+	}
+	status := http.StatusCreated
+	if claim.Duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, claim)
+}
+func (h customerCollectorHandlers) listActionClaims(w http.ResponseWriter, r *http.Request) {
+	wid, ok := pathUUID(w, r, "workspaceID")
+	if !ok {
+		return
+	}
+	eid, ok := pathUUID(w, r, "environmentID")
+	if !ok {
+		return
+	}
+	sid, ok := pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	p, _ := auth.PrincipalFromContext(r.Context())
+	claims, err := h.service.ListActionClaims(r.Context(), p, wid, eid, sid)
+	if h.handle(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse[customercollector.ActionClaim]{Items: claims, Pagination: paginationResponse{Limit: len(claims)}})
 }
 func (h customerCollectorHandlers) handle(w http.ResponseWriter, err error) bool {
 	if err == nil {

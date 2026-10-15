@@ -119,3 +119,53 @@ func TestObservationWindowUsesServerReceiptTimes(t *testing.T) {
 		t.Fatalf("complete server-received observation duration rejected: %v", err)
 	}
 }
+
+func TestActionClaimValidationRejectsMalformedAndUnboundedClaims(t *testing.T) {
+	now := time.Now().UTC()
+	valid := SubmitActionClaimInput{
+		ContractVersion: ActionClaimContractVersion,
+		AgentVersionID:  "11111111-1111-4111-8111-111111111111",
+		ClaimID:         "22222222-2222-4222-8222-222222222222",
+		IdempotencyKey:  "33333333-3333-4333-8333-333333333333",
+		ActionType:      "set_workload_image",
+		Resource:        ClaimedResource{Kind: "Deployment", Namespace: "checkout", Name: "api.checkout", UID: "e47ac8b1-5509-4e5c-a321-9dd3bc8ef012"},
+		StartedAt:       now.Add(-time.Minute), CompletedAt: now.Add(-30 * time.Second),
+		Outcome: "executed", ExternalTrace: "abcdef0123456789",
+	}
+	if _, err := validateActionClaim(valid); err != nil {
+		t.Fatalf("valid claim rejected: %v", err)
+	}
+	tests := map[string]func(*SubmitActionClaimInput){
+		"bad schema":                      func(in *SubmitActionClaimInput) { in.ContractVersion = "future" },
+		"malformed resource name":         func(in *SubmitActionClaimInput) { in.Resource.Name = "../deployment" },
+		"malformed namespace":             func(in *SubmitActionClaimInput) { in.Resource.Namespace = "Checkout" },
+		"missing resource UID":            func(in *SubmitActionClaimInput) { in.Resource.UID = "" },
+		"action kind mismatch":            func(in *SubmitActionClaimInput) { in.ActionType = "restart_pod" },
+		"unsupported action":              func(in *SubmitActionClaimInput) { in.ActionType = "exec" },
+		"invalid outcome":                 func(in *SubmitActionClaimInput) { in.Outcome = "verified" },
+		"reversed timestamps":             func(in *SubmitActionClaimInput) { in.StartedAt, in.CompletedAt = in.CompletedAt, in.StartedAt },
+		"trace may not carry credentials": func(in *SubmitActionClaimInput) { in.ExternalTrace = "https://agent.example/run?token=secret" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			input := valid
+			mutate(&input)
+			if _, err := validateActionClaim(input); err == nil {
+				t.Fatal("invalid action claim accepted")
+			}
+		})
+	}
+	if err := validateActionClaimClock(valid, now); err != nil {
+		t.Fatalf("valid claim clock rejected: %v", err)
+	}
+	stale := valid
+	stale.StartedAt = now.Add(-25 * time.Hour)
+	if err := validateActionClaimClock(stale, now); err == nil {
+		t.Fatal("stale claim accepted")
+	}
+	future := valid
+	future.CompletedAt = now.Add(time.Minute)
+	if err := validateActionClaimClock(future, now); err == nil {
+		t.Fatal("future claim accepted")
+	}
+}

@@ -90,7 +90,7 @@ jobs:
             echo "Unexpected migration state: expected '$expected_version false', got '$migration_state'" >&2
             exit 1
           fi
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT to_regclass('public.customer_kubernetes_environments'), to_regclass('public.customer_kubernetes_collectors'), to_regclass('public.customer_observation_sessions'), to_regclass('public.customer_observation_batches')" | grep -F 'customer_kubernetes_environments|customer_kubernetes_collectors|customer_observation_sessions|customer_observation_batches'
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT to_regclass('public.customer_kubernetes_environments'), to_regclass('public.customer_kubernetes_collectors'), to_regclass('public.customer_observation_sessions'), to_regclass('public.customer_observation_batches'), to_regclass('public.customer_agent_action_claims')" | grep -F 'customer_kubernetes_environments|customer_kubernetes_collectors|customer_observation_sessions|customer_observation_batches|customer_agent_action_claims'
           echo "Applied migration version $migration_state"
 
       - name: Run customer collector canonical ingestion integration test

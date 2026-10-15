@@ -85,3 +85,29 @@ agent action evidence or telemetry, so the canonical result is expected to be
 INCONCLUSIVE rather than VERIFIED. This is not hosted or customer production
 validation. The manifest uses a placeholder image until a release image is
 built and published.
+
+## External-agent action claims (supporting evidence only)
+
+An authenticated workspace member may submit a `customer-agent-action-claim:v1`
+to an active observation session using:
+
+```text
+POST /v1/workspaces/{workspace_id}/customer-kubernetes-environments/{environment_id}/observation-sessions/{session_id}/action-claims
+GET  /v1/workspaces/{workspace_id}/customer-kubernetes-environments/{environment_id}/observation-sessions/{session_id}/action-claims
+```
+
+The JSON request contains `contract_version`, `agent_version_id`, UUID
+`claim_id`, UUID `idempotency_key`, `action_type`, `resource` (`kind`,
+`namespace`, `name`, `uid`), `started_at`, `completed_at`, `outcome`, and an
+optional hexadecimal trace identifier (16–64 hex characters). Workspace, environment, session,
+run, submitter, and submission time are bound or assigned by the authenticated
+server path. The API limits the request body to 16 KiB. Repeating the same key
+and identical content returns the original claim; reusing either identifier
+with changed content conflicts.
+
+Claims are persisted separately from canonical `agent_actions` and run events,
+with trust classification `UNVERIFIED_AGENT_CLAIM`. They are customer-submitted
+assertions, not authenticated executor results, Kubernetes attestation, or proof
+of causation. Matching a claim to an observed state change cannot establish
+ATTRIBUTED or VERIFIED. Canonical observation-only verdicts and attribution
+requirements are unchanged.

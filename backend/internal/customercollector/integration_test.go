@@ -64,6 +64,13 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	principal := auth.Principal{UserID: user.ID}
+	viewer, err := ids.CreateUser(ctx, pool, identity.UserInput{Email: "collector-viewer-" + suffix + "@example.test", FullName: "Collector Viewer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ids.CreateMembership(ctx, pool, workspace.ID, viewer.ID, "viewer"); err != nil {
+		t.Fatal(err)
+	}
 	var scenarioID, scenarioVersionID, agentID, agentVersionID string
 	err = pool.QueryRow(ctx, `INSERT INTO scenarios(owner_workspace_id,slug,name,kind,visibility,status) VALUES($1,$2,'Observed','custom','workspace','active') RETURNING id`, workspace.ID, "observed-"+suffix).Scan(&scenarioID)
 	if err != nil {
@@ -144,6 +151,51 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 		if index < 3 && !result.Accepted {
 			t.Fatalf("phase %s not accepted", phase)
 		}
+		if index == 0 {
+			claimInput := SubmitActionClaimInput{
+				ContractVersion: ActionClaimContractVersion,
+				AgentVersionID:  agentVersionID,
+				ClaimID:         uuid.NewString(), IdempotencyKey: uuid.NewString(),
+				ActionType: "set_workload_image",
+				Resource:   ClaimedResource{Kind: "Deployment", Namespace: "checkout", Name: "checkout", UID: "uid-checkout"},
+				StartedAt:  captured, CompletedAt: captured.Add(100 * time.Millisecond),
+				Outcome: "executed", ExternalTrace: "abcdef0123456789",
+			}
+			if _, claimErr := service.SubmitActionClaim(ctx, auth.Principal{UserID: viewer.ID}, workspace.ID, registered.Environment.ID, session.ID, claimInput); !errors.Is(claimErr, auth.ErrForbidden) {
+				t.Fatalf("viewer action claim error=%v, want forbidden", claimErr)
+			}
+			if _, claimErr := service.SubmitActionClaim(ctx, principal, otherWorkspace.ID, registered.Environment.ID, session.ID, claimInput); !errors.Is(claimErr, auth.ErrForbidden) {
+				t.Fatalf("cross-workspace action claim error=%v, want forbidden", claimErr)
+			}
+			wrongAgent := claimInput
+			wrongAgent.AgentVersionID = uuid.NewString()
+			if _, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, registered.Environment.ID, session.ID, wrongAgent); !errors.Is(claimErr, auth.ErrForbidden) {
+				t.Fatalf("wrong agent version error=%v, want forbidden", claimErr)
+			}
+			if _, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, secondEnvironment.Environment.ID, session.ID, claimInput); !errors.Is(claimErr, auth.ErrForbidden) {
+				t.Fatalf("wrong environment error=%v, want forbidden", claimErr)
+			}
+			if _, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, registered.Environment.ID, uuid.NewString(), claimInput); !errors.Is(claimErr, auth.ErrForbidden) {
+				t.Fatalf("wrong session error=%v, want forbidden", claimErr)
+			}
+			claim, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, registered.Environment.ID, session.ID, claimInput)
+			if claimErr != nil || claim.Trust != ActionClaimTrust || claim.WorkspaceID != workspace.ID || claim.RunID != session.RunID || claim.SubmitterUserID != user.ID {
+				t.Fatalf("action claim was not persisted with server-derived provenance: claim=%+v error=%v", claim, claimErr)
+			}
+			retry, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, registered.Environment.ID, session.ID, claimInput)
+			if claimErr != nil || !retry.Duplicate || retry.ClaimID != claim.ClaimID {
+				t.Fatalf("identical action claim retry was not idempotent: claim=%+v error=%v", retry, claimErr)
+			}
+			conflict := claimInput
+			conflict.Outcome = "failed"
+			if _, claimErr := service.SubmitActionClaim(ctx, principal, workspace.ID, registered.Environment.ID, session.ID, conflict); !errors.Is(claimErr, identity.ErrConflict) {
+				t.Fatalf("conflicting duplicate action claim error=%v, want conflict", claimErr)
+			}
+			claims, claimErr := service.ListActionClaims(ctx, principal, workspace.ID, registered.Environment.ID, session.ID)
+			if claimErr != nil || len(claims) != 1 || claims[0].Trust != ActionClaimTrust {
+				t.Fatalf("persisted action claims=%+v error=%v", claims, claimErr)
+			}
+		}
 		if index == 3 && (result.VerificationStatus != verification.StatusInconclusive) {
 			t.Fatalf("observation-only result=%s, want INCONCLUSIVE", result.VerificationStatus)
 		}
@@ -160,7 +212,7 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.OverallStatus != verification.StatusInconclusive || !result.ActionInspection.Attribution.Required || result.ActionInspection.Attribution.Status != verification.AttributionInconclusive {
+	if result.OverallStatus != verification.StatusInconclusive || !result.ActionInspection.Attribution.Required || result.ActionInspection.Attribution.Status != verification.AttributionInconclusive || len(result.ActionInspection.Actions) != 0 {
 		t.Fatalf("unjustified status/attribution: %s %+v", result.OverallStatus, result.ActionInspection.Attribution)
 	}
 	if result.Baseline.SourceProvider != ProviderID || result.Final.SourceProvider != ProviderID {

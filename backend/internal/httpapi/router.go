@@ -353,6 +353,8 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/rotate", collectorAPI.rotate)
 					protected.Delete("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}", collectorAPI.revoke)
 					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions", collectorAPI.startSession)
+					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/action-claims", collectorAPI.submitActionClaim)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/action-claims", collectorAPI.listActionClaims)
 				}
 			})
 		})

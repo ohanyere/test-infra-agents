@@ -19,11 +19,16 @@ import (
 )
 
 const (
-	ContractVersion = "customer-kubernetes-observation:v1"
-	ProviderID      = "customer-kubernetes-collector:v1"
+	ContractVersion            = "customer-kubernetes-observation:v1"
+	ProviderID                 = "customer-kubernetes-collector:v1"
+	ActionClaimContractVersion = "customer-agent-action-claim:v1"
+	ActionClaimTrust           = "UNVERIFIED_AGENT_CLAIM"
 )
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
+var resourceName = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$`)
+var resourceUID = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
+var traceReference = regexp.MustCompile(`^[A-Fa-f0-9]{16,64}$`)
 
 type Environment struct {
 	ID                string     `json:"id"`
@@ -68,6 +73,97 @@ type EvidenceBatch struct {
 	Phase         string                   `json:"phase"`
 	CapturedAt    time.Time                `json:"captured_at"`
 	Observation   agentgateway.Observation `json:"observation"`
+}
+
+// ActionClaim is an authenticated customer's report of an external agent action.
+// It is deliberately separate from evidence.AgentAction and never establishes
+// executor success or causal attribution by itself.
+type ActionClaim struct {
+	ContractVersion string          `json:"contract_version"`
+	WorkspaceID     string          `json:"workspace_id"`
+	EnvironmentID   string          `json:"environment_id"`
+	SessionID       string          `json:"session_id"`
+	RunID           string          `json:"run_id"`
+	AgentVersionID  string          `json:"agent_version_id"`
+	ClaimID         string          `json:"claim_id"`
+	IdempotencyKey  string          `json:"idempotency_key"`
+	ActionType      string          `json:"action_type"`
+	Resource        ClaimedResource `json:"resource"`
+	StartedAt       time.Time       `json:"started_at"`
+	CompletedAt     time.Time       `json:"completed_at"`
+	Outcome         string          `json:"outcome"`
+	ExternalTrace   string          `json:"external_trace_reference,omitempty"`
+	SubmittedAt     time.Time       `json:"submitted_at"`
+	SubmitterUserID string          `json:"submitter_user_id"`
+	Trust           string          `json:"trust_classification"`
+	Duplicate       bool            `json:"duplicate,omitempty"`
+}
+
+type ClaimedResource struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+}
+
+// SubmitActionClaimInput contains only caller assertions. Workspace,
+// environment, session, run, submitter and trust are derived by the service.
+type SubmitActionClaimInput struct {
+	ContractVersion string          `json:"contract_version"`
+	AgentVersionID  string          `json:"agent_version_id"`
+	ClaimID         string          `json:"claim_id"`
+	IdempotencyKey  string          `json:"idempotency_key"`
+	ActionType      string          `json:"action_type"`
+	Resource        ClaimedResource `json:"resource"`
+	StartedAt       time.Time       `json:"started_at"`
+	CompletedAt     time.Time       `json:"completed_at"`
+	Outcome         string          `json:"outcome"`
+	ExternalTrace   string          `json:"external_trace_reference,omitempty"`
+}
+
+func validateActionClaim(in SubmitActionClaimInput) (SubmitActionClaimInput, error) {
+	invalid := func(message string) (SubmitActionClaimInput, error) {
+		return in, fmt.Errorf("%w: %s", identity.ErrValidation, message)
+	}
+	if in.ContractVersion != ActionClaimContractVersion {
+		return invalid("unsupported action claim contract version")
+	}
+	if identity.ValidateUUID(in.AgentVersionID) != nil || identity.ValidateUUID(in.ClaimID) != nil || identity.ValidateUUID(in.IdempotencyKey) != nil {
+		return invalid("agent_version_id, claim_id, and idempotency_key must be UUIDs")
+	}
+	switch in.ActionType {
+	case "set_workload_image", "set_live_workload_image", "set_desired_workload_image", "scale_workload", "restart_pod":
+	default:
+		return invalid("action_type is unsupported")
+	}
+	if (in.ActionType == "restart_pod" && in.Resource.Kind != "Pod") || (in.ActionType != "restart_pod" && in.Resource.Kind != "Deployment") {
+		return invalid("resource kind does not match action_type")
+	}
+	if !dnsLabel.MatchString(in.Resource.Namespace) || len(in.Resource.Name) > 253 || !resourceName.MatchString(in.Resource.Name) || !resourceUID.MatchString(in.Resource.UID) {
+		return invalid("resource must contain a valid Kubernetes kind, namespace, name, and UID")
+	}
+	if in.StartedAt.IsZero() || in.CompletedAt.IsZero() || in.CompletedAt.Before(in.StartedAt) || in.CompletedAt.Sub(in.StartedAt) > 24*time.Hour {
+		return invalid("claimed action timestamps are invalid")
+	}
+	switch in.Outcome {
+	case "proposed", "authorized", "denied", "executed", "failed":
+	default:
+		return invalid("outcome must be proposed, authorized, denied, executed, or failed")
+	}
+	in.ExternalTrace = strings.TrimSpace(in.ExternalTrace)
+	if in.ExternalTrace != "" && !traceReference.MatchString(in.ExternalTrace) {
+		return invalid("external_trace_reference must be a bounded opaque reference")
+	}
+	in.StartedAt = in.StartedAt.UTC()
+	in.CompletedAt = in.CompletedAt.UTC()
+	return in, nil
+}
+
+func validateActionClaimClock(in SubmitActionClaimInput, now time.Time) error {
+	if in.StartedAt.Before(now.Add(-24*time.Hour)) || in.CompletedAt.After(now.Add(30*time.Second)) {
+		return fmt.Errorf("%w: claimed action timestamps are outside the accepted clock-skew window", identity.ErrValidation)
+	}
+	return nil
 }
 
 func normalizeEnvironment(in CreateEnvironmentInput) (CreateEnvironmentInput, error) {
