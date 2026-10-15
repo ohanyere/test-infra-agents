@@ -63,6 +63,9 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	if _, err = ids.CreateMembership(ctx, pool, workspace.ID, user.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = ids.CreateMembership(ctx, pool, otherWorkspace.ID, user.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
 	principal := auth.Principal{UserID: user.ID}
 	viewer, err := ids.CreateUser(ctx, pool, identity.UserInput{Email: "collector-viewer-" + suffix + "@example.test", FullName: "Collector Viewer"})
 	if err != nil {
@@ -108,6 +111,10 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	otherWorkspaceEnvironment, err := service.Register(ctx, principal, otherWorkspace.ID, CreateEnvironmentInput{Name: "Other workspace", ClusterIdentifier: "other-customer-cluster", Namespaces: []string{"checkout"}, Tier: "staging"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	session, err := service.StartSession(ctx, principal, workspace.ID, registered.Environment.ID, CreateSessionInput{AgentVersionID: agentVersionID, ScenarioVersionID: scenarioVersionID})
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +142,9 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 			}
 			if _, ingestErr := service.Ingest(ctx, session.ID, secondEnvironment.CollectorCredential, batch); !errors.Is(ingestErr, auth.ErrForbidden) {
 				t.Fatalf("wrong-environment credential accepted: %v", ingestErr)
+			}
+			if _, ingestErr := service.Ingest(ctx, session.ID, otherWorkspaceEnvironment.CollectorCredential, batch); !errors.Is(ingestErr, auth.ErrForbidden) {
+				t.Fatalf("cross-workspace credential accepted: %v", ingestErr)
 			}
 			wrongScope := batch
 			wrongScope.Observation.Workloads = []agentgateway.WorkloadObservation{{Kind: "Deployment", Name: "checkout", Namespace: "default", DesiredReplicas: 1}}
@@ -243,13 +253,24 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM customer_observation_batches WHERE session_id=$1`, session.ID).Scan(&persisted); err != nil || persisted != 4 {
 		t.Fatalf("persisted collector evidence=%d error=%v", persisted, err)
 	}
-	last := EvidenceBatch{BatchID: uuid.NewString(), Sequence: 5, SchemaVersion: ContractVersion, Phase: "stability", CapturedAt: base.Add(6 * time.Second), Observation: agentgateway.Observation{Timestamp: base.Add(6 * time.Second)}}
-	if _, err = service.Ingest(ctx, session.ID, registered.CollectorCredential, last); !errors.Is(err, identity.ErrConflict) {
-		t.Fatalf("post-final evidence error=%v", err)
-	}
-	var serialized json.RawMessage
-	if err = pool.QueryRow(ctx, `SELECT source_metadata FROM verification_results WHERE run_id=$1`, session.RunID).Scan(&serialized); err != nil {
+	var reportBefore json.RawMessage
+	if err = pool.QueryRow(ctx, `SELECT to_jsonb(v) FROM verification_results v WHERE run_id=$1`, session.RunID).Scan(&reportBefore); err != nil {
 		t.Fatal(err)
+	}
+	last := EvidenceBatch{BatchID: uuid.NewString(), Sequence: 5, SchemaVersion: ContractVersion, Phase: "stability", CapturedAt: base.Add(6 * time.Second), Observation: agentgateway.Observation{Timestamp: base.Add(6 * time.Second)}}
+	if _, err = service.Ingest(ctx, session.ID, rotated.CollectorCredential, last); !errors.Is(err, identity.ErrConflict) {
+		t.Fatalf("post-final evidence with active credential error=%v, want conflict", err)
+	}
+	var persistedAfter int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM customer_observation_batches WHERE session_id=$1`, session.ID).Scan(&persistedAfter); err != nil || persistedAfter != persisted {
+		t.Fatalf("rejected post-final evidence changed persisted batches: before=%d after=%d error=%v", persisted, persistedAfter, err)
+	}
+	var reportAfter json.RawMessage
+	if err = pool.QueryRow(ctx, `SELECT to_jsonb(v) FROM verification_results v WHERE run_id=$1`, session.RunID).Scan(&reportAfter); err != nil {
+		t.Fatal(err)
+	}
+	if string(reportBefore) != string(reportAfter) {
+		t.Fatal("rejected post-final evidence changed the canonical report")
 	}
 	duplicate, err := service.Ingest(ctx, session.ID, rotated.CollectorCredential, finalBatch)
 	if err != nil || !duplicate.Duplicate || duplicate.VerificationStatus != verification.StatusInconclusive {
