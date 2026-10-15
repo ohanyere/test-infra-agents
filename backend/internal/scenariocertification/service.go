@@ -630,9 +630,12 @@ func buildCounterfactual(version scenario.Version, runID string, forcePass bool)
 			}
 		}
 	}
+	ensureFixtureTraffic(values)
 	base := BuildEvaluationInput(version, runID, true, nil)
 	if len(base.Events) > 0 {
-		base.Events[0].Payload = observationPayload(values)
+		// The terminal state must be mutated; changing only the baseline leaves
+		// the post-action recovery evidence healthy and the counterfactual passes.
+		base.Events[len(base.Events)-1].Payload = observationPayload(values)
 		// Re-pad actions for the mutated state.
 		base.Actions = BuildEvaluationInput(version, runID, false, nil).Actions
 		if len(version.Criteria) > 0 && canonicalMetric(version.Criteria[0].MetricKey) == "agent_action_count" {
