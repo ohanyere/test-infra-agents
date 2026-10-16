@@ -63,10 +63,15 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	if _, err = ids.CreateMembership(ctx, pool, workspace.ID, user.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = ids.CreateMembership(ctx, pool, otherWorkspace.ID, user.ID, "owner"); err != nil {
+	otherWorkspaceUser, err := ids.CreateUser(ctx, pool, identity.UserInput{Email: "other-collector-" + suffix + "@example.test", FullName: "Other Workspace Collector"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ids.CreateMembership(ctx, pool, otherWorkspace.ID, otherWorkspaceUser.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
 	principal := auth.Principal{UserID: user.ID}
+	otherWorkspacePrincipal := auth.Principal{UserID: otherWorkspaceUser.ID}
 	viewer, err := ids.CreateUser(ctx, pool, identity.UserInput{Email: "collector-viewer-" + suffix + "@example.test", FullName: "Collector Viewer"})
 	if err != nil {
 		t.Fatal(err)
@@ -104,14 +109,23 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	if registered.CollectorCredential == "" {
 		t.Fatal("one-time collector credential missing")
 	}
-	if _, err = service.List(ctx, principal, otherWorkspace.ID); !errors.Is(err, auth.ErrForbidden) {
-		t.Fatalf("cross-workspace environment list error=%v", err)
+	otherEnvironments, err := service.List(ctx, principal, otherWorkspace.ID)
+	if !errors.Is(err, auth.ErrForbidden) || len(otherEnvironments) != 0 {
+		t.Fatalf("cross-workspace environment list returned %d environments, error=%v; want no data and forbidden", len(otherEnvironments), err)
+	}
+	workspaceEnvironments, err := service.List(ctx, principal, workspace.ID)
+	if err != nil || len(workspaceEnvironments) != 1 || workspaceEnvironments[0].ID != registered.Environment.ID {
+		t.Fatalf("authorized environment list=%+v error=%v", workspaceEnvironments, err)
+	}
+	viewerEnvironments, err := service.List(ctx, auth.Principal{UserID: viewer.ID}, workspace.ID)
+	if err != nil || len(viewerEnvironments) != 1 || viewerEnvironments[0].ID != registered.Environment.ID {
+		t.Fatalf("authorized viewer environment list=%+v error=%v", viewerEnvironments, err)
 	}
 	secondEnvironment, err := service.Register(ctx, principal, workspace.ID, CreateEnvironmentInput{Name: "Staging checkout", ClusterIdentifier: "customer-cluster-2", Namespaces: []string{"checkout"}, Tier: "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherWorkspaceEnvironment, err := service.Register(ctx, principal, otherWorkspace.ID, CreateEnvironmentInput{Name: "Other workspace", ClusterIdentifier: "other-customer-cluster", Namespaces: []string{"checkout"}, Tier: "staging"})
+	otherWorkspaceEnvironment, err := service.Register(ctx, otherWorkspacePrincipal, otherWorkspace.ID, CreateEnvironmentInput{Name: "Other workspace", ClusterIdentifier: "other-customer-cluster", Namespaces: []string{"checkout"}, Tier: "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +151,12 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 			finalBatch = batch
 		}
 		if index == 0 {
+			if _, sessionErr := service.StartSession(ctx, principal, otherWorkspace.ID, otherWorkspaceEnvironment.Environment.ID, CreateSessionInput{AgentVersionID: agentVersionID, ScenarioVersionID: scenarioVersionID}); !errors.Is(sessionErr, auth.ErrForbidden) {
+				t.Fatalf("cross-workspace session creation error=%v, want forbidden", sessionErr)
+			}
+			if _, sessionErr := service.StartSession(ctx, auth.Principal{UserID: viewer.ID}, workspace.ID, registered.Environment.ID, CreateSessionInput{AgentVersionID: agentVersionID, ScenarioVersionID: scenarioVersionID}); !errors.Is(sessionErr, auth.ErrForbidden) {
+				t.Fatalf("viewer session creation error=%v, want forbidden", sessionErr)
+			}
 			if _, ingestErr := service.Ingest(ctx, session.ID, registered.CollectorCredential, batch); !errors.Is(ingestErr, auth.ErrForbidden) {
 				t.Fatalf("rotated credential remained valid: %v", ingestErr)
 			}
@@ -226,6 +246,18 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 			if claimErr != nil || len(claims) != 1 || claims[0].Trust != ActionClaimTrust {
 				t.Fatalf("persisted action claims=%+v error=%v", claims, claimErr)
 			}
+			foreignClaims, claimErr := service.ListActionClaims(ctx, principal, otherWorkspace.ID, otherWorkspaceEnvironment.Environment.ID, session.ID)
+			if !errors.Is(claimErr, auth.ErrForbidden) || len(foreignClaims) != 0 {
+				t.Fatalf("cross-workspace action-claim list returned %d claims, error=%v; want no data and forbidden", len(foreignClaims), claimErr)
+			}
+			foreignClaims, claimErr = service.ListActionClaims(ctx, otherWorkspacePrincipal, workspace.ID, registered.Environment.ID, session.ID)
+			if !errors.Is(claimErr, auth.ErrForbidden) || len(foreignClaims) != 0 {
+				t.Fatalf("other-workspace member accessed session claims: returned %d claims, error=%v", len(foreignClaims), claimErr)
+			}
+			viewerClaims, claimErr := service.ListActionClaims(ctx, auth.Principal{UserID: viewer.ID}, workspace.ID, registered.Environment.ID, session.ID)
+			if claimErr != nil || len(viewerClaims) != 1 || viewerClaims[0].ClaimID != claim.ClaimID {
+				t.Fatalf("authorized viewer action-claim list=%+v error=%v", viewerClaims, claimErr)
+			}
 		}
 		if index == 3 && (result.VerificationStatus != verification.StatusInconclusive) {
 			t.Fatalf("observation-only result=%s, want INCONCLUSIVE", result.VerificationStatus)
@@ -242,6 +274,9 @@ func TestCustomerCollectorCanonicalIngestionIntegration(t *testing.T) {
 	result, err := verify.Get(ctx, principal, workspace.ID, session.RunID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err = verify.Get(ctx, principal, otherWorkspace.ID, session.RunID); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("cross-workspace verification report access error=%v, want forbidden", err)
 	}
 	if result.OverallStatus != verification.StatusInconclusive || !result.ActionInspection.Attribution.Required || result.ActionInspection.Attribution.Status != verification.AttributionInconclusive || len(result.ActionInspection.Actions) != 0 {
 		t.Fatalf("unjustified status/attribution: %s %+v", result.OverallStatus, result.ActionInspection.Attribution)
