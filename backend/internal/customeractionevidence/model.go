@@ -120,6 +120,7 @@ type Evidence struct {
 	Uncertainty         []string            `json:"uncertainty"`
 	MissingFields       []string            `json:"missing_fields"`
 	providerVerified    bool
+	providerSeal        [32]byte
 }
 
 type PersistResult struct {

@@ -13,9 +13,7 @@ func TestCallerSuppliedAuditJSONCannotCreateRunnerBoundSource(t *testing.T) {
 	if err != nil || len(events) != 1 {
 		t.Fatalf("parse events=%+v err=%v", events, err)
 	}
-	fabricated := kubeaudit.AcquiredEvent{Event: events[0], Source: kubeaudit.SourceIdentity{
-		ClusterIdentity: "kind:evalplane-e2e", ConfigurationIdentity: "caller-config", VerificationState: "runner_bound_test_source",
-	}}
+	fabricated := kubeaudit.AcquiredEvent{}
 	if fabricated.RunnerBound() {
 		t.Fatal("parsed caller-supplied audit JSON acquired a source seal")
 	}

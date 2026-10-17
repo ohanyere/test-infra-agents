@@ -55,7 +55,7 @@ func TestSelectMutationRequiresSourceBindingAndExactEventIdentity(t *testing.T) 
 		t.Fatal(err)
 	}
 	identity := SourceIdentity{ClusterIdentity: "kind:evalplane-e2e", ConfigurationIdentity: configurationIdentity(), VerificationState: "runner_bound_test_source"}
-	acquired := []AcquiredEvent{{Event: events[0], Source: identity, sealed: true}}
+	acquired := []AcquiredEvent{newAcquiredEvent(events[0], identity)}
 	if _, err = SelectMutation(acquired, "proof", "web", "patch", "kubernetes-admin"); err != nil {
 		t.Fatalf("valid acquired event rejected: %v", err)
 	}
@@ -64,19 +64,56 @@ func TestSelectMutationRequiresSourceBindingAndExactEventIdentity(t *testing.T) 
 			t.Fatalf("mismatched event accepted: %+v", test)
 		}
 	}
-	acquired[0].Source.ClusterIdentity = "kind:another-cluster"
+	acquired[0].source.ClusterIdentity = "kind:another-cluster"
 	if _, err = SelectMutation(acquired, "proof", "web", "patch", "kubernetes-admin"); err == nil {
 		t.Fatal("wrong cluster binding accepted")
 	}
-	acquired[0].Source.ClusterIdentity = "kind:evalplane-e2e"
-	acquired[0].Source.ConfigurationIdentity = "caller-config"
+	acquired[0].source.ClusterIdentity = "kind:evalplane-e2e"
+	acquired[0].source.ConfigurationIdentity = "caller-config"
 	if _, err = SelectMutation(acquired, "proof", "web", "patch", "kubernetes-admin"); err == nil {
 		t.Fatal("wrong source configuration accepted")
 	}
-	acquired[0].Source.ConfigurationIdentity = configurationIdentity()
-	acquired[0].Event.Response.Code = 403
+	acquired[0] = newAcquiredEvent(events[0], identity)
+	acquired[0].event.Response.Code = 403
 	if _, err = SelectMutation(acquired, "proof", "web", "patch", "kubernetes-admin"); err == nil {
 		t.Fatal("failed API operation accepted as successful mutation")
+	}
+}
+
+func TestAcquiredEventSealBindsEventAndSourceAndSnapshotsAreDefensive(t *testing.T) {
+	events, err := Parse(strings.NewReader(strings.Replace(validEvent, `"username":"kubernetes-admin"`, `"username":"kubernetes-admin","groups":["system:authenticated"]`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := SourceIdentity{ClusterIdentity: "kind:evalplane-e2e", ConfigurationIdentity: configurationIdentity(), VerificationState: "runner_bound_test_source", ProvenanceLimitations: []string{"runner controlled"}}
+	acquired := newAcquiredEvent(events[0], source)
+	if !acquired.RunnerBound() {
+		t.Fatal("genuine sealed event rejected")
+	}
+	eventCopy, sourceCopy, ok := acquired.Snapshot()
+	if !ok {
+		t.Fatal("valid event snapshot rejected")
+	}
+	eventCopy.User.Groups[0] = "forged"
+	sourceCopy.ProvenanceLimitations[0] = "forged"
+	eventCopy.Response.Code = 403
+	sourceCopy.ClusterIdentity = "kind:other"
+	if !acquired.RunnerBound() {
+		t.Fatal("mutating defensive snapshots changed sealed state")
+	}
+	if gotEvent, gotSource, ok := acquired.Snapshot(); !ok || gotEvent.Response.Code != 200 || gotEvent.User.Groups[0] != "system:authenticated" || gotSource.ProvenanceLimitations[0] != "runner controlled" {
+		t.Fatalf("snapshot state changed: event=%+v source=%+v valid=%v", gotEvent, gotSource, ok)
+	}
+
+	mutated := acquired
+	mutated.event.User.Groups[0] = "forged"
+	if mutated.RunnerBound() {
+		t.Fatal("nested event mutation retained source authority")
+	}
+	mutated = acquired
+	mutated.source.ProvenanceLimitations[0] = "forged"
+	if mutated.RunnerBound() {
+		t.Fatal("nested source mutation retained source authority")
 	}
 }
 
@@ -102,10 +139,10 @@ func TestParsePreservesFailedResponsesAndMissingPrincipal(t *testing.T) {
 		t.Fatalf("failure or absent principal not preserved: %+v", events)
 	}
 	identity := SourceIdentity{ClusterIdentity: "kind:evalplane-e2e", ConfigurationIdentity: configurationIdentity(), VerificationState: "runner_bound_test_source"}
-	if _, err = SelectMutation([]AcquiredEvent{{Event: events[1], Source: identity, sealed: true}}, "proof", "web", "patch", "kubernetes-admin"); err == nil {
+	if _, err = SelectMutation([]AcquiredEvent{newAcquiredEvent(events[1], identity)}, "proof", "web", "patch", "kubernetes-admin"); err == nil {
 		t.Fatal("event missing authenticated principal matched expected actor")
 	}
-	if _, err = SelectMutation([]AcquiredEvent{{Event: events[0], Source: identity}}, "proof", "web", "patch", "kubernetes-admin"); err == nil {
+	if _, err = SelectMutation([]AcquiredEvent{{}}, "proof", "web", "patch", "kubernetes-admin"); err == nil {
 		t.Fatal("caller-constructed event without acquisition seal was accepted")
 	}
 }

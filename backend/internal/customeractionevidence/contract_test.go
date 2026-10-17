@@ -97,7 +97,46 @@ func TestCallerBuiltAssessmentCannotReachPersistence(t *testing.T) {
 	if !verified.providerVerified || verified.Trust != TrustAttributionQualified {
 		t.Fatalf("provider-verified assessment was not sealed: %+v", verified)
 	}
+	if _, err := Store(context.Background(), nil, verified); err == ErrUntrustedInput {
+		t.Fatal("unchanged provider evidence lost its authority")
+	}
 	if _, err := BuildFromProvider(context.Background(), verifiedTestProvider{assessment: forgedAssessment}, scope, Candidate{ContractVersion: ContractVersion, Kind: candidate.Kind, SourceID: "another-provider"}, time.Now()); err == nil {
 		t.Fatal("evidence from a different source was accepted by provider")
+	}
+}
+
+func TestProviderSealRejectsMutationsEvenAfterPublicDigestRecalculation(t *testing.T) {
+	scope := Scope{WorkspaceID: "00000000-0000-4000-8000-000000000001", EnvironmentID: "00000000-0000-4000-8000-000000000002", SessionID: "00000000-0000-4000-8000-000000000003", RunID: "00000000-0000-4000-8000-000000000004"}
+	candidate := Candidate{ContractVersion: ContractVersion, Kind: KindAuthenticatedActionRecord, SourceID: "audit", SourceIdentity: "cluster", SourceEventID: "event-1", ActionType: "deployment", Operation: "patch", Target: Target{Kind: "Deployment", Namespace: "app", Name: "web"}, CorrelationIDs: []string{"corr-1"}, EvidenceRefs: []string{"ref-1"}, Uncertainty: []string{"uncertain"}, MissingFields: []string{"actor"}}
+	assessment := Assessment{AuthenticationStatus: "verified", AuthorizationStatus: "authorized", SourceIdentityStatus: "verified", ProvenanceStatus: "verified", AuthenticationMethod: "runner-bound-test", CredentialScope: "test", ActorStatus: "unknown", CausalityStatus: "unproven", Uncertainty: []string{"limited"}}
+	build := func() Evidence {
+		evidence, err := BuildFromProvider(context.Background(), verifiedTestProvider{assessment: assessment}, scope, candidate, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evidence
+	}
+
+	mutations := map[string]func(*Evidence){
+		"scope":                      func(e *Evidence) { e.Scope.WorkspaceID = "00000000-0000-4000-8000-000000000099" },
+		"trust":                      func(e *Evidence) { e.Trust = TrustAttributionQualified },
+		"target":                     func(e *Evidence) { e.Target.Name = "attacker" },
+		"source":                     func(e *Evidence) { e.Source.Identity = "other-cluster" },
+		"actor":                      func(e *Evidence) { e.Actor.Identity = "claimed-agent" },
+		"nested evidence reference":  func(e *Evidence) { e.EvidenceRefs[0] = "forged-ref" },
+		"nested correlation":         func(e *Evidence) { e.CorrelationIDs[0] = "forged-correlation" },
+		"nested uncertainty":         func(e *Evidence) { e.Uncertainty[0] = "forged-uncertainty" },
+		"nested provenance conflict": func(e *Evidence) { e.ProvenanceConflicts = append(e.ProvenanceConflicts, "forged-conflict") },
+		"public digest":              func(e *Evidence) { e.Integrity.Digest = "sha256:forged" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			evidence := build()
+			mutate(&evidence)
+			evidence.Integrity.Digest = Digest(evidence)
+			if _, err := Store(context.Background(), nil, evidence); err != ErrUntrustedInput {
+				t.Fatalf("mutated provider evidence reached persistence gate: %v", err)
+			}
+		})
 	}
 }

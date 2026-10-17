@@ -3,6 +3,7 @@ package customeractionevidence
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -138,7 +139,21 @@ func BuildFromProvider(ctx context.Context, provider Provider, scope Scope, cand
 		return Evidence{}, err
 	}
 	evidence.providerVerified = true
+	evidence.providerSeal = providerEvidenceDigest(evidence)
 	return evidence, nil
+}
+
+func providerEvidenceDigest(e Evidence) [sha256.Size]byte {
+	encoded, _ := json.Marshal(e)
+	return sha256.Sum256(encoded)
+}
+
+func hasValidProviderSeal(e Evidence) bool {
+	if !e.providerVerified {
+		return false
+	}
+	digest := providerEvidenceDigest(e)
+	return subtle.ConstantTimeCompare(e.providerSeal[:], digest[:]) == 1
 }
 
 func Validate(e Evidence) error {

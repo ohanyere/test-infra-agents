@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -84,22 +85,58 @@ type Response struct {
 }
 
 type AcquiredEvent struct {
-	Event  Event          `json:"event"`
-	Source SourceIdentity `json:"source"`
+	event  Event
+	source SourceIdentity
+	seal   [sha256.Size]byte
 	sealed bool
 }
 
 func (e AcquiredEvent) RunnerBound() bool {
-	return e.sealed && e.Source.VerificationState == "runner_bound_test_source"
+	if !e.sealed || e.source.VerificationState != "runner_bound_test_source" {
+		return false
+	}
+	digest := acquiredEventDigest(e.event, e.source)
+	return subtle.ConstantTimeCompare(e.seal[:], digest[:]) == 1
+}
+
+func (e AcquiredEvent) Snapshot() (Event, SourceIdentity, bool) {
+	if !e.RunnerBound() {
+		return Event{}, SourceIdentity{}, false
+	}
+	return cloneEvent(e.event), cloneSourceIdentity(e.source), true
+}
+
+func newAcquiredEvent(event Event, source SourceIdentity) AcquiredEvent {
+	event = cloneEvent(event)
+	source = cloneSourceIdentity(source)
+	return AcquiredEvent{event: event, source: source, seal: acquiredEventDigest(event, source), sealed: true}
+}
+
+func acquiredEventDigest(event Event, source SourceIdentity) [sha256.Size]byte {
+	encoded, _ := json.Marshal(struct {
+		Event  Event          `json:"event"`
+		Source SourceIdentity `json:"source"`
+	}{event, source})
+	return sha256.Sum256(encoded)
+}
+
+func cloneEvent(event Event) Event {
+	event.User.Groups = append([]string(nil), event.User.Groups...)
+	return event
+}
+
+func cloneSourceIdentity(source SourceIdentity) SourceIdentity {
+	source.ProvenanceLimitations = append([]string(nil), source.ProvenanceLimitations...)
+	return source
 }
 
 func SelectMutation(events []AcquiredEvent, namespace, name, verb, principal string) (AcquiredEvent, error) {
 	var failedResponse int32
 	for _, acquired := range events {
-		if !acquired.RunnerBound() || acquired.Source.ClusterIdentity != "kind:"+kindClusterName || acquired.Source.ConfigurationIdentity != configurationIdentity() {
+		if !acquired.RunnerBound() || acquired.source.ClusterIdentity != "kind:"+kindClusterName || acquired.source.ConfigurationIdentity != configurationIdentity() {
 			continue
 		}
-		event := acquired.Event
+		event := acquired.event
 		if event.Stage != "ResponseComplete" || event.Verb != verb || event.ObjectRef.APIGroup != "apps" || event.ObjectRef.APIVersion != "v1" || event.ObjectRef.Resource != "deployments" || event.ObjectRef.Namespace != namespace || event.ObjectRef.Name != name {
 			continue
 		}
@@ -215,7 +252,7 @@ func AcquireHostedKind(ctx context.Context) ([]AcquiredEvent, SourceIdentity, er
 	}
 	acquired := make([]AcquiredEvent, 0, len(events))
 	for _, event := range events {
-		acquired = append(acquired, AcquiredEvent{Event: event, Source: identity, sealed: true})
+		acquired = append(acquired, newAcquiredEvent(event, identity))
 	}
 	return acquired, identity, nil
 }

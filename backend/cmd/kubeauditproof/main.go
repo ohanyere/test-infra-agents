@@ -26,7 +26,8 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	if !selected.RunnerBound() {
+	event, source, ok := selected.Snapshot()
+	if !ok {
 		fatal("audit event did not pass runner source binding")
 	}
 	result := struct {
@@ -34,7 +35,7 @@ func main() {
 		Source kubeaudit.SourceIdentity `json:"source"`
 		Event  kubeaudit.Event          `json:"event"`
 		Notice string                   `json:"notice"`
-	}{"runner_bound_audit_acquired", selected.Source, selected.Event, "runner-bound Kind test evidence only; no production customer source authentication"}
+	}{"runner_bound_audit_acquired", source, event, "runner-bound Kind test evidence only; no production customer source authentication"}
 	if err = json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		fatal(fmt.Sprintf("encode proof result: %v", err))
 	}

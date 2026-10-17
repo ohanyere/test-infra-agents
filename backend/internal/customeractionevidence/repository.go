@@ -20,7 +20,7 @@ var ErrUntrustedInput = errors.New("customer action evidence is not independentl
 // Store requires a transaction so it can serialize evidence insertion against
 // session finalization and environment revocation.
 func Store(ctx context.Context, tx pgx.Tx, e Evidence) (PersistResult, error) {
-	if !e.providerVerified {
+	if !hasValidProviderSeal(e) {
 		return PersistResult{}, ErrUntrustedInput
 	}
 	if tx == nil {
