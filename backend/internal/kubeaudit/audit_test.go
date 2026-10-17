@@ -117,15 +117,23 @@ func TestSourceIdentityIsExplicitlyRunnerBoundAndNotCryptographic(t *testing.T) 
 	}
 }
 
-func TestValidateAuditArgumentsSupportsManifestArgumentEncodings(t *testing.T) {
-	manifests := []string{
-		`apiVersion: v1
+const validAuditManifest = `apiVersion: v1
 kind: Pod
 spec:
   containers:
     - name: kube-apiserver
-      command: [kube-apiserver, --audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml, --audit-log-path=/var/log/kubernetes/audit/audit.log]
-`,
+      command: [kube-apiserver, --audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml, --audit-log-path=/var/log/kubernetes/audit/audit.log, --audit-log-mode=blocking, --audit-log-maxage=1, --audit-log-maxbackup=2, --audit-log-maxsize=20]
+      volumeMounts:
+        - {name: audit-policies, mountPath: /etc/kubernetes/policies/audit-policy.yaml, readOnly: true}
+        - {name: audit-logs, mountPath: /var/log/kubernetes/audit, readOnly: false}
+  volumes:
+    - {name: audit-policies, hostPath: {path: /etc/kubernetes/policies/audit-policy.yaml, type: File}}
+    - {name: audit-logs, hostPath: {path: /var/log/kubernetes/audit, type: DirectoryOrCreate}}
+`
+
+func TestValidateAuditArgumentsSupportsManifestArgumentEncodings(t *testing.T) {
+	manifests := []string{
+		validAuditManifest,
 		`apiVersion: v1
 kind: Pod
 spec:
@@ -137,6 +145,16 @@ spec:
         - /var/log/kubernetes/audit/audit.log
         - --audit-policy-file
         - /etc/kubernetes/policies/audit-policy.yaml
+        - --audit-log-mode=blocking
+        - --audit-log-maxage=1
+        - --audit-log-maxbackup=2
+        - --audit-log-maxsize=20
+      volumeMounts:
+        - {name: audit-policies, mountPath: /etc/kubernetes/policies/audit-policy.yaml, readOnly: true}
+        - {name: audit-logs, mountPath: /var/log/kubernetes/audit, readOnly: false}
+  volumes:
+    - {name: audit-policies, hostPath: {path: /etc/kubernetes/policies/audit-policy.yaml, type: File}}
+    - {name: audit-logs, hostPath: {path: /var/log/kubernetes/audit, type: DirectoryOrCreate}}
 `,
 	}
 	for _, manifest := range manifests {
@@ -190,10 +208,17 @@ spec:
 	if err == nil {
 		t.Fatal("manifest without audit flags accepted")
 	}
-	for _, flag := range []string{"audit-policy-file missing", "audit-log-path missing"} {
+	for _, flag := range []string{"audit-policy-file missing", "audit-log-path missing", "audit-log-mode missing", "audit-log-maxage missing", "audit-log-maxbackup missing", "audit-log-maxsize missing"} {
 		if !strings.Contains(err.Error(), flag) {
 			t.Errorf("expected diagnostic for %q, got %v", flag, err)
 		}
+	}
+}
+
+func TestValidateAuditArgumentsRejectsWritablePolicyMount(t *testing.T) {
+	manifest := strings.ReplaceAll(validAuditManifest, "mountPath: /etc/kubernetes/policies/audit-policy.yaml, readOnly: true", "mountPath: /etc/kubernetes/policies/audit-policy.yaml, readOnly: false")
+	if err := validateAuditArguments([]byte(manifest)); err == nil || !strings.Contains(err.Error(), "audit-policies audit volume mount missing or mismatched") {
+		t.Fatalf("writable audit policy mount was not rejected: %v", err)
 	}
 }
 
@@ -210,7 +235,13 @@ func TestAuditArgumentDiagnosticsRejectDuplicateFlags(t *testing.T) {
 }
 
 func TestRunningProcessArgumentsReadsSelectedContainerRuntimeSpec(t *testing.T) {
-	inspection, err := json.Marshal(map[string]any{"info": map[string]any{"runtimeSpec": map[string]any{"process": map[string]any{"args": []string{"kube-apiserver", "--audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml", "--audit-log-path=/var/log/kubernetes/audit/audit.log"}}}}})
+	inspection, err := json.Marshal(map[string]any{"info": map[string]any{"runtimeSpec": map[string]any{
+		"process": map[string]any{"args": []string{"kube-apiserver", "--audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml", "--audit-log-path=/var/log/kubernetes/audit/audit.log", "--audit-log-mode=blocking", "--audit-log-maxage=1", "--audit-log-maxbackup=2", "--audit-log-maxsize=20"}},
+		"mounts": []map[string]any{
+			{"destination": "/etc/kubernetes/policies/audit-policy.yaml", "options": []string{"rbind", "ro"}},
+			{"destination": "/var/log/kubernetes/audit", "options": []string{"rbind", "rw"}},
+		},
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,5 +251,15 @@ func TestRunningProcessArgumentsReadsSelectedContainerRuntimeSpec(t *testing.T) 
 	}
 	if err = validateAuditArgumentValues(arguments); err != nil {
 		t.Fatalf("running container arguments rejected: %v", err)
+	}
+	if err = validateRuntimeAuditMounts(inspection); err != nil {
+		t.Fatalf("running container mounts rejected: %v", err)
+	}
+}
+
+func TestRuntimeAuditMountsRequireReadonlyPolicyAndWritableLogDirectory(t *testing.T) {
+	inspection := []byte(`{"info":{"runtimeSpec":{"mounts":[{"destination":"/etc/kubernetes/policies/audit-policy.yaml","options":["rw"]},{"destination":"/var/log/kubernetes/audit","options":["rw"]}]}}}`)
+	if err := validateRuntimeAuditMounts(inspection); err == nil || !strings.Contains(err.Error(), "audit policy runtime mount missing or has incorrect access mode") {
+		t.Fatalf("writable policy runtime mount was not rejected: %v", err)
 	}
 }

@@ -28,6 +28,7 @@ const (
 	AuditAPIVersion = "audit.k8s.io/v1"
 	kindClusterName = "evalplane-e2e"
 	kindNodeName    = "evalplane-e2e-control-plane"
+	auditLogDir     = "/var/log/kubernetes/audit"
 	auditLogPath    = "/var/log/kubernetes/audit/audit.log"
 	maxAuditLogSize = 32 << 20
 	maxRecordSize   = 1 << 20
@@ -295,16 +296,31 @@ func verifyKindBinding(ctx context.Context) error {
 	if err := validateAuditArgumentValues(arguments); err != nil {
 		return fmt.Errorf("%w: running process: %w", ErrInvalidSource, err)
 	}
+	if err := validateRuntimeAuditMounts([]byte(inspection)); err != nil {
+		return fmt.Errorf("%w: running process mounts: %w", ErrInvalidSource, err)
+	}
 	return nil
 }
 
 func validateAuditArguments(manifest []byte) error {
 	var pod struct {
 		Spec struct {
+			Volumes []struct {
+				Name     string `yaml:"name"`
+				HostPath struct {
+					Path string `yaml:"path"`
+					Type string `yaml:"type"`
+				} `yaml:"hostPath"`
+			} `yaml:"volumes"`
 			Containers []struct {
-				Name    string   `yaml:"name"`
-				Command []string `yaml:"command"`
-				Args    []string `yaml:"args"`
+				Name         string   `yaml:"name"`
+				Command      []string `yaml:"command"`
+				Args         []string `yaml:"args"`
+				VolumeMounts []struct {
+					Name      string `yaml:"name"`
+					MountPath string `yaml:"mountPath"`
+					ReadOnly  bool   `yaml:"readOnly"`
+				} `yaml:"volumeMounts"`
 			} `yaml:"containers"`
 		} `yaml:"spec"`
 	}
@@ -312,20 +328,40 @@ func validateAuditArguments(manifest []byte) error {
 		return errors.New("kube-apiserver manifest is not valid YAML")
 	}
 	var arguments []string
+	var volumeMounts []struct {
+		Name      string `yaml:"name"`
+		MountPath string `yaml:"mountPath"`
+		ReadOnly  bool   `yaml:"readOnly"`
+	}
 	for _, container := range pod.Spec.Containers {
 		if container.Name == "kube-apiserver" {
 			arguments = append(append(arguments, container.Command...), container.Args...)
+			volumeMounts = container.VolumeMounts
 			break
 		}
 	}
 	if arguments == nil {
 		return errors.New("kube-apiserver container arguments are missing")
 	}
-	return validateAuditArgumentValues(arguments)
+	if err := validateAuditArgumentValues(arguments); err != nil {
+		return err
+	}
+	return validateAuditVolumeMounts(pod.Spec.Volumes, volumeMounts)
 }
 
 func validateAuditArgumentValues(arguments []string) error {
-	values := map[string][]string{"audit-policy-file": {}, "audit-log-path": {}}
+	expected := map[string]string{
+		"audit-policy-file":   "/etc/kubernetes/policies/audit-policy.yaml",
+		"audit-log-path":      auditLogPath,
+		"audit-log-mode":      "blocking",
+		"audit-log-maxage":    "1",
+		"audit-log-maxbackup": "2",
+		"audit-log-maxsize":   "20",
+	}
+	values := make(map[string][]string, len(expected))
+	for name := range expected {
+		values[name] = nil
+	}
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		if !strings.HasPrefix(argument, "--") {
@@ -345,11 +381,7 @@ func validateAuditArgumentValues(arguments []string) error {
 		}
 		values[name] = append(values[name], value)
 	}
-	expected := map[string]string{
-		"audit-policy-file": "/etc/kubernetes/policies/audit-policy.yaml",
-		"audit-log-path":    auditLogPath,
-	}
-	names := []string{"audit-policy-file", "audit-log-path"}
+	names := []string{"audit-policy-file", "audit-log-path", "audit-log-mode", "audit-log-maxage", "audit-log-maxbackup", "audit-log-maxsize"}
 	sort.Strings(names)
 	var mismatches []string
 	for _, name := range names {
@@ -366,6 +398,47 @@ func validateAuditArgumentValues(arguments []string) error {
 	}
 	if len(mismatches) != 0 {
 		return fmt.Errorf("API-server audit argument mismatch: %s", strings.Join(mismatches, "; "))
+	}
+	return nil
+}
+
+func validateAuditVolumeMounts(volumes []struct {
+	Name     string `yaml:"name"`
+	HostPath struct {
+		Path string `yaml:"path"`
+		Type string `yaml:"type"`
+	} `yaml:"hostPath"`
+}, mounts []struct {
+	Name      string `yaml:"name"`
+	MountPath string `yaml:"mountPath"`
+	ReadOnly  bool   `yaml:"readOnly"`
+}) error {
+	type expectedMount struct {
+		name     string
+		path     string
+		pathType string
+		readOnly bool
+	}
+	expected := []expectedMount{
+		{name: "audit-policies", path: "/etc/kubernetes/policies/audit-policy.yaml", pathType: "File", readOnly: true},
+		{name: "audit-logs", path: auditLogDir, pathType: "DirectoryOrCreate", readOnly: false},
+	}
+	for _, want := range expected {
+		volumeCount := 0
+		for _, volume := range volumes {
+			if volume.Name == want.name && volume.HostPath.Path == want.path && volume.HostPath.Type == want.pathType {
+				volumeCount++
+			}
+		}
+		mountCount := 0
+		for _, mount := range mounts {
+			if mount.Name == want.name && mount.MountPath == want.path && mount.ReadOnly == want.readOnly {
+				mountCount++
+			}
+		}
+		if volumeCount != 1 || mountCount != 1 {
+			return fmt.Errorf("%s audit volume mount missing or mismatched", want.name)
+		}
 	}
 	return nil
 }
@@ -387,6 +460,49 @@ func runningProcessArguments(inspection []byte) ([]string, error) {
 		return nil, errors.New("running kube-apiserver process arguments are unavailable")
 	}
 	return container.Info.RuntimeSpec.Process.Args, nil
+}
+
+func validateRuntimeAuditMounts(inspection []byte) error {
+	var container struct {
+		Info struct {
+			RuntimeSpec struct {
+				Mounts []struct {
+					Destination string   `json:"destination"`
+					Options     []string `json:"options"`
+				} `json:"mounts"`
+			} `json:"runtimeSpec"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(inspection, &container); err != nil {
+		return errors.New("running kube-apiserver mount metadata is invalid")
+	}
+	expected := []struct {
+		path     string
+		readOnly bool
+		label    string
+	}{
+		{path: "/etc/kubernetes/policies/audit-policy.yaml", readOnly: true, label: "audit policy"},
+		{path: auditLogDir, readOnly: false, label: "audit log directory"},
+	}
+	for _, want := range expected {
+		count := 0
+		readOnly := false
+		for _, mount := range container.Info.RuntimeSpec.Mounts {
+			if mount.Destination != want.path {
+				continue
+			}
+			count++
+			for _, option := range mount.Options {
+				if option == "ro" {
+					readOnly = true
+				}
+			}
+		}
+		if count != 1 || readOnly != want.readOnly {
+			return fmt.Errorf("%s runtime mount missing or has incorrect access mode", want.label)
+		}
+	}
+	return nil
 }
 
 func configurationIdentity() string {

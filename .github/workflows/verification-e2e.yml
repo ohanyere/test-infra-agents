@@ -446,27 +446,21 @@ jobs:
           kubeadmConfigPatches:
             - |
               kind: ClusterConfiguration
-              apiVersion: kubeadm.k8s.io/v1beta4
+              apiVersion: kubeadm.k8s.io/v1beta3
               apiServer:
                 extraArgs:
-                  - name: audit-policy-file
-                    value: /etc/kubernetes/policies/audit-policy.yaml
-                  - name: audit-log-path
-                    value: /var/log/kubernetes/audit/audit.log
-                  - name: audit-log-mode
-                    value: blocking
-                  - name: audit-log-maxage
-                    value: "1"
-                  - name: audit-log-maxbackup
-                    value: "2"
-                  - name: audit-log-maxsize
-                    value: "20"
+                  audit-policy-file: /etc/kubernetes/policies/audit-policy.yaml
+                  audit-log-path: /var/log/kubernetes/audit/audit.log
+                  audit-log-mode: blocking
+                  audit-log-maxage: "1"
+                  audit-log-maxbackup: "2"
+                  audit-log-maxsize: "20"
                 extraVolumes:
                   - name: audit-policies
-                    hostPath: /etc/kubernetes/policies
-                    mountPath: /etc/kubernetes/policies
+                    hostPath: /etc/kubernetes/policies/audit-policy.yaml
+                    mountPath: /etc/kubernetes/policies/audit-policy.yaml
                     readOnly: true
-                    pathType: DirectoryOrCreate
+                    pathType: File
                   - name: audit-logs
                     hostPath: /var/log/kubernetes/audit
                     mountPath: /var/log/kubernetes/audit

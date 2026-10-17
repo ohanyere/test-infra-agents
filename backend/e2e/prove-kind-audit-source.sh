@@ -37,6 +37,10 @@ report_manifest_flag() {
 }
 report_manifest_flag audit-policy-file /etc/kubernetes/policies/audit-policy.yaml
 report_manifest_flag audit-log-path /var/log/kubernetes/audit/audit.log
+report_manifest_flag audit-log-mode blocking
+report_manifest_flag audit-log-maxage 1
+report_manifest_flag audit-log-maxbackup 2
+report_manifest_flag audit-log-maxsize 20
 
 report_check() {
   local name="$1"; shift
@@ -58,8 +62,20 @@ if [[ "$(wc -w <<<"$container_ids")" -eq 1 ]]; then
   }
   report_process_flag audit-policy-file /etc/kubernetes/policies/audit-policy.yaml
   report_process_flag audit-log-path /var/log/kubernetes/audit/audit.log
-  report_check api-server-policy-readable docker exec "$node" crictl exec "$container_id" test -r /etc/kubernetes/policies/audit-policy.yaml
-  report_check api-server-audit-directory-writable docker exec "$node" crictl exec "$container_id" test -w /var/log/kubernetes/audit
+  report_process_flag audit-log-mode blocking
+  report_process_flag audit-log-maxage 1
+  report_process_flag audit-log-maxbackup 2
+  report_process_flag audit-log-maxsize 20
+  report_runtime_mount() {
+    local mount_path="$1" mode="$2" label="$3"
+    if docker exec "$node" crictl inspect "$container_id" | jq -e --arg path "$mount_path" --arg mode "$mode" 'any(.info.runtimeSpec.mounts[]?; .destination == $path and ((.options // []) | index($mode)) != null)' >/dev/null; then
+      printf 'audit diagnostic: api-server-runtime-mount %s=%s\n' "$label" "$mode"
+    else
+      printf 'audit diagnostic: api-server-runtime-mount %s=missing-or-mismatched\n' "$label"
+    fi
+  }
+  report_runtime_mount /etc/kubernetes/policies/audit-policy.yaml ro policy
+  report_runtime_mount /var/log/kubernetes/audit rw audit-log-directory
 else
   echo "audit diagnostic: running-process kube-apiserver-container-count=$(wc -w <<<"$container_ids")"
 fi
