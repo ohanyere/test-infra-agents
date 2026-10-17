@@ -427,7 +427,53 @@ jobs:
       - name: Create isolated Kind cluster
         run: |
           set -euo pipefail
-          kind create cluster --name evalplane-e2e --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG" --wait 180s
+          audit_dir="$ARTIFACT_DIR/kind-audit-source"
+          mkdir -p "$audit_dir"
+          chmod 700 "$audit_dir"
+          kind_config="$ARTIFACT_DIR/kind-config.yaml"
+          cat > "$kind_config" <<EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraMounts:
+                - hostPath: $audit_dir
+                  containerPath: /var/log/kubernetes/audit
+                  readOnly: false
+                - hostPath: $GITHUB_WORKSPACE/backend/internal/kubeaudit/audit-policy.yaml
+                  containerPath: /etc/kubernetes/policies/audit-policy.yaml
+                  readOnly: true
+          kubeadmConfigPatches:
+            - |
+              kind: ClusterConfiguration
+              apiVersion: kubeadm.k8s.io/v1beta4
+              apiServer:
+                extraArgs:
+                  - name: audit-policy-file
+                    value: /etc/kubernetes/policies/audit-policy.yaml
+                  - name: audit-log-path
+                    value: /var/log/kubernetes/audit/audit.log
+                  - name: audit-log-mode
+                    value: blocking
+                  - name: audit-log-maxage
+                    value: "1"
+                  - name: audit-log-maxbackup
+                    value: "2"
+                  - name: audit-log-maxsize
+                    value: "20"
+                extraVolumes:
+                  - name: audit-policies
+                    hostPath: /etc/kubernetes/policies
+                    mountPath: /etc/kubernetes/policies
+                    readOnly: true
+                    pathType: DirectoryOrCreate
+                  - name: audit-logs
+                    hostPath: /var/log/kubernetes/audit
+                    mountPath: /var/log/kubernetes/audit
+                    readOnly: false
+                    pathType: DirectoryOrCreate
+          EOF
+          kind create cluster --name evalplane-e2e --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG" --config "$kind_config" --wait 180s
           test "$(kubectl config current-context)" = "kind-evalplane-e2e"
           kubectl get nodes -o wide
           kubectl wait --for=condition=Ready node/evalplane-e2e-control-plane --timeout=180s
@@ -439,6 +485,9 @@ jobs:
           kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e external-agent:e2e "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
+
+      - name: Prove runner-bound Kubernetes API audit acquisition
+        run: bash backend/e2e/prove-kind-audit-source.sh
 
       - name: Install pinned minimal Argo CD
         run: |
@@ -1162,6 +1211,12 @@ jobs:
           timeout 60s kubectl delete -f backend/e2e/calibration.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/harness-rbac.yaml --ignore-not-found --wait=false
           timeout 120s kind delete cluster --name evalplane-e2e
+          audit_dir="$ARTIFACT_DIR/kind-audit-source"
+          if [[ -d "$audit_dir" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$audit_dir"
+            chmod 700 "$audit_dir"
+            find "$audit_dir" -type f -exec chmod 600 {} +
+          fi
           if kind get clusters | grep -Fxq evalplane-e2e; then
             printf 'kind_cluster_cleanup=FAILED\n' >> "$ARTIFACT_DIR/cleanup.txt"
             exit 1
