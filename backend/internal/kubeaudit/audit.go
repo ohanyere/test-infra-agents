@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"embed"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
