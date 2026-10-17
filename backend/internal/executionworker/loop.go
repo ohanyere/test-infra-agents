@@ -229,7 +229,11 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 		defer cancel()
 		decision.Authorized = false
 		decision.Code = "authorization_unavailable"
-		return errors.Join(platform("action_authorization_unavailable", errors.New("resource verification failed")), w.persistAction(final, run.RunID, row.ID, decision))
+		cause := decision.Cause
+		if cause == nil {
+			cause = errors.New("resource verification failed")
+		}
+		return errors.Join(platform("action_authorization_unavailable", fmt.Errorf("action authorization failed: %w", cause)), w.persistAction(final, run.RunID, row.ID, decision))
 	}
 	if decision.Status != "denied" && (!decision.Authorized || decision.Status != "allowed") {
 		return platform("invalid_authorization_result", errors.New("invalid executor response"))
@@ -264,7 +268,11 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 		w.stage("action_execution", "completed")
 	}
 	if result.Status == "failed" {
-		return platform("action_execution_failed", fmt.Errorf("controlled action %s failed: %s", result.ActionType, result.Summary))
+		cause := result.Cause
+		if cause == nil {
+			cause = errors.New(result.Summary)
+		}
+		return platform("action_execution_failed", fmt.Errorf("controlled action %s failed: %w", result.ActionType, cause))
 	}
 	return nil
 }

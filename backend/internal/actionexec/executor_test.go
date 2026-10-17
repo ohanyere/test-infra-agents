@@ -14,8 +14,10 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
@@ -212,6 +214,53 @@ func TestSetWorkloadImageFailureRetainsPreMutationEvidence(t *testing.T) {
 	result := executor.ExecuteAction(context.Background(), env, action)
 	if result.Status != "failed" || result.Attribution == nil || result.Attribution.PreMutation == nil || result.Attribution.PostMutation != nil || result.Attribution.PreMutation.Value != "evalplane-reference:v18" {
 		t.Fatalf("failed execution evidence=%+v", result)
+	}
+}
+
+func TestSetWorkloadImagePreservesKubernetesUpdateErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		is   func(error) bool
+	}{
+		{name: "conflict", err: apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, scenariorunner.ReferenceDeploymentName, fmt.Errorf("resource version changed")), is: apierrors.IsConflict},
+		{name: "forbidden", err: apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, scenariorunner.ReferenceDeploymentName, fmt.Errorf("policy denied")), is: apierrors.IsForbidden},
+		{name: "api unavailable", err: apierrors.NewServiceUnavailable("control plane unavailable"), is: apierrors.IsServiceUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, _, env, executor := setup(t)
+			deployment := deployment(env, owned(scenariorunner.ReferenceComponent), 2)
+			deployment.Spec.Template.Spec.Containers = []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v18"}}
+			if _, err := client.AppsV1().Deployments(env.Environment.Namespace).Create(context.Background(), deployment, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			client.PrependReactor("update", "deployments", func(ktesting.Action) (bool, runtime.Object, error) { return true, nil, test.err })
+			action := agentgateway.ProposedAction{Type: "set_live_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName}, Parameters: map[string]any{"image": "evalplane-reference:v17"}}
+			result := executor.ExecuteAction(context.Background(), env, action)
+			if result.Status != "failed" || result.Executed || result.Cause == nil || !test.is(result.Cause) {
+				t.Fatalf("failed update lost API cause or reported success: %+v", result)
+			}
+			if result.Attribution == nil || result.Attribution.PreMutation == nil || result.Attribution.PostMutation != nil {
+				t.Fatalf("failed update produced invalid mutation evidence: %+v", result.Attribution)
+			}
+			current, err := client.AppsV1().Deployments(env.Environment.Namespace).Get(context.Background(), scenariorunner.ReferenceDeploymentName, metav1.GetOptions{})
+			if err != nil || current.Spec.Template.Spec.Containers[0].Image != "evalplane-reference:v18" {
+				t.Fatalf("failed update changed live Deployment: current=%+v error=%v", current, err)
+			}
+		})
+	}
+}
+
+func TestSetWorkloadImageMissingDeploymentPreservesNotFound(t *testing.T) {
+	client, _, env, executor := setup(t)
+	client.PrependReactor("get", "deployments", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, scenariorunner.ReferenceDeploymentName)
+	})
+	action := agentgateway.ProposedAction{Type: "set_live_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: scenariorunner.ReferenceDeploymentName}, Parameters: map[string]any{"image": "evalplane-reference:v17"}}
+	result := executor.ExecuteAction(context.Background(), env, action)
+	if result.Status != "failed" || result.Cause == nil || !apierrors.IsNotFound(result.Cause) || result.Executed {
+		t.Fatalf("missing Deployment result=%+v", result)
 	}
 }
 

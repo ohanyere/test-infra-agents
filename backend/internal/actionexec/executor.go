@@ -34,6 +34,7 @@ type ActionResult struct {
 	Status      string                      `json:"status"`
 	Summary     string                      `json:"summary"`
 	Attribution *actionattribution.Evidence `json:"attribution,omitempty"`
+	Cause       error                       `json:"-"`
 }
 
 const AttributionContractVersion = actionattribution.ContractVersion
@@ -156,6 +157,7 @@ func (e *Executor) setImage(ctx context.Context, env observation.EnvironmentCont
 	d, err := e.client.AppsV1().Deployments(env.Environment.Namespace).Get(ctx, action.Target.Name, metav1.GetOptions{})
 	if err != nil {
 		result := failed(action.Type, "Kubernetes deployment lookup failed")
+		result.Cause = fmt.Errorf("get Deployment %s/%s: %w", env.Environment.Namespace, action.Target.Name, err)
 		result.Attribution = attribution
 		return result
 	}
@@ -172,6 +174,7 @@ func (e *Executor) setImage(ctx context.Context, env observation.EnvironmentCont
 	attribution.ExecutionCompletedAt = e.now().UTC()
 	if err != nil {
 		result := failed(action.Type, "Kubernetes deployment update failed")
+		result.Cause = fmt.Errorf("update Deployment %s/%s: %w", env.Environment.Namespace, action.Target.Name, err)
 		result.Attribution = attribution
 		return result
 	}

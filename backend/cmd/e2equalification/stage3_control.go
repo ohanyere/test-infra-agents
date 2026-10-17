@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/evalplane/evalplane/backend/internal/actionexec"
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
@@ -35,21 +37,24 @@ func (a stage3ContradictionActions) ExecuteAction(ctx context.Context, env obser
 	}
 	deployments := a.client.AppsV1().Deployments(env.Environment.Namespace)
 	deployment, err := deployments.Get(ctx, scenariorunner.ReferenceDeploymentName, metav1.GetOptions{})
-	if err != nil || len(deployment.Spec.Template.Spec.Containers) == 0 {
-		return stage3FixtureFailure(action.Type)
+	if err != nil {
+		return stage3FixtureFailure(action.Type, fmt.Errorf("get contradiction target Deployment %s/%s: %w", env.Environment.Namespace, scenariorunner.ReferenceDeploymentName, err))
+	}
+	if len(deployment.Spec.Template.Spec.Containers) == 0 {
+		return stage3FixtureFailure(action.Type, errors.New("contradiction target Deployment has no containers"))
 	}
 	deployment.Spec.Template.Spec.Containers[0].Image = "evalplane-reference:v19"
 	deployment, err = deployments.Update(ctx, deployment, metav1.UpdateOptions{})
 	if err != nil {
-		return stage3FixtureFailure(action.Type)
+		return stage3FixtureFailure(action.Type, fmt.Errorf("set contradiction Deployment image to v19: %w", err))
 	}
 	deployment.Spec.Template.Spec.Containers[0].Image = "evalplane-reference:v17"
 	if _, err = deployments.Update(ctx, deployment, metav1.UpdateOptions{}); err != nil {
-		return stage3FixtureFailure(action.Type)
+		return stage3FixtureFailure(action.Type, fmt.Errorf("restore plausible contradiction image v17: %w", err))
 	}
 	return result
 }
 
-func stage3FixtureFailure(actionType string) actionexec.ActionResult {
-	return actionexec.ActionResult{Code: "stage3_fixture_mutation_failed", ActionType: actionType, Authorized: true, Status: "failed", Summary: "Stage 3 out-of-band mutation fixture failed"}
+func stage3FixtureFailure(actionType string, cause error) actionexec.ActionResult {
+	return actionexec.ActionResult{Code: "stage3_fixture_mutation_failed", ActionType: actionType, Authorized: true, Status: "failed", Summary: "Stage 3 out-of-band mutation fixture failed", Cause: cause}
 }
