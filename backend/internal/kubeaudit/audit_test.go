@@ -1,6 +1,7 @@
 package kubeaudit
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -113,5 +114,92 @@ func TestSourceIdentityIsExplicitlyRunnerBoundAndNotCryptographic(t *testing.T) 
 	identity := SourceIdentity{SourceType: "kubernetes-apiserver-audit", ClusterIdentity: "kind:evalplane-e2e", VerificationState: "runner_bound_test_source", AcquiredAt: time.Now(), ProvenanceLimitations: []string{"not cryptographic"}}
 	if identity.ClusterIdentity != "kind:evalplane-e2e" || identity.VerificationState != "runner_bound_test_source" || len(identity.ProvenanceLimitations) == 0 {
 		t.Fatalf("source boundary not explicit: %+v", identity)
+	}
+}
+
+func TestValidateAuditArgumentsSupportsManifestArgumentEncodings(t *testing.T) {
+	manifests := []string{
+		`apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kube-apiserver
+      command: [kube-apiserver, --audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml, --audit-log-path=/var/log/kubernetes/audit/audit.log]
+`,
+		`apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kube-apiserver
+      command:
+        - kube-apiserver
+        - --audit-log-path
+        - /var/log/kubernetes/audit/audit.log
+        - --audit-policy-file
+        - /etc/kubernetes/policies/audit-policy.yaml
+`,
+	}
+	for _, manifest := range manifests {
+		if err := validateAuditArguments([]byte(manifest)); err != nil {
+			t.Fatalf("valid kube-apiserver arguments rejected: %v", err)
+		}
+	}
+}
+
+func TestAuditArgumentDiagnosticsNameOnlyTheMismatchedFlags(t *testing.T) {
+	err := validateAuditArgumentValues([]string{"kube-apiserver", "--audit-policy-file=/sensitive/wrong-path", "--unrelated-token=secret"})
+	if err == nil {
+		t.Fatal("missing and mismatched audit arguments accepted")
+	}
+	message := err.Error()
+	for _, want := range []string{"audit-policy-file mismatched", "audit-log-path missing"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("diagnostic %q missing from %q", want, message)
+		}
+	}
+	if strings.Contains(message, "sensitive") || strings.Contains(message, "secret") {
+		t.Fatalf("diagnostic exposed raw arguments: %q", message)
+	}
+}
+
+func TestValidateAuditArgumentsRequiresTheNamedAPIServerContainer(t *testing.T) {
+	manifest := []byte(`apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: unrelated
+      command:
+        - kube-apiserver
+        - --audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml
+        - --audit-log-path=/var/log/kubernetes/audit/audit.log
+`)
+	if err := validateAuditArguments(manifest); err == nil || !strings.Contains(err.Error(), "kube-apiserver container arguments are missing") {
+		t.Fatalf("expected exact API-server container selection failure, got %v", err)
+	}
+}
+
+func TestAuditArgumentDiagnosticsRejectDuplicateFlags(t *testing.T) {
+	err := validateAuditArgumentValues([]string{
+		"kube-apiserver",
+		"--audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml",
+		"--audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml",
+		"--audit-log-path=/var/log/kubernetes/audit/audit.log",
+	})
+	if err == nil || !strings.Contains(err.Error(), "audit-policy-file duplicated") {
+		t.Fatalf("expected duplicate flag diagnostic, got %v", err)
+	}
+}
+
+func TestRunningProcessArgumentsReadsSelectedContainerRuntimeSpec(t *testing.T) {
+	inspection, err := json.Marshal(map[string]any{"info": map[string]any{"runtimeSpec": map[string]any{"process": map[string]any{"args": []string{"kube-apiserver", "--audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml", "--audit-log-path=/var/log/kubernetes/audit/audit.log"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments, err := runningProcessArguments(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = validateAuditArgumentValues(arguments); err != nil {
+		t.Fatalf("running container arguments rejected: %v", err)
 	}
 }

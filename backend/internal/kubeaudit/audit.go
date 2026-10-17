@@ -14,8 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed audit-policy.yaml
@@ -270,10 +273,120 @@ func verifyKindBinding(ctx context.Context) error {
 		return fmt.Errorf("%w: mounted audit policy does not match the expected configuration", ErrInvalidSource)
 	}
 	manifest, err := output(ctx, "docker", "exec", kindNodeName, "cat", "/etc/kubernetes/manifests/kube-apiserver.yaml")
-	if err != nil || !strings.Contains(manifest, "--audit-policy-file=/etc/kubernetes/policies/audit-policy.yaml") || !strings.Contains(manifest, "--audit-log-path="+auditLogPath) {
-		return fmt.Errorf("%w: API server audit arguments do not match the expected configuration", ErrInvalidSource)
+	if err != nil {
+		return fmt.Errorf("%w: unable to read kube-apiserver static pod manifest", ErrInvalidSource)
+	}
+	if err := validateAuditArguments([]byte(manifest)); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidSource, err)
+	}
+	containers, err := output(ctx, "docker", "exec", kindNodeName, "crictl", "ps", "--name", "kube-apiserver", "-q")
+	containerIDs := strings.Fields(containers)
+	if err != nil || len(containerIDs) != 1 {
+		return fmt.Errorf("%w: expected one running kube-apiserver container; found %d", ErrInvalidSource, len(containerIDs))
+	}
+	inspection, err := output(ctx, "docker", "exec", kindNodeName, "crictl", "inspect", containerIDs[0])
+	if err != nil {
+		return fmt.Errorf("%w: unable to inspect running kube-apiserver container", ErrInvalidSource)
+	}
+	arguments, err := runningProcessArguments([]byte(inspection))
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidSource, err)
+	}
+	if err := validateAuditArgumentValues(arguments); err != nil {
+		return fmt.Errorf("%w: running process: %w", ErrInvalidSource, err)
 	}
 	return nil
+}
+
+func validateAuditArguments(manifest []byte) error {
+	var pod struct {
+		Spec struct {
+			Containers []struct {
+				Name    string   `yaml:"name"`
+				Command []string `yaml:"command"`
+				Args    []string `yaml:"args"`
+			} `yaml:"containers"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(manifest, &pod); err != nil {
+		return errors.New("kube-apiserver manifest is not valid YAML")
+	}
+	var arguments []string
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "kube-apiserver" {
+			arguments = append(append(arguments, container.Command...), container.Args...)
+			break
+		}
+	}
+	if arguments == nil {
+		return errors.New("kube-apiserver container arguments are missing")
+	}
+	return validateAuditArgumentValues(arguments)
+}
+
+func validateAuditArgumentValues(arguments []string) error {
+	values := map[string][]string{"audit-policy-file": {}, "audit-log-path": {}}
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if !strings.HasPrefix(argument, "--") {
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(argument, "--"), "=")
+		if _, required := values[name]; !required {
+			continue
+		}
+		if !hasValue && index+1 < len(arguments) && !strings.HasPrefix(arguments[index+1], "--") {
+			index++
+			value = arguments[index]
+			hasValue = true
+		}
+		if !hasValue {
+			value = ""
+		}
+		values[name] = append(values[name], value)
+	}
+	expected := map[string]string{
+		"audit-policy-file": "/etc/kubernetes/policies/audit-policy.yaml",
+		"audit-log-path":    auditLogPath,
+	}
+	names := []string{"audit-policy-file", "audit-log-path"}
+	sort.Strings(names)
+	var mismatches []string
+	for _, name := range names {
+		expectedValue := expected[name]
+		observed := values[name]
+		switch {
+		case len(observed) == 0:
+			mismatches = append(mismatches, fmt.Sprintf("%s missing (expected %s)", name, expectedValue))
+		case len(observed) != 1:
+			mismatches = append(mismatches, fmt.Sprintf("%s duplicated (expected one argument)", name))
+		case observed[0] != expectedValue:
+			mismatches = append(mismatches, fmt.Sprintf("%s mismatched (expected %s)", name, expectedValue))
+		}
+	}
+	if len(mismatches) != 0 {
+		return fmt.Errorf("API-server audit argument mismatch: %s", strings.Join(mismatches, "; "))
+	}
+	return nil
+}
+
+func runningProcessArguments(inspection []byte) ([]string, error) {
+	var container struct {
+		Info struct {
+			RuntimeSpec struct {
+				Process struct {
+					Args []string `json:"args"`
+				} `json:"process"`
+			} `json:"runtimeSpec"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(inspection, &container); err != nil {
+		return nil, errors.New("running kube-apiserver process metadata is invalid")
+	}
+	if len(container.Info.RuntimeSpec.Process.Args) == 0 {
+		return nil, errors.New("running kube-apiserver process arguments are unavailable")
+	}
+	return container.Info.RuntimeSpec.Process.Args, nil
 }
 
 func configurationIdentity() string {
