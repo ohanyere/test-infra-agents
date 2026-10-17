@@ -277,7 +277,7 @@ func verifyKindBinding(ctx context.Context) error {
 		return fmt.Errorf("%w: unable to read kube-apiserver static pod manifest", ErrInvalidSource)
 	}
 	if err := validateAuditArguments([]byte(manifest)); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidSource, err)
+		return fmt.Errorf("%w: static manifest: %w", ErrInvalidSource, err)
 	}
 	containers, err := output(ctx, "docker", "exec", kindNodeName, "crictl", "ps", "--name", "kube-apiserver", "-q")
 	containerIDs := strings.Fields(containers)

@@ -17,6 +17,71 @@ timeout 30s kubectl -n "$namespace" annotate deployment "$name" "realverax.io/au
 principal="$(timeout 30s kubectl auth whoami -o jsonpath='{.status.userInfo.username}')"
 test -n "$principal"
 
+node=evalplane-e2e-control-plane
+manifest="$(docker exec "$node" cat /etc/kubernetes/manifests/kube-apiserver.yaml)"
+report_manifest_flag() {
+  local flag="$1" expected="$2"
+  if awk -v flag="--$flag" -v expected="$expected" '
+    {
+      value = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+      if (value == flag "=" expected || (previous == flag && value == expected)) found = 1
+      previous = value
+    }
+    END { exit !found }
+  ' <<<"$manifest"; then
+    printf 'audit diagnostic: static-manifest %s=expected\n' "$flag"
+  else
+    printf 'audit diagnostic: static-manifest %s=missing-or-mismatched\n' "$flag"
+  fi
+}
+report_manifest_flag audit-policy-file /etc/kubernetes/policies/audit-policy.yaml
+report_manifest_flag audit-log-path /var/log/kubernetes/audit/audit.log
+
+report_check() {
+  local name="$1"; shift
+  if "$@"; then printf 'audit diagnostic: %s=accessible\n' "$name"; else printf 'audit diagnostic: %s=unavailable\n' "$name"; fi
+}
+container_ids="$(docker exec "$node" crictl ps --name kube-apiserver -q)"
+if [[ "$(wc -w <<<"$container_ids")" -eq 1 ]]; then
+  container_id="${container_ids%%$'\n'*}"
+  mapfile -t process_args < <(docker exec "$node" crictl inspect "$container_id" | jq -r '.info.runtimeSpec.process.args[]?')
+  report_process_flag() {
+    local flag="$1" expected="$2" found=false
+    for ((i = 0; i < ${#process_args[@]}; i++)); do
+      if [[ "${process_args[i]}" == "--$flag=$expected" ]] || \
+        [[ "${process_args[i]}" == "--$flag" && "${process_args[i+1]:-}" == "$expected" ]]; then
+        found=true
+      fi
+    done
+    printf 'audit diagnostic: running-process %s=%s\n' "$flag" "$([[ "$found" == true ]] && echo expected || echo missing-or-mismatched)"
+  }
+  report_process_flag audit-policy-file /etc/kubernetes/policies/audit-policy.yaml
+  report_process_flag audit-log-path /var/log/kubernetes/audit/audit.log
+  report_check api-server-policy-readable docker exec "$node" crictl exec "$container_id" test -r /etc/kubernetes/policies/audit-policy.yaml
+  report_check api-server-audit-directory-writable docker exec "$node" crictl exec "$container_id" test -w /var/log/kubernetes/audit
+else
+  echo "audit diagnostic: running-process kube-apiserver-container-count=$(wc -w <<<"$container_ids")"
+fi
+
+report_check policy-file docker exec "$node" test -r /etc/kubernetes/policies/audit-policy.yaml
+report_check audit-log-directory-writable docker exec "$node" test -w /var/log/kubernetes/audit
+mounts="$(docker inspect "$node" --format '{{json .Mounts}}')"
+for mount in /etc/kubernetes/policies/audit-policy.yaml /var/log/kubernetes/audit; do
+  if jq -e --arg mount "$mount" 'any(.[]; .Destination == $mount)' <<<"$mounts" >/dev/null; then
+    printf 'audit diagnostic: kind-node-mount %s=present\n' "$mount"
+  else
+    printf 'audit diagnostic: kind-node-mount %s=missing\n' "$mount"
+  fi
+done
+for mount in /etc/kubernetes/policies/audit-policy.yaml /var/log/kubernetes/audit; do
+  if grep -Fq "mountPath: $mount" <<<"$manifest"; then
+    printf 'audit diagnostic: api-server-volume-mount %s=present\n' "$mount"
+  else
+    printf 'audit diagnostic: api-server-volume-mount %s=missing\n' "$mount"
+  fi
+done
+
 cd backend
 timeout 180s go run ./cmd/kubeauditproof -namespace "$namespace" -name "$name" -verb patch -principal "$principal" | tee "$ARTIFACT_DIR/kind-audit-proof.json"
 jq -e --arg namespace "$namespace" --arg name "$name" --arg principal "$principal" --arg run "$GITHUB_RUN_ID" '

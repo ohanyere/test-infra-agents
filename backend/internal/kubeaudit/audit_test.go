@@ -178,6 +178,25 @@ spec:
 	}
 }
 
+func TestValidateAuditArgumentsReportsBothMissingFlags(t *testing.T) {
+	manifest := []byte(`apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kube-apiserver
+      command: [kube-apiserver]
+`)
+	err := validateAuditArguments(manifest)
+	if err == nil {
+		t.Fatal("manifest without audit flags accepted")
+	}
+	for _, flag := range []string{"audit-policy-file missing", "audit-log-path missing"} {
+		if !strings.Contains(err.Error(), flag) {
+			t.Errorf("expected diagnostic for %q, got %v", flag, err)
+		}
+	}
+}
+
 func TestAuditArgumentDiagnosticsRejectDuplicateFlags(t *testing.T) {
 	err := validateAuditArgumentValues([]string{
 		"kube-apiserver",
