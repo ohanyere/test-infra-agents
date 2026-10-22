@@ -153,7 +153,7 @@ jq -e --arg namespace "$namespace" --arg name "$name" --arg principal "$principa
   .evidence.kubernetes_audit.response_code >= 200 and
   .evidence.kubernetes_audit.response_code < 300
 ' "$ARTIFACT_DIR/kind-audit-proof.json" >/dev/null
-( cd backend && go run ./cmd/operationproof -phase finish -fixture "$proof_fixture" -event "$ARTIFACT_DIR/kind-audit-proof.json" ) > "$ARTIFACT_DIR/operation-proof.json"
+go run ./cmd/operationproof -phase finish -fixture "$proof_fixture" -event "$ARTIFACT_DIR/kind-audit-proof.json" > "$ARTIFACT_DIR/operation-proof.json"
 jq -e --arg namespace "$namespace" --arg name "$name" --slurpfile audit "$ARTIFACT_DIR/kind-audit-proof.json" '
   .fixture_kind == "runner_kind_audit" and .source_classification == "INSUFFICIENT_PROVENANCE" and
   .audit_origin_status == "unverified" and .namespace == $namespace and .resource_name == $name and
