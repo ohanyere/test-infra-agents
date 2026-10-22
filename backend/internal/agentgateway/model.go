@@ -33,21 +33,22 @@ type AgentTask struct {
 	Message string `json:"message"`
 }
 type WorkloadObservation struct {
-	Kind              string `json:"kind"`
-	Name              string `json:"name"`
-	Namespace         string `json:"namespace"`
-	ReadyReplicas     int32  `json:"ready_replicas"`
-	DesiredReplicas   int32  `json:"desired_replicas"`
-	AvailableReplicas int32  `json:"available_replicas"`
-	UpdatedReplicas   int32  `json:"updated_replicas"`
-	CPURequest        string `json:"cpu_request,omitempty"`
-	CPULimit          string `json:"cpu_limit,omitempty"`
-	MemoryRequest     string `json:"memory_request,omitempty"`
-	MemoryLimit       string `json:"memory_limit,omitempty"`
-	Image             string `json:"image,omitempty"`
-	UID               string `json:"uid,omitempty"`
-	ResourceVersion   string `json:"resource_version,omitempty"`
-	Generation        int64  `json:"generation,omitempty"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	ReadyReplicas      int32  `json:"ready_replicas"`
+	DesiredReplicas    int32  `json:"desired_replicas"`
+	AvailableReplicas  int32  `json:"available_replicas"`
+	UpdatedReplicas    int32  `json:"updated_replicas"`
+	CPURequest         string `json:"cpu_request,omitempty"`
+	CPULimit           string `json:"cpu_limit,omitempty"`
+	MemoryRequest      string `json:"memory_request,omitempty"`
+	MemoryLimit        string `json:"memory_limit,omitempty"`
+	Image              string `json:"image,omitempty"`
+	UID                string `json:"uid,omitempty"`
+	ResourceVersion    string `json:"resource_version,omitempty"`
+	Generation         int64  `json:"generation,omitempty"`
+	ObservedGeneration int64  `json:"observed_generation,omitempty"`
 }
 type AutoscalerObservation struct {
 	Name            string `json:"name"`

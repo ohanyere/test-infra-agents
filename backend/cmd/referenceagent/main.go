@@ -112,8 +112,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, ReasoningSummary: "completed through evaluation-scoped MCP tools", Actions: []agentgateway.ProposedAction{}})
 		return
 	}
+	decision, err := consultGuidance(r.Context(), request, decide(request))
+	if err != nil {
+		http.Error(w, "guidance preflight unavailable", http.StatusBadGateway)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(decide(request))
+	_ = json.NewEncoder(w).Encode(decision)
 }
 
 type grantTransport struct {

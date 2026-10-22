@@ -1,0 +1,6 @@
+DROP TABLE customer_audit_reconciliation_events;
+DROP TABLE customer_audit_reconciliation_cases;
+DROP TABLE customer_kubernetes_audit_records;
+DROP TABLE customer_audit_source_registrations;
+DROP FUNCTION prevent_customer_kubernetes_audit_record_change();
+DROP FUNCTION prevent_customer_audit_truncate();

@@ -140,6 +140,16 @@ func (s *Service) SubmitActionClaim(ctx context.Context, p auth.Principal, works
 	if err != nil {
 		return ActionClaim{}, mapError(err)
 	}
+	var caseID string
+	err = tx.QueryRow(ctx, `INSERT INTO customer_audit_reconciliation_cases(workspace_id,environment_id,session_id,claim_id,state,deadline_at,next_attempt_at)
+        VALUES($1,$2,$3,$4,'expected',$5,$5) RETURNING id`, derived.WorkspaceID, derived.EnvironmentID, derived.SessionID, derived.ClaimID, databaseNow.Add(5*time.Minute)).Scan(&caseID)
+	if err != nil {
+		return ActionClaim{}, mapError(err)
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO customer_audit_reconciliation_events(case_id,revision,state,result,reason)
+        VALUES($1,1,'expected','none','Customer action claim awaits independent audit evidence')`, caseID); err != nil {
+		return ActionClaim{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return ActionClaim{}, err
 	}
@@ -219,14 +229,20 @@ func (s *Service) Register(ctx context.Context, p auth.Principal, workspaceID st
 	defer tx.Rollback(ctx)
 	var out Environment
 	err = tx.QueryRow(ctx, `INSERT INTO customer_kubernetes_environments(workspace_id,name,cluster_identifier,namespaces,resource_kinds,environment_tier,created_by)
-		VALUES($1,$2,$3,$4,ARRAY['Deployment','Pod']::TEXT[],$5,$6)
-		RETURNING id,workspace_id,name,cluster_identifier,namespaces,resource_kinds,environment_tier,connection_status,revoked_at,created_at,updated_at`, workspaceID, input.Name, input.ClusterIdentifier, input.Namespaces, input.Tier, p.UserID).
+		VALUES($1,$2,$3,$4,$5,$6,$7)
+		RETURNING id,workspace_id,name,cluster_identifier,namespaces,resource_kinds,environment_tier,connection_status,revoked_at,created_at,updated_at`, workspaceID, input.Name, input.ClusterIdentifier, input.Namespaces, input.ResourceKinds, input.Tier, p.UserID).
 		Scan(&out.ID, &out.WorkspaceID, &out.Name, &out.ClusterIdentifier, &out.Namespaces, &out.ResourceKinds, &out.Tier, &out.ConnectionStatus, &out.RevokedAt, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		return RegisteredEnvironment{}, mapError(err)
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO customer_kubernetes_collectors(environment_id,credential_hash) VALUES($1,$2)`, out.ID, hash); err != nil {
 		return RegisteredEnvironment{}, mapError(err)
+	}
+	if input.AllowForwardedAudit {
+		if _, err = tx.Exec(ctx, `INSERT INTO customer_audit_source_registrations(environment_id,workspace_id,source_kind,cluster_binding_status)
+            VALUES($1,$2,'collector_forwarded_audit_unverified','registered_unverified')`, out.ID, workspaceID); err != nil {
+			return RegisteredEnvironment{}, mapError(err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return RegisteredEnvironment{}, err

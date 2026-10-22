@@ -131,6 +131,7 @@ func TestParseIgnoresNonResponseStageAndRejectsDuplicateStage(t *testing.T) {
 func TestParsePreservesFailedResponsesAndMissingPrincipal(t *testing.T) {
 	failed := strings.Replace(validEvent, `"code":200`, `"code":403`, 1)
 	noUser := strings.Replace(validEvent, `"user":{"username":"kubernetes-admin"},`, `"user":{},`, 1)
+	noUser = strings.Replace(noUser, `"auditID":"audit-1"`, `"auditID":"audit-2"`, 1)
 	events, err := Parse(strings.NewReader(failed + "\n" + noUser))
 	if err != nil || len(events) != 2 {
 		t.Fatalf("events=%+v err=%v", events, err)

@@ -19,8 +19,8 @@ for up in "$migration_dir"/*.up.sql; do
   expected=$((expected + 1))
 done
 latest=$((expected - 1))
-if [[ "$latest" -ne 28 ]]; then
-  echo "migration latest version is $latest, expected 28; update the release gate deliberately" >&2
+if [[ "$latest" -ne 39 ]]; then
+  echo "migration latest version is $latest, expected 39; update the release gate deliberately" >&2
   exit 1
 fi
 down_count=$(find "$migration_dir" -maxdepth 1 -name '*.down.sql' | wc -l)

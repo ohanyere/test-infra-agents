@@ -20,6 +20,10 @@ type CustomerCollectorService interface {
 	Revoke(ctx context.Context, p auth.Principal, workspaceID, environmentID string) error
 	StartSession(ctx context.Context, p auth.Principal, workspaceID, environmentID string, input customercollector.CreateSessionInput) (customercollector.Session, error)
 	Ingest(ctx context.Context, sessionID, token string, input customercollector.EvidenceBatch) (customercollector.IngestResult, error)
+	IngestForwardedAudit(ctx context.Context, sessionID, token string, input customercollector.ForwardedAuditInput) (customercollector.ForwardedAuditResult, error)
+	IngestMetricCandidate(ctx context.Context, sessionID, token string, input customercollector.MetricCandidateInput) (customercollector.MetricCandidateResult, error)
+	ListForwardedAudits(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string) ([]customercollector.ForwardedAuditResult, error)
+	ListAuditReconciliation(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string) ([]customercollector.ReconciliationRevision, error)
 	SubmitActionClaim(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string, input customercollector.SubmitActionClaimInput) (customercollector.ActionClaim, error)
 	ListActionClaims(ctx context.Context, p auth.Principal, workspaceID, environmentID, sessionID string) ([]customercollector.ActionClaim, error)
 }
@@ -127,6 +131,94 @@ func (h customerCollectorHandlers) ingest(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusAccepted, out)
+}
+func (h customerCollectorHandlers) ingestForwardedAudit(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	token, ok := customercollector.ParseBearer(r.Header.Get("Authorization"))
+	if !ok {
+		writeAPIError(w, http.StatusUnauthorized, "collector_unauthorized", "collector credential is invalid")
+		return
+	}
+	var in customercollector.ForwardedAuditInput
+	if !decodeLimited(w, r, &in, 1100<<10) {
+		return
+	}
+	out, err := h.service.IngestForwardedAudit(r.Context(), sessionID, token, in)
+	if h.handle(w, err) {
+		return
+	}
+	status := http.StatusAccepted
+	if out.Duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, out)
+}
+func (h customerCollectorHandlers) ingestMetricCandidate(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	token, ok := customercollector.ParseBearer(r.Header.Get("Authorization"))
+	if !ok {
+		writeAPIError(w, http.StatusUnauthorized, "collector_unauthorized", "collector credential is invalid")
+		return
+	}
+	var in customercollector.MetricCandidateInput
+	if !decodeLimited(w, r, &in, 16<<10) {
+		return
+	}
+	out, err := h.service.IngestMetricCandidate(r.Context(), sessionID, token, in)
+	if h.handle(w, err) {
+		return
+	}
+	status := http.StatusAccepted
+	if out.Duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, out)
+}
+func (h customerCollectorHandlers) listForwardedAudits(w http.ResponseWriter, r *http.Request) {
+	wid, ok := pathUUID(w, r, "workspaceID")
+	if !ok {
+		return
+	}
+	eid, ok := pathUUID(w, r, "environmentID")
+	if !ok {
+		return
+	}
+	sid, ok := pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	p, _ := auth.PrincipalFromContext(r.Context())
+	out, err := h.service.ListForwardedAudits(r.Context(), p, wid, eid, sid)
+	if h.handle(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse[customercollector.ForwardedAuditResult]{Items: out, Pagination: paginationResponse{Limit: len(out)}})
+}
+func (h customerCollectorHandlers) listAuditReconciliation(w http.ResponseWriter, r *http.Request) {
+	wid, ok := pathUUID(w, r, "workspaceID")
+	if !ok {
+		return
+	}
+	eid, ok := pathUUID(w, r, "environmentID")
+	if !ok {
+		return
+	}
+	sid, ok := pathUUID(w, r, "sessionID")
+	if !ok {
+		return
+	}
+	p, _ := auth.PrincipalFromContext(r.Context())
+	out, err := h.service.ListAuditReconciliation(r.Context(), p, wid, eid, sid)
+	if h.handle(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse[customercollector.ReconciliationRevision]{Items: out, Pagination: paginationResponse{Limit: len(out)}})
 }
 func (h customerCollectorHandlers) submitActionClaim(w http.ResponseWriter, r *http.Request) {
 	wid, ok := pathUUID(w, r, "workspaceID")

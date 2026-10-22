@@ -41,3 +41,9 @@ func (s *Service) Get(ctx context.Context, p auth.Principal, workspaceID, runID 
 	}
 	return s.repo.Get(ctx, s.pool, workspaceID, runID)
 }
+
+// GetInternal is for server-owned background processing after the caller has
+// resolved the workspace and run from trusted database records.
+func (s *Service) GetInternal(ctx context.Context, workspaceID, runID string) (Result, error) {
+	return s.repo.Get(ctx, s.pool, workspaceID, runID)
+}

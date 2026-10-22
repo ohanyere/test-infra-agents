@@ -480,6 +480,12 @@ jobs:
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
 
+      - name: Test Kubernetes audit adapter and runner repository
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
+        run: go test -p 1 -count=1 ./internal/customeractionevidence ./internal/kubeaudit
+
       - name: Prove runner-bound Kubernetes API audit acquisition
         run: bash backend/e2e/prove-kind-audit-source.sh
 
@@ -1087,6 +1093,8 @@ jobs:
             test "$attempt" -lt 30
             sleep 1
           done
+          OPERATION_PROOF_FILE="$ARTIFACT_DIR/operation-proof.json" OPERATION_PROOF_API_URL=http://127.0.0.1:18080 OPERATION_PROOF_ARTIFACT_DIR="$ARTIFACT_DIR" \
+            bash backend/e2e/assert-operation-explanation-api.sh
           jq -nc --arg email stage17@evalplane.local --arg password "$E2E_AUTH_PASSWORD" '{email:$email,password:$password}' |
             curl --fail --silent --show-error --cookie-jar /tmp/verification-e2e-cookies.txt --header 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18080/v1/auth/login >/dev/null
           workspace_id="$(jq -r .workspace_id "$ARTIFACT_DIR/verification-result.json")"

@@ -8,7 +8,7 @@ import (
 )
 
 func TestCallerSuppliedAuditJSONCannotCreateRunnerBoundSource(t *testing.T) {
-	data := `{"apiVersion":"audit.k8s.io/v1","kind":"Event","auditID":"fabricated","stage":"ResponseComplete","verb":"patch","requestReceivedTimestamp":"2026-10-17T10:00:00Z","stageTimestamp":"2026-10-17T10:00:01Z","user":{"username":"kubernetes-admin"},"objectRef":{"apiGroup":"apps","resource":"deployments","namespace":"proof","name":"web"},"responseStatus":{"code":200}}`
+	data := `{"apiVersion":"audit.k8s.io/v1","kind":"Event","auditID":"fabricated","stage":"ResponseComplete","verb":"patch","requestReceivedTimestamp":"2026-10-17T10:00:00Z","stageTimestamp":"2026-10-17T10:00:01Z","user":{"username":"kubernetes-admin"},"objectRef":{"apiGroup":"apps","apiVersion":"v1","resource":"deployments","namespace":"proof","name":"web"},"responseStatus":{"code":200}}`
 	events, err := kubeaudit.Parse(strings.NewReader(data))
 	if err != nil || len(events) != 1 {
 		t.Fatalf("parse events=%+v err=%v", events, err)

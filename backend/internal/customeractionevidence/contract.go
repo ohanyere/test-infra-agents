@@ -83,6 +83,9 @@ func Build(scope Scope, candidate Candidate, assessment Assessment, ingestedAt t
 	candidate.MissingFields = normalizedList(candidate.MissingFields)
 
 	actor := ActorIdentity{Identity: candidate.ActorAssertion, Status: "asserted"}
+	if candidate.KubernetesAudit != nil && candidate.ActorAssertion == "" {
+		actor.Status = assessment.ActorStatus
+	}
 	if assessment.ActorStatus == "verified" && assessment.ActorIdentity != "" {
 		actor = ActorIdentity{Identity: assessment.ActorIdentity, Authority: assessment.ActorAuthority, Status: "verified"}
 	}
@@ -118,14 +121,24 @@ func Build(scope Scope, candidate Candidate, assessment Assessment, ingestedAt t
 		CorrelationIDs: candidate.CorrelationIDs, EvidenceRefs: candidate.EvidenceRefs,
 		ProvenanceStatus: assessment.ProvenanceStatus, CausalityStatus: assessment.CausalityStatus,
 		ProvenanceConflicts: assessment.Conflicts, Trust: trust, Uncertainty: uncertainty, MissingFields: missing,
+		KubernetesAudit: cloneKubernetesAuditMetadata(candidate.KubernetesAudit),
 	}
 	out.Integrity = Integrity{Algorithm: "sha256", Digest: Digest(out)}
 	return out, nil
 }
 
-// BuildFromProvider is the only path that produces evidence eligible for Store.
-// Provider implementations are trusted server code and must perform actual
-// source authentication and authorization; callers cannot supply Assessment.
+func cloneKubernetesAuditMetadata(metadata *KubernetesAuditMetadata) *KubernetesAuditMetadata {
+	if metadata == nil {
+		return nil
+	}
+	copy := *metadata
+	copy.ProvenanceLimitations = append([]string(nil), metadata.ProvenanceLimitations...)
+	return &copy
+}
+
+// BuildFromProvider seals evidence from trusted server code. Customer Store
+// separately requires verified source authentication and authorization; runner
+// test evidence uses its own restricted repository path.
 func BuildFromProvider(ctx context.Context, provider Provider, scope Scope, candidate Candidate, ingestedAt time.Time) (Evidence, error) {
 	if provider == nil || strings.TrimSpace(provider.ID()) == "" || strings.TrimSpace(candidate.SourceID) != provider.ID() {
 		return Evidence{}, invalid("candidate source does not match its trusted provider")

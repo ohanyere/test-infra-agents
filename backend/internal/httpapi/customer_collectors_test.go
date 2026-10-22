@@ -40,6 +40,20 @@ func (f *collectorHandlerFake) Ingest(_ context.Context, _ string, token string,
 	f.called = token != ""
 	return customercollector.IngestResult{Accepted: true}, nil
 }
+func (f *collectorHandlerFake) IngestForwardedAudit(_ context.Context, _ string, token string, _ customercollector.ForwardedAuditInput) (customercollector.ForwardedAuditResult, error) {
+	f.called = token != ""
+	return customercollector.ForwardedAuditResult{TrustClassification: customercollector.AuditCandidateTrust}, nil
+}
+func (f *collectorHandlerFake) IngestMetricCandidate(_ context.Context, _ string, token string, _ customercollector.MetricCandidateInput) (customercollector.MetricCandidateResult, error) {
+	f.called = token != ""
+	return customercollector.MetricCandidateResult{Trust: customercollector.MetricCandidateTrust}, nil
+}
+func (f *collectorHandlerFake) ListForwardedAudits(context.Context, auth.Principal, string, string, string) ([]customercollector.ForwardedAuditResult, error) {
+	return nil, nil
+}
+func (f *collectorHandlerFake) ListAuditReconciliation(context.Context, auth.Principal, string, string, string) ([]customercollector.ReconciliationRevision, error) {
+	return nil, nil
+}
 func (f *collectorHandlerFake) SubmitActionClaim(_ context.Context, p auth.Principal, workspaceID, environmentID, sessionID string, in customercollector.SubmitActionClaimInput) (customercollector.ActionClaim, error) {
 	f.claimCalled = true
 	f.claimInput = in
@@ -111,5 +125,22 @@ func TestCollectorIngestionRequiresBearerCredential(t *testing.T) {
 			}
 			fake.called = false
 		})
+	}
+}
+
+func TestForwardedAuditEndpointKeepsInsufficientProvenance(t *testing.T) {
+	fake := &collectorHandlerFake{}
+	handler := customerCollectorHandlers{service: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	route := chi.NewRouteContext()
+	route.URLParams.Add("sessionID", "11111111-1111-4111-8111-111111111111")
+	body := `{"claimed_cluster_identity":"registered-cluster","event":{"apiVersion":"audit.k8s.io/v1"}}`
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer rvxc_"+strings.Repeat("a", 43))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, route))
+	response := httptest.NewRecorder()
+	handler.ingestForwardedAudit(response, request)
+	if response.Code != http.StatusAccepted || !fake.called || !strings.Contains(response.Body.String(), `"trust_classification":"INSUFFICIENT_PROVENANCE"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

@@ -1,0 +1,5 @@
+DROP TABLE runner_kubernetes_audit_evidence;
+DROP FUNCTION prevent_runner_kubernetes_audit_evidence_truncate();
+DROP FUNCTION prevent_runner_kubernetes_audit_evidence_update();
+DROP TABLE runner_audit_test_sessions;
+DROP TABLE runner_audit_test_registrations;

@@ -133,7 +133,9 @@ func TestProviderSealRejectsMutationsEvenAfterPublicDigestRecalculation(t *testi
 		t.Run(name, func(t *testing.T) {
 			evidence := build()
 			mutate(&evidence)
-			evidence.Integrity.Digest = Digest(evidence)
+			if name != "public digest" {
+				evidence.Integrity.Digest = Digest(evidence)
+			}
 			if _, err := Store(context.Background(), nil, evidence); err != ErrUntrustedInput {
 				t.Fatalf("mutated provider evidence reached persistence gate: %v", err)
 			}

@@ -10,33 +10,36 @@ import (
 )
 
 type routerConfig struct {
-	identity           IdentityService
-	auth               AuthService
-	authorization      WorkspaceAuthorization
-	cookieSecure       bool
-	sessionTTL         time.Duration
-	appOrigin          string
-	agents             AgentService
-	agentConnections   AgentConnectionService
-	scenarios          ScenarioService
-	scenarioAuthoring  ScenarioAuthoringService
-	incidentSources    IncidentSourceService
-	evaluationBatches  EvaluationBatchService
-	evaluationSuites   EvaluationSuiteService
-	agentRegressions   AgentRegressionService
-	qualification      QualificationService
-	qualificationPlans QualificationPlanService
-	coverage           CoverageService
-	reliability        ReliabilityService
-	failureTaxonomy    FailureTaxonomyService
-	evidence           EvidenceService
-	execution          ExecutionService
-	trajectory         TrajectoryService
-	certification      CertificationService
-	environment        EnvironmentService
-	billing            BillingService
-	verification       VerificationService
-	customerCollector  CustomerCollectorService
+	identity            IdentityService
+	auth                AuthService
+	authorization       WorkspaceAuthorization
+	cookieSecure        bool
+	sessionTTL          time.Duration
+	appOrigin           string
+	agents              AgentService
+	agentConnections    AgentConnectionService
+	scenarios           ScenarioService
+	scenarioAuthoring   ScenarioAuthoringService
+	incidentSources     IncidentSourceService
+	evaluationBatches   EvaluationBatchService
+	evaluationSuites    EvaluationSuiteService
+	agentRegressions    AgentRegressionService
+	qualification       QualificationService
+	qualificationPlans  QualificationPlanService
+	coverage            CoverageService
+	reliability         ReliabilityService
+	failureTaxonomy     FailureTaxonomyService
+	evidence            EvidenceService
+	execution           ExecutionService
+	trajectory          TrajectoryService
+	certification       CertificationService
+	environment         EnvironmentService
+	billing             BillingService
+	verification        VerificationService
+	customerCollector   CustomerCollectorService
+	customerAttribution customerAttributionService
+	operational         OperationalService
+	memory              OperationalMemoryService
 }
 type RouterOption func(*routerConfig)
 
@@ -106,6 +109,15 @@ func WithVerificationService(service VerificationService) RouterOption {
 func WithCustomerCollectorService(service CustomerCollectorService) RouterOption {
 	return func(config *routerConfig) { config.customerCollector = service }
 }
+func WithCustomerAttributionService(service customerAttributionService) RouterOption {
+	return func(config *routerConfig) { config.customerAttribution = service }
+}
+func WithOperationalService(service OperationalService) RouterOption {
+	return func(config *routerConfig) { config.operational = service }
+}
+func WithOperationalMemoryService(service OperationalMemoryService) RouterOption {
+	return func(config *routerConfig) { config.memory = service }
+}
 func WithAuthentication(service AuthService, authorization WorkspaceAuthorization, cookieSecure bool, sessionTTL time.Duration, appOrigin string) RouterOption {
 	return func(config *routerConfig) {
 		config.auth = service
@@ -146,6 +158,9 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 				v1.Get("/agents/{slug}", agentAPI.getPublic)
 			}
 			v1.Get("/agent-capabilities", (agentConnectionHandlers{}).catalog)
+			if config.memory != nil {
+				v1.Post("/agent-guidance", (memoryHandlers{service: config.memory, logger: logger}).agentGuidance)
+			}
 			if config.scenarios != nil {
 				scenarioAPI := scenarioHandlers{service: config.scenarios, logger: logger}
 				v1.Get("/scenarios", scenarioAPI.listPublic)
@@ -159,6 +174,14 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 			}
 			if config.customerCollector != nil {
 				v1.Post("/collector/observation-sessions/{sessionID}/evidence", customerCollectorHandlers{service: config.customerCollector, logger: logger}.ingest)
+				v1.Post("/collector/observation-sessions/{sessionID}/audit-candidates", customerCollectorHandlers{service: config.customerCollector, logger: logger}.ingestForwardedAudit)
+				v1.Post("/collector/observation-sessions/{sessionID}/metric-candidates", customerCollectorHandlers{service: config.customerCollector, logger: logger}.ingestMetricCandidate)
+			}
+			if config.customerAttribution != nil {
+				v1.Post("/execution-issuers/receipts", (customerAttributionHandlers{service: config.customerAttribution, logger: logger}).ingestGatewayReceipt)
+			}
+			if preflight, ok := config.operational.(gatewayPreflightService); ok {
+				v1.Post("/execution-issuers/preflight", (gatewayPreflightHandlers{service: preflight, operationalHandlers: operationalHandlers{logger: logger}}).preflight)
 			}
 			v1.Group(func(protected chi.Router) {
 				protected.Use(authenticationMiddleware(config.auth))
@@ -348,6 +371,12 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 				}
 				if config.customerCollector != nil {
 					collectorAPI := customerCollectorHandlers{service: config.customerCollector, logger: logger}
+					if trusted, ok := config.customerCollector.(customerTrustedSourceService); ok {
+						trustedAPI := customerTrustedSourceHandlers{service: trusted, logger: logger}
+						protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/authenticated-audit-sources", trustedAPI.registerAudit)
+						protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/authenticated-audit-sources", trustedAPI.listAudit)
+						protected.Delete("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/authenticated-audit-sources/{sourceID}", trustedAPI.revokeAudit)
+					}
 					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments", collectorAPI.register)
 					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments", collectorAPI.list)
 					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/rotate", collectorAPI.rotate)
@@ -355,6 +384,70 @@ func NewRouter(database DatabasePinger, logger *slog.Logger, options ...RouterOp
 					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions", collectorAPI.startSession)
 					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/action-claims", collectorAPI.submitActionClaim)
 					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/action-claims", collectorAPI.listActionClaims)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/audit-candidates", collectorAPI.listForwardedAudits)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/reconciliations", collectorAPI.listAuditReconciliation)
+				}
+				if config.customerAttribution != nil {
+					attributionAPI := customerAttributionHandlers{service: config.customerAttribution, logger: logger}
+					base := "/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}"
+					protected.Post(base+"/execution-issuers", attributionAPI.registerIssuer)
+					protected.Get(base+"/execution-issuers", attributionAPI.listIssuers)
+					protected.Delete(base+"/execution-issuers/{issuerID}", attributionAPI.revokeIssuer)
+					protected.Post(base+"/execution-receipts", attributionAPI.ingestReceipt)
+					protected.Get(base+"/observation-sessions/{sessionID}/attribution-decisions", attributionAPI.listDecisions)
+				}
+				if config.memory != nil {
+					memoryAPI := memoryHandlers{service: config.memory, logger: logger}
+					protected.Get("/workspaces/{workspaceID}/guidance-experiments", memoryAPI.experiments)
+					protected.Post("/workspaces/{workspaceID}/guidance-experiments", memoryAPI.recordExperiment)
+					base := "/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}"
+					protected.Get(base+"/operational-episodes", memoryAPI.episodes)
+					protected.Get(base+"/operational-episodes/{episodeID}/relationships", memoryAPI.relationships)
+					protected.Post(base+"/observation-sessions/{sessionID}/operational-episodes/materialize", memoryAPI.materialize)
+					protected.Post(base+"/operational-episodes/{episodeID}/decisions", memoryAPI.episodeDecision)
+					protected.Get(base+"/operational-lessons", memoryAPI.lessons)
+					protected.Post(base+"/operational-lessons/{lessonID}/decisions", memoryAPI.lessonDecision)
+					protected.Get(base+"/operational-lessons/{lessonID}/decisions", memoryAPI.lessonDecisions)
+					protected.Post(base+"/operational-lessons/{lessonID}/supersede", memoryAPI.supersedeLesson)
+					protected.Post(base+"/guidance-credentials", memoryAPI.issueCredential)
+					protected.Get(base+"/guidance-credentials", memoryAPI.credentials)
+					protected.Post(base+"/guidance-credentials/{credentialID}/revoke", memoryAPI.revokeCredential)
+					protected.Post(base+"/guidance-preview", memoryAPI.preview)
+					protected.Get(base+"/guidance-history", memoryAPI.history)
+					protected.Get(base+"/guidance-operation-links", memoryAPI.guidanceLinks)
+				}
+				if config.operational != nil {
+					operationalAPI := operationalHandlers{service: config.operational, logger: logger}
+					base := "/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}"
+					if monitoring, ok := config.operational.(monitoringService); ok {
+						api := monitoringHandlers{service: monitoring, operationalHandlers: operationalAPI}
+						protected.Post(base+"/observation-sessions/{sessionID}/monitoring", api.configure)
+						protected.Get(base+"/observation-sessions/{sessionID}/monitoring", api.get)
+						protected.Post(base+"/observation-sessions/{sessionID}/monitoring/actions", api.action)
+					}
+					if direct, ok := config.operational.(directSourceService); ok {
+						directAPI := directSourceHandlers{service: direct, operationalHandlers: operationalAPI}
+						protected.Post(base+"/direct-outcome-sources", directAPI.register)
+						protected.Get(base+"/direct-outcome-sources", directAPI.list)
+						protected.Delete(base+"/direct-outcome-sources/{sourceID}", directAPI.revoke)
+						protected.Get(base+"/observation-sessions/{sessionID}/direct-outcome-observations", directAPI.observations)
+					}
+					if preflight, ok := config.operational.(gatewayPreflightService); ok {
+						protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/approvals/{approvalID}/revoke", (gatewayPreflightHandlers{service: preflight, operationalHandlers: operationalAPI}).revokeApproval)
+					}
+					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/operational-contracts", operationalAPI.saveContract)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/operational-contracts", operationalAPI.listContracts)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/assurance-status", operationalAPI.status)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/assurance-notifications", operationalAPI.notifications)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions", operationalAPI.sessions)
+					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/approvals", operationalAPI.approval)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/approvals", operationalAPI.approvals)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/findings", operationalAPI.findings)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/stability-assessments", operationalAPI.stability)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/evidence-references", operationalAPI.evidenceReferences)
+					protected.Post("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/operational-assessments", operationalAPI.assess)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/operational-assessments", operationalAPI.reports)
+					protected.Get("/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/evidence-detail", operationalAPI.evidenceDetail)
 				}
 			})
 		})

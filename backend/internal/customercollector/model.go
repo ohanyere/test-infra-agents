@@ -55,10 +55,12 @@ type Session struct {
 }
 
 type CreateEnvironmentInput struct {
-	Name              string   `json:"name"`
-	ClusterIdentifier string   `json:"cluster_identifier"`
-	Namespaces        []string `json:"namespaces"`
-	Tier              string   `json:"environment_tier"`
+	AllowForwardedAudit bool     `json:"allow_forwarded_audit"`
+	ResourceKinds       []string `json:"resource_kinds,omitempty"`
+	Name                string   `json:"name"`
+	ClusterIdentifier   string   `json:"cluster_identifier"`
+	Namespaces          []string `json:"namespaces"`
+	Tier                string   `json:"environment_tier"`
 }
 
 type CreateSessionInput struct {
@@ -204,6 +206,17 @@ func normalizeEnvironment(in CreateEnvironmentInput) (CreateEnvironmentInput, er
 		}
 		seen[namespace] = true
 		in.Namespaces[i] = namespace
+	}
+	if len(in.ResourceKinds) == 0 {
+		in.ResourceKinds = []string{"Deployment", "Pod"}
+	}
+	allowedKinds := map[string]bool{"Deployment": true, "Pod": true, "Service": true, "Ingress": true, "NetworkPolicy": true, "Namespace": true}
+	seenKinds := map[string]bool{}
+	for _, kind := range in.ResourceKinds {
+		if !allowedKinds[kind] || seenKinds[kind] {
+			return in, fmt.Errorf("%w: unsupported or repeated resource kind", identity.ErrValidation)
+		}
+		seenKinds[kind] = true
 	}
 	return in, nil
 }

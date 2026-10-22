@@ -29,7 +29,8 @@ func Store(ctx context.Context, tx pgx.Tx, e Evidence) (PersistResult, error) {
 	if err := Validate(e); err != nil {
 		return PersistResult{}, err
 	}
-	if e.Kind == KindAgentDeclaredAction || e.Trust == TrustUnverifiedAgentClaim {
+	if e.Kind == KindAgentDeclaredAction || e.Trust == TrustUnverifiedAgentClaim ||
+		(e.KubernetesAudit != nil && e.KubernetesAudit.VerificationState == "runner_bound_test_source") {
 		return PersistResult{}, ErrUntrustedInput
 	}
 	if e.Source.AuthenticationStatus != "verified" || e.Source.AuthorizationStatus != "authorized" {

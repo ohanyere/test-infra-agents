@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS customer_gateway_preflight_immutable ON customer_gateway_preflight_decisions;
+DROP TABLE IF EXISTS customer_gateway_preflight_decisions;
+ALTER TABLE customer_execution_issuers DROP CONSTRAINT IF EXISTS customer_execution_issuers_preflight_scope_key;
+DROP TRIGGER IF EXISTS operational_approval_revocations_immutable ON operational_approval_revocations;
+DROP TABLE IF EXISTS operational_approval_revocations;
+DROP TRIGGER IF EXISTS customer_direct_outcome_immutable ON customer_direct_outcome_observations;
+DROP TABLE IF EXISTS customer_direct_outcome_observations;
+DROP TABLE IF EXISTS customer_outcome_sources;
+ALTER TABLE customer_kubernetes_environments DROP CONSTRAINT customer_kubernetes_environments_resource_kinds_check;
+ALTER TABLE customer_kubernetes_environments ADD CONSTRAINT customer_kubernetes_environments_resource_kinds_check CHECK (cardinality(resource_kinds) BETWEEN 1 AND 2);

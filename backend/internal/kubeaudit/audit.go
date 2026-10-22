@@ -186,7 +186,7 @@ func Parse(reader io.Reader) ([]Event, error) {
 		if event.Stage != "ResponseComplete" {
 			continue
 		}
-		if event.Verb == "" || event.ObjectRef.APIGroup == "" || event.ObjectRef.APIVersion == "" || event.ObjectRef.Resource == "" || event.ObjectRef.Namespace == "" || event.ObjectRef.Name == "" || event.RequestAt.IsZero() || event.StageAt.IsZero() || event.Response.Code < 100 || event.Response.Code > 599 {
+		if event.Verb == "" || event.ObjectRef.APIVersion == "" || event.ObjectRef.Resource == "" || event.ObjectRef.Name == "" || event.RequestAt.IsZero() || event.StageAt.IsZero() || event.Response.Code < 100 || event.Response.Code > 599 {
 			return nil, fmt.Errorf("audit record line %d: %w: incomplete response event", line, ErrInvalidSource)
 		}
 		if event.RequestAt.After(event.StageAt) {

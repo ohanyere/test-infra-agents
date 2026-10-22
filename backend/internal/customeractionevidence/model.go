@@ -40,21 +40,44 @@ type Target struct {
 }
 
 type Candidate struct {
-	ContractVersion string    `json:"contract_version"`
-	Kind            Kind      `json:"evidence_kind"`
-	SourceID        string    `json:"source_id"`
-	SourceIdentity  string    `json:"source_identity,omitempty"`
-	SourceEventID   string    `json:"source_event_id,omitempty"`
-	ActionType      string    `json:"action_type,omitempty"`
-	Operation       string    `json:"operation,omitempty"`
-	Target          Target    `json:"target"`
-	ActorAssertion  string    `json:"actor_assertion,omitempty"`
-	OccurredAt      time.Time `json:"occurred_at,omitempty"`
-	ObservedAt      time.Time `json:"observed_at,omitempty"`
-	CorrelationIDs  []string  `json:"correlation_ids,omitempty"`
-	EvidenceRefs    []string  `json:"evidence_references,omitempty"`
-	Uncertainty     []string  `json:"uncertainty,omitempty"`
-	MissingFields   []string  `json:"missing_fields,omitempty"`
+	ContractVersion string                   `json:"contract_version"`
+	Kind            Kind                     `json:"evidence_kind"`
+	SourceID        string                   `json:"source_id"`
+	SourceIdentity  string                   `json:"source_identity,omitempty"`
+	SourceEventID   string                   `json:"source_event_id,omitempty"`
+	ActionType      string                   `json:"action_type,omitempty"`
+	Operation       string                   `json:"operation,omitempty"`
+	Target          Target                   `json:"target"`
+	ActorAssertion  string                   `json:"actor_assertion,omitempty"`
+	OccurredAt      time.Time                `json:"occurred_at,omitempty"`
+	ObservedAt      time.Time                `json:"observed_at,omitempty"`
+	CorrelationIDs  []string                 `json:"correlation_ids,omitempty"`
+	EvidenceRefs    []string                 `json:"evidence_references,omitempty"`
+	Uncertainty     []string                 `json:"uncertainty,omitempty"`
+	MissingFields   []string                 `json:"missing_fields,omitempty"`
+	KubernetesAudit *KubernetesAuditMetadata `json:"kubernetes_audit,omitempty"`
+}
+
+type KubernetesAuditMetadata struct {
+	SourceEventDigest     string    `json:"source_event_digest"`
+	Verb                  string    `json:"verb"`
+	APIGroup              string    `json:"api_group"`
+	APIVersion            string    `json:"api_version"`
+	Resource              string    `json:"resource"`
+	AuditStage            string    `json:"audit_stage"`
+	ResponseCode          int32     `json:"response_code"`
+	RequestReceivedAt     time.Time `json:"request_received_at"`
+	StageAt               time.Time `json:"stage_at"`
+	AcquiredAt            time.Time `json:"acquired_at"`
+	ClusterIdentity       string    `json:"cluster_identity"`
+	AuditPolicyDigest     string    `json:"audit_policy_digest"`
+	SourceConfiguration   string    `json:"source_configuration"`
+	AcquisitionLocation   string    `json:"acquisition_location"`
+	AcquisitionMethod     string    `json:"acquisition_method"`
+	VerificationState     string    `json:"verification_state"`
+	ProvisioningIdentity  string    `json:"provisioning_identity"`
+	KubernetesPrincipal   string    `json:"kubernetes_principal,omitempty"`
+	ProvenanceLimitations []string  `json:"provenance_limitations"`
 }
 
 // Assessment is produced by trusted server-side provider verification, never
@@ -99,26 +122,27 @@ type Integrity struct {
 }
 
 type Evidence struct {
-	ContractVersion     string              `json:"contract_version"`
-	Kind                Kind                `json:"evidence_kind"`
-	Scope               Scope               `json:"scope"`
-	Source              SourceProvenance    `json:"source"`
-	ActionType          string              `json:"action_type,omitempty"`
-	Operation           string              `json:"operation,omitempty"`
-	Target              Target              `json:"target"`
-	Actor               ActorIdentity       `json:"actor"`
-	OccurredAt          time.Time           `json:"occurred_at,omitempty"`
-	ObservedAt          time.Time           `json:"observed_at,omitempty"`
-	IngestedAt          time.Time           `json:"ingested_at,omitempty"`
-	CorrelationIDs      []string            `json:"correlation_ids"`
-	EvidenceRefs        []string            `json:"evidence_references"`
-	ProvenanceStatus    string              `json:"provenance_verification_status"`
-	CausalityStatus     string              `json:"causality_status"`
-	ProvenanceConflicts []string            `json:"provenance_conflicts"`
-	Trust               TrustClassification `json:"trust_classification"`
-	Integrity           Integrity           `json:"integrity"`
-	Uncertainty         []string            `json:"uncertainty"`
-	MissingFields       []string            `json:"missing_fields"`
+	ContractVersion     string                   `json:"contract_version"`
+	Kind                Kind                     `json:"evidence_kind"`
+	Scope               Scope                    `json:"scope"`
+	Source              SourceProvenance         `json:"source"`
+	ActionType          string                   `json:"action_type,omitempty"`
+	Operation           string                   `json:"operation,omitempty"`
+	Target              Target                   `json:"target"`
+	Actor               ActorIdentity            `json:"actor"`
+	OccurredAt          time.Time                `json:"occurred_at,omitempty"`
+	ObservedAt          time.Time                `json:"observed_at,omitempty"`
+	IngestedAt          time.Time                `json:"ingested_at,omitempty"`
+	CorrelationIDs      []string                 `json:"correlation_ids"`
+	EvidenceRefs        []string                 `json:"evidence_references"`
+	ProvenanceStatus    string                   `json:"provenance_verification_status"`
+	CausalityStatus     string                   `json:"causality_status"`
+	ProvenanceConflicts []string                 `json:"provenance_conflicts"`
+	Trust               TrustClassification      `json:"trust_classification"`
+	Integrity           Integrity                `json:"integrity"`
+	Uncertainty         []string                 `json:"uncertainty"`
+	MissingFields       []string                 `json:"missing_fields"`
+	KubernetesAudit     *KubernetesAuditMetadata `json:"kubernetes_audit,omitempty"`
 	providerVerified    bool
 	providerSeal        [32]byte
 }
