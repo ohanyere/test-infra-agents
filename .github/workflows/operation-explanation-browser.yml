@@ -88,11 +88,9 @@ jobs:
         timeout-minutes: 3
         run: |
           set -euo pipefail
-          echo "Discovering operation-explanation tests"
           export OPERATION_PHASE_FILE="$RUNNER_TEMP/operation-playwright-discovery-phases.log"
           : > "$OPERATION_PHASE_FILE"
-          timeout 45s ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs --list | tee "$RUNNER_TEMP/operation-playwright-discovery.log"
-          grep -Fq 'Total: 2 tests in 1 file' "$RUNNER_TEMP/operation-playwright-discovery.log"
+          bash tests/diagnose-playwright-discovery.sh
           echo "Launching Chromium, creating a context, and opening a local document"
           DEBUG=pw:browser timeout --signal=TERM --kill-after=5s 30s node --input-type=module -e '
             import { chromium } from "@playwright/test";
@@ -196,7 +194,7 @@ jobs:
           path: |
             test-results/
             ${{ runner.temp }}/operation-proof.json
-            ${{ runner.temp }}/operation-playwright-discovery.log
+            ${{ runner.temp }}/playwright-discovery-diagnostics/
             ${{ runner.temp }}/operation-playwright-discovery-phases.log
             ${{ runner.temp }}/operation-playwright-phases.log
           retention-days: 7
