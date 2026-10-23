@@ -70,12 +70,32 @@ jobs:
           rm -f "$private"
 
       - name: Install frontend and pinned Playwright browser
+        timeout-minutes: 12
         run: |
-          npm ci
-          npm install --no-save --package-lock=false @playwright/test@1.51.1
-          npx playwright install --with-deps chromium
+          set -euo pipefail
+          timeout 5m npm ci
+          timeout 3m npm install --no-save --package-lock=false @playwright/test@1.51.1
+          test -x ./node_modules/.bin/playwright
+          timeout 8m ./node_modules/.bin/playwright install --with-deps chromium
+          ./node_modules/.bin/playwright --version
 
-      - name: Build and accept against running API and frontend
+      - name: Build API and frontend
+        timeout-minutes: 12
+        env:
+          APP_ORIGIN: http://127.0.0.1:3000
+          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8080
+          ENVIRONMENT: development
+          COOKIE_SECURE: "false"
+          PORT: "8080"
+        run: |
+          set -euo pipefail
+          echo "Building Go API"
+          (cd backend && timeout 8m go build -o "$RUNNER_TEMP/realverax-api" ./cmd/api)
+          echo "Building Next.js frontend"
+          timeout 8m npm run build
+
+      - name: Accept against running API and frontend
+        timeout-minutes: 10
         env:
           APP_ORIGIN: http://127.0.0.1:3000
           NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8080
@@ -87,19 +107,53 @@ jobs:
           encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
           echo "::add-mask::$encryption_key"
           export AGENT_CREDENTIAL_ENCRYPTION_KEY="$encryption_key"
-          (cd backend && go build -o "$RUNNER_TEMP/realverax-api" ./cmd/api)
-          npm run build
           "$RUNNER_TEMP/realverax-api" > "$RUNNER_TEMP/operation-api.log" 2>&1 &
           api_pid=$!
           npm run start -- --hostname 127.0.0.1 --port 3000 > "$RUNNER_TEMP/operation-frontend.log" 2>&1 &
           frontend_pid=$!
-          trap 'kill "$frontend_pid" "$api_pid" 2>/dev/null || true' EXIT
-          for attempt in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:8080/readyz >/dev/null && curl --fail --silent http://127.0.0.1:3000/login >/dev/null; then break; fi
-            test "$attempt" -lt 60
-            sleep 1
-          done
-          npx playwright test --config=tests/playwright.config.mjs
+          diagnostics() {
+            echo "API process: $(ps -p "$api_pid" -o pid=,stat=,comm= || true)"
+            echo "Frontend process: $(ps -p "$frontend_pid" -o pid=,stat=,comm= || true)"
+            echo "API log (last 80 lines):"
+            tail -n 80 "$RUNNER_TEMP/operation-api.log" | sed -E 's#postgres(ql)?://[^@[:space:]]+@#postgres://***@#g' || true
+            echo "Frontend log (last 80 lines):"
+            tail -n 80 "$RUNNER_TEMP/operation-frontend.log" || true
+          }
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then diagnostics; fi
+            kill "$frontend_pid" "$api_pid" 2>/dev/null || true
+            wait "$frontend_pid" "$api_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          wait_for_service() {
+            label=$1 url=$2 pid=$3
+            deadline=$((SECONDS + 90))
+            echo "Waiting for $label at $url"
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "$label process exited before readiness" >&2
+                return 1
+              fi
+              if curl --noproxy '*' --fail --silent --connect-timeout 2 --max-time 5 "$url" >/dev/null; then
+                echo "$label ready"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "$label readiness exceeded 90 seconds" >&2
+            return 1
+          }
+          wait_for_service API http://127.0.0.1:8080/readyz "$api_pid"
+          wait_for_service frontend http://127.0.0.1:3000/login "$frontend_pid"
+          echo "Starting Playwright operation-explanation assertions"
+          if timeout --signal=TERM --kill-after=10s 6m ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs; then
+            echo "Playwright operation-explanation assertions passed"
+          else
+            status=$?
+            echo "Playwright exited with status $status (124 indicates the 6-minute limit)" >&2
+            exit "$status"
+          fi
 
       - name: Retain browser acceptance artifacts
         if: always()
