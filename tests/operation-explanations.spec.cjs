@@ -40,7 +40,9 @@ test("owner sees exact provisional operation, rule, and scoped evidence", async 
   await expect(operation).toContainText("No specific agent independently attributed");
   await expect(operation).toContainText("not established");
   await expect(operation).toContainText(fixture.rule_id);
-  await expect(page.getByText("UNVERIFIED_FORBIDDEN_OPERATION_CANDIDATE")).toBeVisible();
+  const finding = page.getByRole("heading", { name: "Latest findings" }).locator("..").locator("article").filter({ hasText: fixture.audit_id });
+  await expect(finding).toHaveCount(1);
+  await expect(finding.locator("p").filter({ hasText: "Code UNVERIFIED_FORBIDDEN_OPERATION_CANDIDATE" })).toBeVisible();
   await operation.getByText("Supporting records").click();
   await operation.getByRole("button", { name: fixture.evidence_reference }).click();
   await expect(operation).toContainText("API-server origin unverified");
@@ -70,7 +72,7 @@ test("another tenant cannot read the report or evidence", async ({ browser }) =>
     const reports = await context.request.get(`${api}/v1/workspaces/${fixture.workspace_id}/customer-kubernetes-environments/${fixture.environment_id}/observation-sessions/${fixture.session_id}/operational-assessments`);
     expect(reports.status()).toBe(403);
     await page.goto(sessionPath);
-    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "you do not have permission to perform this action" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "What happened in this session" })).toHaveCount(0);
   } finally {
     await context.close();
