@@ -176,7 +176,7 @@ jobs:
           echo "Starting Playwright operation-explanation assertions"
           export OPERATION_PHASE_FILE="$RUNNER_TEMP/operation-playwright-phases.log"
           : > "$OPERATION_PHASE_FILE"
-          if DEBUG=pw:browser timeout --signal=TERM --kill-after=10s 6m ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs; then
+          if DEBUG=pw:browser timeout --signal=TERM --kill-after=10s 6m ./node_modules/.bin/playwright test --config=tests/playwright.config.cjs; then
             echo "Playwright operation-explanation assertions passed"
           else
             status=$?

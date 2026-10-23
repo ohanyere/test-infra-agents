@@ -1,5 +1,5 @@
-import { readFileSync, mkdirSync, appendFileSync } from "node:fs";
-import { test, expect } from "@playwright/test";
+const { readFileSync, mkdirSync, appendFileSync } = require("node:fs");
+const { test, expect } = require("@playwright/test");
 
 function record(phase) {
   const path = process.env.OPERATION_PHASE_FILE;

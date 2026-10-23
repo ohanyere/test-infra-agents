@@ -39,32 +39,32 @@ run_probe() {
   return "$status"
 }
 
-smoke_config="tests/operation-discovery-smoke.config.mjs"
-smoke_spec="tests/operation-discovery-smoke.spec.mjs"
+smoke_config="tests/operation-discovery-smoke.config.cjs"
+smoke_spec="tests/operation-discovery-smoke.spec.cjs"
 if [ -e "$smoke_config" ] || [ -e "$smoke_spec" ]; then
   mark "smoke-setup FAILURE temporary files already exist"
   exit 1
 fi
 trap 'rm -f "$smoke_config" "$smoke_spec"' EXIT
 cat > "$smoke_config" <<'EOF'
-import { defineConfig } from "@playwright/test";
-export default defineConfig({ testDir: ".", testMatch: "operation-discovery-smoke.spec.mjs", reporter: "list" });
+const { defineConfig } = require("@playwright/test");
+module.exports = defineConfig({ testDir: ".", testMatch: "operation-discovery-smoke.spec.cjs", reporter: "list" });
 EOF
 cat > "$smoke_spec" <<'EOF'
-import { test } from "@playwright/test";
+const { test } = require("@playwright/test");
 test("isolated discovery", () => {});
 EOF
 
 run_probe node-startup 5 node -e 'console.log("NODE_READY")' || true
 run_probe playwright-package-import 15 node --input-type=module -e 'await import("@playwright/test"); console.log("PACKAGE_IMPORT_DONE")' || true
-run_probe config-import 15 node --input-type=module -e 'await import("./tests/playwright.config.mjs"); console.log("CONFIG_IMPORT_DONE")' || true
-run_probe reporter-import 10 node --input-type=module -e 'await import("./tests/operation-phase-reporter.mjs"); console.log("REPORTER_IMPORT_DONE")' || true
+run_probe config-import 15 node -e 'require("./tests/playwright.config.cjs"); console.log("CONFIG_IMPORT_DONE")' || true
+run_probe reporter-import 10 node -e 'require("./tests/operation-phase-reporter.cjs"); console.log("REPORTER_IMPORT_DONE")' || true
 run_probe playwright-cli-version 10 ./node_modules/.bin/playwright --version || true
 run_probe isolated-discovery 25 python3 tests/trace-playwright-discovery.py \
   --output "$diagnostics_dir/process-trace" --deadline 20 -- \
   ./node_modules/.bin/playwright test --config="$smoke_config" --list || true
-run_probe operation-discovery-list-reporter 30 ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs --reporter=list --list || true
-run_probe operation-discovery 45 ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs --list || true
+run_probe operation-discovery-list-reporter 30 ./node_modules/.bin/playwright test --config=tests/playwright.config.cjs --reporter=list --list || true
+run_probe operation-discovery 45 ./node_modules/.bin/playwright test --config=tests/playwright.config.cjs --list || true
 
 if ! grep -Fq 'Total: 1 test in 1 file' "$diagnostics_dir/process-trace/isolated-trace.stdout"; then
   mark "isolated-discovery FAILURE expected test count absent"

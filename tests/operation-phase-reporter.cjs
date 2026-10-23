@@ -1,12 +1,12 @@
-import { appendFileSync } from "node:fs";
+const { appendFileSync } = require("node:fs");
 
 function record(phase) {
   const path = process.env.OPERATION_PHASE_FILE;
   if (path) appendFileSync(path, `${new Date().toISOString()} ${phase}\n`);
 }
 
-export default class OperationPhaseReporter {
-  onBegin(suite) {
+module.exports = class OperationPhaseReporter {
+  onBegin(_config, suite) {
     record(`runner ready: ${suite.allTests().length} tests`);
   }
 
