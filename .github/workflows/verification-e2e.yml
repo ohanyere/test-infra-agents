@@ -2,9 +2,19 @@ name: Infrastructure agent verification E2E
 
 on:
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: Verification controls to run
+        type: choice
+        options:
+          - full
+          - external-agent
+        default: full
+        required: true
+  pull_request:
+    branches: [main]
   push:
-    branches:
-      - infrastructure-agent-verification
+    branches: [main, infrastructure-agent-verification]
 
 permissions:
   contents: read
@@ -27,8 +37,11 @@ env:
 jobs:
   verification-e2e:
     name: Real runtime E2E with deterministic reference agent
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[verify-kind:external-agent]')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      RUN_FULL_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'full') || (github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/infrastructure-agent-verification') }}
     services:
       postgres:
         image: postgres:16
@@ -46,6 +59,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate requested scenario
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SELECTED_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          case "$SELECTED_SCENARIO" in
+            full|external-agent) ;;
+            *) echo "Unsupported verification scenario: $SELECTED_SCENARIO" >&2; exit 1 ;;
+          esac
 
       - uses: actions/setup-go@v5
         with:
@@ -481,12 +504,14 @@ jobs:
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
 
       - name: Test Kubernetes audit adapter and runner repository
+        if: env.RUN_FULL_CONTROLS == 'true'
         working-directory: backend
         env:
           TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
         run: go test -p 1 -count=1 ./internal/customeractionevidence ./internal/kubeaudit
 
       - name: Prove runner-bound Kubernetes API audit acquisition
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/prove-kind-audit-source.sh
 
       - name: Install pinned minimal Argo CD
@@ -677,6 +702,7 @@ jobs:
           kubectl create secret generic e2e-auth -n evalplane-e2e-harness --from-literal=password="$auth_password"
 
       - name: Run and assert authoritative verification
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: |
           set -euo pipefail
           collect_qualification_diagnostics() {
@@ -1044,27 +1070,35 @@ jobs:
           fi
 
       - name: Run and assert positive durable GitOps control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-positive-control.sh
 
       - name: Run and assert inconclusive evidence control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-inconclusive-control.sh
 
       - name: Run and assert non-blocking risk warning control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-warning-control.sh
 
       - name: Run and assert Stage 2 step-exhaustion control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-stage2-control.sh step-limit
 
       - name: Run and assert Stage 2 temporal-recovery control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-stage2-control.sh temporal
 
       - name: Run and assert Stage 2 incomplete-evidence control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-stage2-control.sh insufficient
 
       - name: Run and assert Stage 3 attributed-action control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-stage3-control.sh attributed
 
       - name: Run and assert Stage 3 contradictory-attribution control
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: bash backend/e2e/run-stage3-control.sh contradiction
 
       - name: Run and assert external-agent independence control
@@ -1074,6 +1108,7 @@ jobs:
         run: bash backend/e2e/run-hostile-control.sh
 
       - name: Retrieve the persisted result through the real API
+        if: env.RUN_FULL_CONTROLS == 'true'
         run: |
           set -euo pipefail
           encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
