@@ -1,17 +1,26 @@
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { test, expect } from "@playwright/test";
 
+function record(phase) {
+  const path = process.env.OPERATION_PHASE_FILE;
+  if (path) appendFileSync(path, `${new Date().toISOString()} ${phase}\n`);
+}
+
+record("spec module loaded");
 const fixture = JSON.parse(readFileSync(process.env.OPERATION_PROOF_FILE, "utf8"));
 const password = process.env.OPERATION_PROOF_PASSWORD;
 const api = "http://127.0.0.1:8080";
 if (!password || fixture.source_classification !== "INSUFFICIENT_PROVENANCE") throw new Error("disposable provisional proof fixture required");
 
 async function login(page, email) {
+  record("page fixture ready; login navigation starting");
   await page.goto("/login");
+  record("login page loaded");
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page).toHaveURL(/\/workspace/);
+  record("authentication completed");
 }
 
 const sessionPath = `/assurance/${fixture.environment_id}/sessions/${fixture.session_id}`;
@@ -19,6 +28,7 @@ const evidenceURL = `${api}/v1/workspaces/${fixture.workspace_id}/customer-kuber
 
 test("owner sees exact provisional operation, rule, and scoped evidence", async ({ page }) => {
   await login(page, fixture.email);
+  record("owner assertions starting");
   await page.goto(sessionPath);
   await expect(page.getByRole("heading", { name: "What happened in this session" })).toBeVisible();
   const operation = page.locator("article").filter({ hasText: `audit:${fixture.audit_id}` });
@@ -49,7 +59,9 @@ test("owner sees exact provisional operation, rule, and scoped evidence", async 
 });
 
 test("another tenant cannot read the report or evidence", async ({ browser }) => {
+  record("second tenant browser fixture ready");
   const context = await browser.newContext();
+  record("second tenant context ready");
   const page = await context.newPage();
   try {
     await login(page, fixture.other_email);

@@ -73,11 +73,40 @@ jobs:
         timeout-minutes: 12
         run: |
           set -euo pipefail
+          node --version
+          npm --version
           timeout 5m npm ci
           timeout 3m npm install --no-save --package-lock=false @playwright/test@1.51.1
           test -x ./node_modules/.bin/playwright
           timeout 8m ./node_modules/.bin/playwright install --with-deps chromium
           ./node_modules/.bin/playwright --version
+          chromium_path="$(node -e 'console.log(require("@playwright/test").chromium.executablePath())')"
+          test -x "$chromium_path"
+          echo "Chromium executable available at $chromium_path"
+
+      - name: Discover browser tests and launch Chromium
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          echo "Discovering operation-explanation tests"
+          export OPERATION_PHASE_FILE="$RUNNER_TEMP/operation-playwright-discovery-phases.log"
+          : > "$OPERATION_PHASE_FILE"
+          timeout 45s ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs --list | tee "$RUNNER_TEMP/operation-playwright-discovery.log"
+          grep -Fq 'Total: 2 tests in 1 file' "$RUNNER_TEMP/operation-playwright-discovery.log"
+          echo "Launching Chromium, creating a context, and opening a local document"
+          DEBUG=pw:browser timeout --signal=TERM --kill-after=5s 30s node --input-type=module -e '
+            import { chromium } from "@playwright/test";
+            const browser = await chromium.launch({ headless: true });
+            try {
+              const context = await browser.newContext();
+              const page = await context.newPage();
+              await page.goto("data:text/html,<title>Realverax browser preflight</title>");
+              console.log("Chromium launch, context, and navigation: PASS");
+              await context.close();
+            } finally {
+              await browser.close();
+            }
+          '
 
       - name: Build API and frontend
         timeout-minutes: 12
@@ -147,11 +176,15 @@ jobs:
           wait_for_service API http://127.0.0.1:8080/readyz "$api_pid"
           wait_for_service frontend http://127.0.0.1:3000/login "$frontend_pid"
           echo "Starting Playwright operation-explanation assertions"
-          if timeout --signal=TERM --kill-after=10s 6m ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs; then
+          export OPERATION_PHASE_FILE="$RUNNER_TEMP/operation-playwright-phases.log"
+          : > "$OPERATION_PHASE_FILE"
+          if DEBUG=pw:browser timeout --signal=TERM --kill-after=10s 6m ./node_modules/.bin/playwright test --config=tests/playwright.config.mjs; then
             echo "Playwright operation-explanation assertions passed"
           else
             status=$?
             echo "Playwright exited with status $status (124 indicates the 6-minute limit)" >&2
+            echo "Playwright phase markers:" >&2
+            cat "$OPERATION_PHASE_FILE" >&2
             exit "$status"
           fi
 
@@ -163,4 +196,7 @@ jobs:
           path: |
             test-results/
             ${{ runner.temp }}/operation-proof.json
+            ${{ runner.temp }}/operation-playwright-discovery.log
+            ${{ runner.temp }}/operation-playwright-discovery-phases.log
+            ${{ runner.temp }}/operation-playwright-phases.log
           retention-days: 7

@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { fileURLToPath } from "node:url";
 
 export default defineConfig({
   testDir: ".",
@@ -6,5 +7,5 @@ export default defineConfig({
   timeout: 45_000,
   expect: { timeout: 10_000 },
   use: { baseURL: "http://127.0.0.1:3000", trace: "retain-on-failure", screenshot: "only-on-failure" },
-  reporter: [["list"], ["junit", { outputFile: "test-results/operation-explanations.xml" }]],
+  reporter: [["list"], [fileURLToPath(new URL("./operation-phase-reporter.mjs", import.meta.url))], ["junit", { outputFile: "test-results/operation-explanations.xml" }]],
 });
