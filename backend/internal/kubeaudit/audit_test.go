@@ -80,6 +80,29 @@ func TestSelectMutationRequiresSourceBindingAndExactEventIdentity(t *testing.T) 
 	}
 }
 
+func TestSelectResponseRetainsRBACDenialWithoutCallingItMutation(t *testing.T) {
+	events, err := Parse(strings.NewReader(strings.Replace(validEvent, `"code":200`, `"code":403`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := SourceIdentity{ClusterIdentity: "kind:evalplane-e2e", ConfigurationIdentity: configurationIdentity(), VerificationState: "runner_bound_test_source"}
+	acquired := []AcquiredEvent{newAcquiredEvent(events[0], source)}
+	selected, err := SelectResponse(acquired, "proof", "web", "patch", "kubernetes-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, ok := selected.Snapshot()
+	if !ok || event.Response.Code != 403 {
+		t.Fatal("RBAC denial was not preserved as authenticated response evidence")
+	}
+	if _, err := SelectMutation(acquired, "proof", "web", "patch", "kubernetes-admin"); err == nil {
+		t.Fatal("denied request became a successful mutation")
+	}
+	if _, err := SelectResponse(acquired, "proof", "web", "patch", "another-principal"); err == nil {
+		t.Fatal("wrong principal matched audit response")
+	}
+}
+
 func TestAcquiredEventSealBindsEventAndSourceAndSnapshotsAreDefensive(t *testing.T) {
 	events, err := Parse(strings.NewReader(strings.Replace(validEvent, `"username":"kubernetes-admin"`, `"username":"kubernetes-admin","groups":["system:authenticated"]`, 1)))
 	if err != nil {

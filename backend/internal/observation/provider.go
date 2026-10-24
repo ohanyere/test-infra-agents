@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	klabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -22,6 +23,42 @@ type EnvironmentContext struct {
 	Identity    kubeenv.RunIdentity
 	Environment kubeenv.Environment
 }
+
+// ObserveDeployment reads one explicitly named workload with the observer's
+// Kubernetes client. It performs no provisioning or mutation and is suitable
+// for an independently authenticated read-only observer.
+func ObserveDeployment(ctx context.Context, client kubernetes.Interface, namespace, name string) (agentgateway.Observation, error) {
+	if client == nil || namespace == "" || name == "" {
+		return agentgateway.Observation{}, errors.New("observer client and workload identity are required")
+	}
+	deployment, err := client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return agentgateway.Observation{}, fmt.Errorf("observe deployment: %w", err)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil || selector.Empty() {
+		return agentgateway.Observation{}, errors.New("deployment pod selector is missing or invalid")
+	}
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return agentgateway.Observation{}, fmt.Errorf("observe deployment pods: %w", err)
+	}
+	events, err := client.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{FieldSelector: "involvedObject.name=" + name})
+	if err != nil {
+		return agentgateway.Observation{}, fmt.Errorf("observe deployment events: %w", err)
+	}
+	out := agentgateway.Observation{Timestamp: time.Now().UTC(), Workloads: []agentgateway.WorkloadObservation{workload(deployment)}, Pods: []agentgateway.PodObservation{}, RecentEvents: []agentgateway.RecentEvent{}, Metrics: map[string]any{}}
+	for i := range pods.Items {
+		if selector.Matches(klabels.Set(pods.Items[i].Labels)) {
+			out.Pods = append(out.Pods, pod(&pods.Items[i]))
+		}
+	}
+	for _, event := range events.Items {
+		out.RecentEvents = append(out.RecentEvents, agentgateway.RecentEvent{Timestamp: eventTime(event), Type: event.Type, Reason: event.Reason, Summary: event.Message, InvolvedObjectKind: event.InvolvedObject.Kind, InvolvedObjectName: event.InvolvedObject.Name})
+	}
+	return out, nil
+}
+
 type EnvironmentVerifier interface {
 	GetEnvironment(context.Context, string) (kubeenv.Environment, error)
 }

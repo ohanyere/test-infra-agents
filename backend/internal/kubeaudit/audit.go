@@ -155,6 +155,22 @@ func SelectMutation(events []AcquiredEvent, namespace, name, verb, principal str
 	return AcquiredEvent{}, fmt.Errorf("%w: matching acquired audit event not found", ErrInvalidSource)
 }
 
+// SelectResponse returns the authenticated API-server response even when RBAC
+// denied the operation. It is intentionally distinct from SelectMutation,
+// which requires a successful mutation for its existing callers.
+func SelectResponse(events []AcquiredEvent, namespace, name, verb, principal string) (AcquiredEvent, error) {
+	for _, acquired := range events {
+		if !acquired.RunnerBound() || acquired.source.ClusterIdentity != "kind:"+kindClusterName || acquired.source.ConfigurationIdentity != configurationIdentity() {
+			continue
+		}
+		event := acquired.event
+		if event.Stage == "ResponseComplete" && event.Verb == verb && event.ObjectRef.APIGroup == "apps" && event.ObjectRef.APIVersion == "v1" && event.ObjectRef.Resource == "deployments" && event.ObjectRef.Namespace == namespace && event.ObjectRef.Name == name && event.User.Username == principal {
+			return acquired, nil
+		}
+	}
+	return AcquiredEvent{}, fmt.Errorf("%w: matching acquired audit response not found", ErrInvalidSource)
+}
+
 func Parse(reader io.Reader) ([]Event, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), maxRecordSize)
@@ -284,6 +300,31 @@ func WaitForMutation(ctx context.Context, namespace, name, verb, principal strin
 				return AcquiredEvent{}, fmt.Errorf("wait for Kubernetes audit event: %w: %v", ctx.Err(), lastErr)
 			}
 			return AcquiredEvent{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// WaitForResponse observes both successful and denied direct API requests.
+// A missing response is evidence absence, never a successful operation.
+func WaitForResponse(ctx context.Context, namespace, name, verb, principal string) (AcquiredEvent, error) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		events, _, err := AcquireHostedKind(ctx)
+		if err == nil {
+			if selected, selectErr := SelectResponse(events, namespace, name, verb, principal); selectErr == nil {
+				return selected, nil
+			} else {
+				lastErr = selectErr
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return AcquiredEvent{}, fmt.Errorf("wait for Kubernetes audit response: %w: %v", ctx.Err(), lastErr)
 		case <-ticker.C:
 		}
 	}

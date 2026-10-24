@@ -9,6 +9,7 @@ on:
         options:
           - full
           - external-agent
+          - independent-agent
         default: full
         required: true
   pull_request:
@@ -38,11 +39,12 @@ env:
 jobs:
   verification-e2e:
     name: Real runtime E2E with deterministic reference agent
-    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[verify-kind:external-agent]')
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[verify-kind:external-agent]') || contains(github.event.head_commit.message, '[verify-kind:independent-agent]')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       RUN_FULL_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'full') || (github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/infrastructure-agent-verification') }}
+      RUN_INDEPENDENT_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'independent-agent') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[verify-kind:independent-agent]')) }}
     services:
       postgres:
         image: postgres:16
@@ -67,7 +69,7 @@ jobs:
           SELECTED_SCENARIO: ${{ inputs.scenario }}
         run: |
           case "$SELECTED_SCENARIO" in
-            full|external-agent) ;;
+            full|external-agent|independent-agent) ;;
             *) echo "Unsupported verification scenario: $SELECTED_SCENARIO" >&2; exit 1 ;;
           esac
 
@@ -133,6 +135,7 @@ jobs:
           printf 'migration=%s\n' "$migration_state" | tee "$ARTIFACT_DIR/migration.txt"
 
       - name: Create pinned disposable GitOps source
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         run: |
           set -euo pipefail
           source_dir=/tmp/gitops-source
@@ -465,6 +468,7 @@ jobs:
           echo "Git fixture HTTP control endpoint serves pinned state"
 
       - name: Build E2E images
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         working-directory: backend
         run: |
           set -euo pipefail
@@ -488,6 +492,17 @@ jobs:
           timeout 180s docker pull --platform linux/amd64 "$REDIS_E2E_IMAGE"
           timeout 180s docker pull "$K6_IMAGE"
           timeout 180s docker pull "$PROMETHEUS_IMAGE"
+
+      - name: Build independent observer E2E images
+        if: env.RUN_INDEPENDENT_CONTROLS == 'true'
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          build_dir="$(mktemp -d)"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/referenceapp" ./cmd/referenceapp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/directkubeagent" ./cmd/directkubeagent
+          docker build -t evalplane-reference:v17 -f e2e/independentreference.Dockerfile "$build_dir"
+          docker build -t direct-agent:e2e -f e2e/directkubeagent.Dockerfile "$build_dir"
 
       - name: Create isolated Kind cluster
         run: |
@@ -541,9 +556,17 @@ jobs:
           kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-controller-manager --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l component=etcd --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l k8s-app=kube-dns --timeout=180s
-          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e external-agent:e2e flux-agent:e2e fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82 registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 "$REDIS_E2E_IMAGE" "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
-          docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
-          docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
+          if [[ "$RUN_INDEPENDENT_CONTROLS" == true ]]; then
+            kind load docker-image evalplane-reference:v17 direct-agent:e2e --name evalplane-e2e
+          else
+            kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e external-agent:e2e flux-agent:e2e fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82 registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 "$REDIS_E2E_IMAGE" "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
+            docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
+            docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
+          fi
+
+      - name: Prove independent direct Kubernetes agent controls
+        if: env.RUN_INDEPENDENT_CONTROLS == 'true'
+        run: bash backend/e2e/run-independent-observer-control.sh
 
       - name: Test Kubernetes audit adapter and runner repository
         if: env.RUN_FULL_CONTROLS == 'true'
@@ -557,6 +580,7 @@ jobs:
         run: bash backend/e2e/prove-kind-audit-source.sh
 
       - name: Install pinned minimal Argo CD
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         run: |
           set -euo pipefail
           kubectl create namespace argocd
@@ -583,6 +607,7 @@ jobs:
           kubectl -n argocd get appproject evalplane-e2e
 
       - name: Run calibration environment gate
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         run: |
           set -euo pipefail
           collect_calibration_diagnostics() {
@@ -683,6 +708,7 @@ jobs:
           echo "calibration post-success: proceeding to qualification"
 
       - name: Configure qualification inputs
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         run: |
           set -euo pipefail
           kubectl -n argocd get appproject evalplane-e2e
@@ -1157,12 +1183,15 @@ jobs:
         run: bash backend/e2e/run-stage3-control.sh contradiction
 
       - name: Run and assert external-agent independence control
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         run: bash backend/e2e/run-external-control.sh
 
       - name: Run and assert hostile external-agent probe
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         run: bash backend/e2e/run-hostile-control.sh
 
       - name: Run and assert Flux ImagePolicy adapter controls
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
         run: bash backend/e2e/run-flux-control.sh
 
       - name: Retrieve the persisted result through the real API
@@ -1293,6 +1322,14 @@ jobs:
           timeout 30s docker stats --no-stream > "$ARTIFACT_DIR/docker-stats.txt" 2>&1
           timeout 30s kubectl get nodes -o wide > "$ARTIFACT_DIR/nodes.txt" 2>&1
           timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/pods.txt" 2>&1
+          if [[ "$RUN_INDEPENDENT_CONTROLS" == true ]]; then
+            timeout 30s kubectl -n realverax-audit-proof get deployments,jobs,pods -o wide > "$ARTIFACT_DIR/independent-resources-wide.txt" 2>&1
+            timeout 30s kubectl -n realverax-audit-proof get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/independent-events.txt" 2>&1
+            timeout 30s kubectl -n realverax-audit-proof describe pods > "$ARTIFACT_DIR/independent-pods-describe.txt" 2>&1
+            for control in positive forbidden false-claim; do
+              timeout 30s kubectl -n realverax-audit-proof logs "job/direct-agent-$control" > "$ARTIFACT_DIR/independent-$control-agent-failure.log" 2>&1
+            done
+          fi
           timeout 30s kubectl get applications -A -o yaml > "$ARTIFACT_DIR/argo-applications.yaml" 2>&1
           timeout 45s kubectl describe pods -n evalplane-e2e-harness > "$ARTIFACT_DIR/harness-pods-describe.txt" 2>&1
           for component in kube-apiserver kube-scheduler kube-controller-manager etcd; do
