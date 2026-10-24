@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 )
 
@@ -93,7 +95,7 @@ type CapabilityCatalog struct {
 }
 
 func CurrentCapabilities() CapabilityCatalog {
-	return CapabilityCatalog{Platform: []string{"kubernetes"}, ScenarioExecution: []string{"traffic_spike"}, AgentActions: []string{"inspect", "scale_workload", "restart_pod", "no_op"}, Observations: []string{"kubernetes_workloads", "kubernetes_pods", "kubernetes_events", "request_rate", "error_rate", "p95_latency", "availability"}}
+	return CapabilityCatalog{Platform: []string{"kubernetes"}, ScenarioExecution: []string{"traffic_spike"}, AgentActions: []string{"inspect", "scale_workload", "restart_pod", "no_op"}, Observations: observablecatalog.CanonicalIDs()}
 }
 func (d ScenarioDraft) VersionInput(method string) scenario.VersionInput {
 	d = NewSanitizer().SanitizeDraft(d, nil)
@@ -104,5 +106,5 @@ func (d ScenarioDraft) VersionInput(method string) scenario.VersionInput {
 		}
 		criteria = append(criteria, scenario.CriterionInput{Key: c.Key, Name: c.Name, MetricKey: c.MetricKey, Operator: c.Operator, TargetValue: c.TargetValue, Unit: c.Unit, SortOrder: i})
 	}
-	return scenario.VersionInput{Description: d.Description, Category: d.Category, Difficulty: d.Difficulty, DurationSeconds: d.DurationSeconds, Environment: d.Environment, Conditions: d.Conditions, Observables: d.AgentSpec.AvailableObservations, ExpectedBehaviors: d.ExpectedBehaviors, ForbiddenBehaviors: d.ForbiddenBehaviors, Criteria: criteria, AuthoringMethod: method, AgentTask: d.AgentSpec.Task, AgentVisibleContext: d.AgentSpec.VisibleContext, AllowedActions: d.AgentSpec.AllowedActions, AllowedResources: d.AgentSpec.AllowedResources, GroundTruth: d.GroundTruth, ExecutionSpec: d.ExecutionSpec, SourceMetadata: d.SourceMetadata}
+	return scenario.VersionInput{Description: d.Description, Category: d.Category, Difficulty: d.Difficulty, DurationSeconds: d.DurationSeconds, Environment: d.Environment, Conditions: d.Conditions, Observables: d.AgentSpec.AvailableObservations, ExpectedBehaviors: d.ExpectedBehaviors, ForbiddenBehaviors: d.ForbiddenBehaviors, Criteria: criteria, AuthoringMethod: method, AgentTask: d.AgentSpec.Task, AgentVisibleContext: d.AgentSpec.VisibleContext, AllowedActions: d.AgentSpec.AllowedActions, AllowedResources: d.AgentSpec.AllowedResources, GroundTruth: d.GroundTruth, ExecutionSpec: d.ExecutionSpec, SourceMetadata: d.SourceMetadata, EvidenceRequirements: evidencecontract.DefaultRequirements()}
 }

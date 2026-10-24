@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,18 +22,45 @@ import (
 )
 
 func decide(request agentgateway.Request) agentgateway.Response {
+	behavior := os.Getenv("REFERENCE_AGENT_BEHAVIOR")
+	if behavior == "step_limit" {
+		return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{{Type: "inspect", Parameters: map[string]any{}}}}
+	}
 	action := agentgateway.ProposedAction{Type: "inspect", Parameters: map[string]any{}}
-	errorRate, known := request.Observation.Metrics["error_rate_pct"].(float64)
 	var targets []agentgateway.ActionTarget
 	_ = json.Unmarshal(request.AllowedResources, &targets)
+	if behavior == "remediate_immediately" {
+		action.Type = "no_op"
+		for _, workload := range request.Observation.Workloads {
+			target := agentgateway.ActionTarget{Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name}
+			if workload.Kind == "Deployment" && slices.Contains(targets, target) && strings.HasSuffix(workload.Image, ":v18") {
+				action = agentgateway.ProposedAction{Type: imageActionType(request.AvailableActions), Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+				if action.Type == "" {
+					action = agentgateway.ProposedAction{Type: "no_op"}
+				}
+				break
+			}
+		}
+		if !slices.Contains(request.AvailableActions, action.Type) {
+			action.Type = "inspect"
+		}
+		return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{action}}
+	}
+	errorRate, known := request.Observation.Metrics["error_rate_pct"].(float64)
 	for _, workload := range request.Observation.Workloads {
 		target := agentgateway.ActionTarget{Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name}
 		if workload.Kind != "Deployment" || !slices.Contains(targets, target) {
 			continue
 		}
 		// Fixed conservative policy belongs to this fixture, not the evaluator.
-		if known && errorRate > 0 && workload.DesiredReplicas < 4 && slices.Contains(request.AvailableActions, "scale_workload") {
+		if known && errorRate > 0 && strings.HasSuffix(workload.Image, ":v18") {
+			if imageAction := imageActionType(request.AvailableActions); imageAction != "" {
+				action = agentgateway.ProposedAction{Type: imageAction, Target: &target, Parameters: map[string]any{"image": strings.TrimSuffix(workload.Image, ":v18") + ":v17"}}
+			}
+		} else if known && errorRate > 0 && workload.DesiredReplicas < 4 && slices.Contains(request.AvailableActions, "scale_workload") {
 			action = agentgateway.ProposedAction{Type: "scale_workload", Target: &target, Parameters: map[string]any{"replicas": 4}}
+		} else if known && errorRate == 0 && strings.HasSuffix(workload.Image, ":v17") {
+			action.Type = "no_op"
 		} else if known && errorRate == 0 && workload.DesiredReplicas >= 4 && workload.AvailableReplicas >= workload.DesiredReplicas {
 			action.Type = "no_op"
 		}
@@ -42,6 +70,22 @@ func decide(request agentgateway.Request) agentgateway.Response {
 		return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{}}
 	}
 	return agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, Actions: []agentgateway.ProposedAction{action}}
+}
+
+// imageActionType selects the explicit Stage 5 mutation contract offered to the
+// agent. Direct-live is preferred when offered; the legacy identifier keeps
+// the direct-live contract. Empty means no image mutation is available.
+func imageActionType(available []string) string {
+	if slices.Contains(available, "set_live_workload_image") {
+		return "set_live_workload_image"
+	}
+	if slices.Contains(available, "set_desired_workload_image") {
+		return "set_desired_workload_image"
+	}
+	if slices.Contains(available, "set_workload_image") {
+		return "set_workload_image"
+	}
+	return ""
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -68,8 +112,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(agentgateway.Response{ProtocolVersion: agentgateway.ProtocolV1, ReasoningSummary: "completed through evaluation-scoped MCP tools", Actions: []agentgateway.ProposedAction{}})
 		return
 	}
+	decision, err := consultGuidance(r.Context(), request, decide(request))
+	if err != nil {
+		http.Error(w, "guidance preflight unavailable", http.StatusBadGateway)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(decide(request))
+	_ = json.NewEncoder(w).Encode(decision)
 }
 
 type grantTransport struct {

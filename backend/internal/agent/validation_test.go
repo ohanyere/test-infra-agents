@@ -7,10 +7,28 @@ import (
 	"testing"
 
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
+func declaredIdentity() provenance.AgentImplementationIdentity {
+	return provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindSourceRevision, Identifier: "0123456789abcdef", ProvenanceLevel: provenance.LevelDeclared}
+}
+
 func validCreate() CreateInput {
-	return CreateInput{Name: "Agent", Slug: "agent", Visibility: "workspace", InitialVersion: VersionInput{VersionLabel: "0.1.0", InterfaceKind: "http", EndpointURL: "https://agent.example/v1/decide", Capabilities: []string{"kubernetes"}, Metadata: json.RawMessage(`{}`)}}
+	return CreateInput{Name: "Agent", Slug: "agent", Visibility: "workspace", InitialVersion: VersionInput{VersionLabel: "0.1.0", InterfaceKind: "http", EndpointURL: "https://agent.example/v1/decide", Capabilities: []string{"kubernetes"}, ImplementationIdentity: declaredIdentity(), Metadata: json.RawMessage(`{}`)}}
+}
+
+func TestImplementationIdentityRequiredAndMustBeHonestlyDeclared(t *testing.T) {
+	value := validCreate()
+	value.InitialVersion.ImplementationIdentity = provenance.AgentImplementationIdentity{}
+	if _, err := ValidateCreate(value); !errors.Is(err, identity.ErrValidation) {
+		t.Fatalf("missing identity error=%v", err)
+	}
+	value = validCreate()
+	value.InitialVersion.ImplementationIdentity.ProvenanceLevel = "verified"
+	if _, err := ValidateCreate(value); !errors.Is(err, identity.ErrValidation) {
+		t.Fatalf("unattested verified identity error=%v", err)
+	}
 }
 
 func TestCreateValidation(t *testing.T) {
@@ -55,6 +73,14 @@ func TestCapabilitiesStoredDeterministically(t *testing.T) {
 	}
 	if strings.Join(got.InitialVersion.Capabilities, ",") != "kubernetes,scale_workload" {
 		t.Fatalf("capabilities=%v", got.InitialVersion.Capabilities)
+	}
+}
+
+func TestGitOpsAgentCanDeclareImageAction(t *testing.T) {
+	value := validCreate()
+	value.InitialVersion.Capabilities = []string{"inspect", "set_workload_image"}
+	if _, err := ValidateCreate(value); err != nil {
+		t.Fatalf("GitOps agent capability rejected: %v", err)
 	}
 }
 

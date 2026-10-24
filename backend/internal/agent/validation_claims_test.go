@@ -10,11 +10,12 @@ import (
 
 func validVersionInput() VersionInput {
 	return VersionInput{
-		VersionLabel:  "v1",
-		InterfaceKind: "http",
-		EndpointURL:   "https://agent.example/v1/decide",
-		Capabilities:  []string{"inspect", "kubernetes_workloads", "kubernetes_pods"},
-		Metadata:      json.RawMessage(`{}`),
+		VersionLabel:           "v1",
+		InterfaceKind:          "http",
+		EndpointURL:            "https://agent.example/v1/decide",
+		Capabilities:           []string{"inspect", "kubernetes_workloads", "kubernetes_pods"},
+		ImplementationIdentity: declaredIdentity(),
+		Metadata:               json.RawMessage(`{}`),
 	}
 }
 

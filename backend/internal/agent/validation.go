@@ -11,6 +11,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/competency"
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
 const maxCapabilities = 32
@@ -62,6 +63,11 @@ func ValidateVersion(in VersionInput) (VersionInput, error) {
 	if in.ToolAccessMode == "mcp" && in.InterfaceKind != "http" {
 		return in, validation("MCP tool access requires the HTTP agent interface")
 	}
+	identityValue, err := provenance.ValidateDeclaredAgentIdentity(in.ImplementationIdentity)
+	if err != nil {
+		return in, validation("implementation_identity " + err.Error())
+	}
+	in.ImplementationIdentity = identityValue
 	in.EndpointURL = strings.TrimSpace(in.EndpointURL)
 	if in.InterfaceKind == "http" {
 		if _, err := agentgateway.ValidateEndpoint(in.EndpointURL); err != nil {

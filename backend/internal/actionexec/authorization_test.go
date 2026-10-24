@@ -37,6 +37,7 @@ func TestStructuredDenialCodes(t *testing.T) {
 		code   string
 	}{
 		{agentgateway.ProposedAction{Type: "shell"}, "unsupported_action"},
+		{agentgateway.ProposedAction{Type: "teleport_workload_image", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: "eval-reference-app"}}, "unsupported_action"},
 		{scale("production", 4), "cross_namespace"},
 		{scale(env.Environment.Namespace, 0), "invalid_action_parameters"},
 		{agentgateway.ProposedAction{Type: "scale_workload", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: env.Environment.Namespace, Name: "another-app"}}, "disallowed_resource"},

@@ -1,0 +1,6 @@
+DROP TABLE assurance_evaluation_jobs;
+DROP TABLE assurance_notification_deliveries;
+DROP TABLE assurance_notification_events;
+DROP TABLE operational_finding_history;
+DROP TABLE operational_approval_records;
+ALTER TABLE operational_contract_versions DROP COLUMN governance_state;

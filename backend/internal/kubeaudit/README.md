@@ -1,0 +1,9 @@
+# Hosted Kind API audit source proof
+
+`AcquireHostedKind` has no caller-selected file path. It accepts only the fixed `evalplane-e2e` Kind cluster after checking the current Kubernetes context, Kind node list, container cluster label, mounted audit policy digest, and kube-apiserver audit arguments. It copies the configured API-server audit log from the control-plane node into a private temporary directory, bounds its size, parses line-delimited `audit.k8s.io/v1` events, and removes the temporary copy.
+
+The audit policy logs only `Metadata` for create/update/patch/delete requests to Deployments in `realverax-audit-proof`, omits `RequestReceived`, and defaults all other events to `None`. It does not include request or response bodies. The Kind node writes to the runner-mounted audit directory with one-day retention, two backups, and a 20 MiB rotation threshold.
+
+The hosted proof creates a unique Deployment and performs a real `kubectl annotate` patch. It requires the matching `ResponseComplete` audit record, exact resource identity, expected authenticated Kubernetes principal, and a successful API response. Non-response stages are not treated as distinct actions; failed API responses remain failures; a successful API request does not prove workload health or agent causation.
+
+This trust boundary is the GitHub Actions runner that provisions and controls the disposable Kind cluster, its host-mounted audit destination, and the fixed acquisition implementation. Cluster labels, file paths, policy digests, and checksums are not cryptographic proof that an independently operated cluster produced a log. This is a hosted acquisition test source only—not production customer-source authentication. Parsed records are not passed to `customeractionevidence.BuildFromProvider` or `Store`, cannot affect canonical reports, and do not change `UNVERIFIED_AGENT_CLAIM` or attribution/verdict semantics.

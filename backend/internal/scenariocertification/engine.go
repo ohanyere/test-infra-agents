@@ -11,6 +11,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/evaluator"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
+	"github.com/evalplane/evalplane/backend/internal/telemetry"
 )
 
 // Fixture is the deterministic certification input. The service builds it from
@@ -339,7 +340,7 @@ func validateCaseType(caseType string, version scenario.Version) error {
 func supportedMetric(key string) bool {
 	switch key {
 	case "request_rate", "request_rate_rps", "application.request_rate_rps",
-		"error_rate", "error_rate_pct", "application.error_rate_pct",
+		"error_rate", "error_rate_pct", "application.error_rate_pct", "current_error_rate",
 		"p95_latency", "p95_latency_ms", "application.p95_latency_ms",
 		"availability", "availability_pct", "application.availability_pct",
 		"deployment_desired_replicas", "deployment.desired_replicas",
@@ -542,7 +543,7 @@ func canonicalMetric(key string) string {
 	switch key {
 	case "request_rate", "request_rate_rps", "application.request_rate_rps":
 		return "request_rate"
-	case "error_rate", "error_rate_pct", "application.error_rate_pct":
+	case "error_rate", "error_rate_pct", "application.error_rate_pct", "current_error_rate":
 		return "error_rate"
 	case "p95_latency", "p95_latency_ms", "application.p95_latency_ms":
 		return "p95_latency"
@@ -616,24 +617,37 @@ func observationPayload(values map[string]float64) json.RawMessage {
 // BuildEvaluationInput synthesizes a terminal EvaluationInput whose observed
 // metrics satisfy (passing=true) or violate (passing=false) the criteria.
 func BuildEvaluationInput(version scenario.Version, runID string, passing bool, actions []evidence.AgentAction) evaluator.EvaluationInput {
-	now := time.Now().UTC()
-	run := evaluationbatch.Run{ID: runID, Status: "completed", CreatedAt: now.Add(-2 * time.Minute), StartedAt: &now, CompletedAt: &now}
+	startedAt := time.Now().UTC()
+	actionAt := startedAt.Add(time.Second)
+	completedAt := actionAt.Add(telemetry.RateWindow + time.Second)
+	run := evaluationbatch.Run{ID: runID, Status: "completed", CreatedAt: startedAt.Add(-2 * time.Minute), StartedAt: &startedAt, CompletedAt: &completedAt}
 	values := metricValuesFor(version.Criteria, passing)
-	event := evidence.RunEvent{ID: 1, RunID: runID, Sequence: 1, EventType: "observation", OccurredAt: now, Summary: "certification fixture observation", Payload: observationPayload(values), CreatedAt: now}
+	// Recovery metrics require a complete rate lookback and positive request
+	// traffic. Keep the fixture's baseline and terminal observations ordered
+	// around the action window rather than weakening evaluator eligibility.
+	ensureFixtureTraffic(values)
+	baseline := evidence.RunEvent{ID: 1, RunID: runID, Sequence: 1, EventType: "observation", OccurredAt: startedAt, Summary: "certification fixture baseline", Payload: observationPayload(map[string]float64{"request_rate": 10}), CreatedAt: startedAt}
+	terminal := evidence.RunEvent{ID: 2, RunID: runID, Sequence: 2, EventType: "observation", OccurredAt: completedAt, Summary: "certification fixture terminal observation", Payload: observationPayload(values), CreatedAt: completedAt}
 	filtered := make([]evidence.AgentAction, 0, len(actions))
 	for _, a := range actions {
 		a.RunID = runID
-		a.CreatedAt = now
+		a.CreatedAt = actionAt
 		filtered = append(filtered, a)
 	}
 	// agent_action_count criteria observe len(actions); pad no_op actions when
 	// the scenario requires a higher count to pass.
 	if need := requiredActionCount(version, passing); need > len(filtered) {
 		for i := len(filtered); i < need; i++ {
-			filtered = append(filtered, evidence.AgentAction{ID: fmt.Sprintf("cert-action-%d", i), RunID: runID, ActionType: "no_op", Status: "executed", Authorized: true, CreatedAt: now})
+			filtered = append(filtered, evidence.AgentAction{ID: fmt.Sprintf("cert-action-%d", i), RunID: runID, ActionType: "no_op", Status: "executed", Authorized: true, CreatedAt: actionAt})
 		}
 	}
-	return evaluator.EvaluationInput{Run: run, ScenarioVersion: version, Events: []evidence.RunEvent{event}, Actions: filtered}
+	return evaluator.EvaluationInput{Run: run, ScenarioVersion: version, Events: []evidence.RunEvent{baseline, terminal}, Actions: filtered}
+}
+
+func ensureFixtureTraffic(values map[string]float64) {
+	if _, ok := values["request_rate"]; !ok {
+		values["request_rate"] = 10
+	}
 }
 
 func requiredActionCount(version scenario.Version, passing bool) int {

@@ -14,9 +14,18 @@ spec:
       command: [/app/e2equalification]
       env:
         - {name: GOMAXPROCS, value: "2"}
+        - {name: E2E_GITOPS, value: "true"}
+        - {name: GITOPS_REPOSITORY_ROOT, value: "/git-fixture"}
+        - {name: GITOPS_REPOSITORY_URL, value: "git://git-fixture.evalplane-e2e-harness.svc/repo.git"}
+        - name: GITOPS_REVISION
+          valueFrom:
+            configMapKeyRef: {name: gitops-proof, key: revision}
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef: {name: database, key: url}
+        - name: E2E_AUTH_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: e2e-auth, key: password}
       volumeMounts:
         - {name: criteria, mountPath: /criteria, readOnly: true}
       resources:

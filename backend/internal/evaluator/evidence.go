@@ -9,41 +9,10 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
+	"github.com/evalplane/evalplane/backend/internal/evaluationmetric"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
+	"github.com/evalplane/evalplane/backend/internal/telemetry"
 )
-
-type metricDefinition struct {
-	Canonical string
-	Unit      string
-	Reducer   string
-	Telemetry bool
-}
-
-var metricDefinitions = map[string]metricDefinition{
-	"request_rate":                  {"request_rate", "rps", "latest", true},
-	"request_rate_rps":              {"request_rate", "rps", "latest", true},
-	"application.request_rate_rps":  {"request_rate", "rps", "latest", true},
-	"error_rate":                    {"error_rate", "pct", "maximum", true},
-	"error_rate_pct":                {"error_rate", "pct", "maximum", true},
-	"application.error_rate_pct":    {"error_rate", "pct", "maximum", true},
-	"p95_latency":                   {"p95_latency", "ms", "maximum", true},
-	"p95_latency_ms":                {"p95_latency", "ms", "maximum", true},
-	"application.p95_latency_ms":    {"p95_latency", "ms", "maximum", true},
-	"availability":                  {"availability", "pct", "minimum", true},
-	"availability_pct":              {"availability", "pct", "minimum", true},
-	"application.availability_pct":  {"availability", "pct", "minimum", true},
-	"deployment_desired_replicas":   {"deployment_desired_replicas", "count", "latest", false},
-	"deployment.desired_replicas":   {"deployment_desired_replicas", "count", "latest", false},
-	"deployment_available_replicas": {"deployment_available_replicas", "count", "latest", false},
-	"deployment.available_replicas": {"deployment_available_replicas", "count", "latest", false},
-	"pod_ready_count":               {"pod_ready_count", "count", "latest", false},
-	"pods.ready_count":              {"pod_ready_count", "count", "latest", false},
-	"pod_not_ready_count":           {"pod_not_ready_count", "count", "latest", false},
-	"pods.not_ready_count":          {"pod_not_ready_count", "count", "latest", false},
-	"pod_restart_count":             {"pod_restart_count", "count", "latest", false},
-	"pods.restart_count":            {"pod_restart_count", "count", "latest", false},
-	"agent_action_count":            {"agent_action_count", "count", "count", false},
-}
 
 type metricSample struct {
 	value      float64
@@ -52,12 +21,33 @@ type metricSample struct {
 	evidenceID string
 }
 
+type recoveryEvidenceWindow struct {
+	mutationActionID string
+	mutationAt       time.Time
+	eligibleAt       time.Time
+	hasMutation      bool
+}
+
+type recoveryMetricState struct {
+	postBoundarySample bool
+	eligibleSample     bool
+	positiveTraffic    bool
+}
+
+// Prometheus ratio arithmetic can serialize a mathematically exact 100% as a
+// value one or more floating-point ULPs above 100.
+const percentageRoundoffTolerance = 1e-9
+
 func normalizeEvidence(input EvaluationInput) evaluationEvidence {
-	out := evaluationEvidence{Metrics: map[string]MetricValue{}, Events: []evidence.RunEvent{}, Actions: []evidence.AgentAction{}}
+	out := evaluationEvidence{Metrics: map[string]MetricValue{}, HistoricalMetrics: map[string]MetricValue{}, Events: []evidence.RunEvent{}, Actions: []evidence.AgentAction{}}
 	samples := map[string][]metricSample{}
 	invalid := map[string][]string{}
+	historicalSamples := map[string][]metricSample{}
+	historicalInvalid := map[string][]string{}
 	telemetrySeen := false
 	telemetryUnavailable := false
+	recoveryWindow := outcomeEvidenceWindow(input)
+	recoveryState := map[string]*recoveryMetricState{}
 
 	for _, event := range input.Events {
 		if event.RunID != input.Run.ID || !withinRunWindow(input, event.OccurredAt) {
@@ -85,9 +75,13 @@ func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 				}
 			}
 			addJSONMetric(samples, invalid, "request_rate", metrics["request_rate_rps"], event, ref)
-			addJSONMetric(samples, invalid, "error_rate", metrics["error_rate_pct"], event, ref)
-			addJSONMetric(samples, invalid, "p95_latency", metrics["p95_latency_ms"], event, ref)
-			addJSONMetric(samples, invalid, "availability", metrics["availability_pct"], event, ref)
+			addJSONMetric(historicalSamples, historicalInvalid, "error_rate", metrics["error_rate_pct"], event, ref)
+			addJSONMetric(historicalSamples, historicalInvalid, "p95_latency", metrics["p95_latency_ms"], event, ref)
+			addJSONMetric(historicalSamples, historicalInvalid, "availability", metrics["availability_pct"], event, ref)
+			recordRecoveryMetric(samples, invalid, recoveryState, "error_rate", metrics["error_rate_pct"], metrics["request_rate_rps"], event, ref, recoveryWindow)
+			recordRecoveryMetric(samples, invalid, recoveryState, "current_error_rate", metrics["error_rate_pct"], metrics["request_rate_rps"], event, ref, recoveryWindow)
+			recordRecoveryMetric(samples, invalid, recoveryState, "p95_latency", metrics["p95_latency_ms"], metrics["request_rate_rps"], event, ref, recoveryWindow)
+			recordRecoveryMetric(samples, invalid, recoveryState, "availability", metrics["availability_pct"], metrics["request_rate_rps"], event, ref, recoveryWindow)
 			var desired, available, ready, notReady, restarts float64
 			for _, workload := range payload.Observation.Workloads {
 				desired += float64(workload.DesiredReplicas)
@@ -137,20 +131,120 @@ func normalizeEvidence(input EvaluationInput) evaluationEvidence {
 	samples["agent_action_count"] = []metricSample{{value: float64(len(out.Actions)), evidenceID: "run:" + input.Run.ID}}
 	for _, definition := range uniqueDefinitions() {
 		metricSamples := samples[definition.Canonical]
+		selection := ""
+		refs := []string(nil)
+		if definition.EvidenceScope == evaluationmetric.EvidencePostActionRecovery {
+			selection = recoverySelection(recoveryWindow)
+			if recoveryWindow.hasMutation {
+				refs = append(refs, "agent_action:"+recoveryWindow.mutationActionID)
+			}
+		}
 		if len(invalid[definition.Canonical]) > 0 {
-			out.Metrics[definition.Canonical] = MetricValue{State: ValueInvalid, Unit: definition.Unit, EvidenceIDs: invalid[definition.Canonical], Reason: "observed metric was not a finite number"}
+			refs = append(refs, invalid[definition.Canonical]...)
+			out.Metrics[definition.Canonical] = MetricValue{State: ValueInvalid, Unit: definition.Unit, EvidenceIDs: refs, Reason: "observed metric was not a finite number", EvidenceSelection: selection}
 		} else if len(metricSamples) > 0 {
-			value, refs := reduce(metricSamples, definition.Reducer)
-			out.Metrics[definition.Canonical] = MetricValue{State: ValuePresent, Value: &value, Unit: definition.Unit, EvidenceIDs: refs}
+			value, sampleRefs := reduce(metricSamples, definition.Reducer)
+			refs = append(refs, sampleRefs...)
+			out.Metrics[definition.Canonical] = MetricValue{State: ValuePresent, Value: &value, Unit: definition.Unit, EvidenceIDs: refs, EvidenceSelection: selection}
 		} else {
 			reason := "no observation contained this metric"
+			if definition.EvidenceScope == evaluationmetric.EvidencePostActionRecovery {
+				state := recoveryState[definition.Canonical]
+				switch {
+				case state != nil && state.postBoundarySample && !state.eligibleSample:
+					reason = "post-action evidence did not span the complete required lookback window"
+				case definition.RequiresPositiveTraffic && state != nil && state.eligibleSample && !state.positiveTraffic:
+					reason = "no eligible post-action observation contained positive request traffic"
+				default:
+					reason = "no eligible post-action observation contained this metric"
+				}
+			}
 			if definition.Telemetry && telemetryUnavailable && !telemetrySeen {
 				reason = "telemetry was unavailable for the evaluation window"
 			}
-			out.Metrics[definition.Canonical] = MetricValue{State: ValueUnavailable, Unit: definition.Unit, Reason: reason}
+			out.Metrics[definition.Canonical] = MetricValue{State: ValueUnavailable, Unit: definition.Unit, EvidenceIDs: refs, Reason: reason, EvidenceSelection: selection}
+		}
+	}
+	for _, definition := range uniqueDefinitions() {
+		metricSamples := historicalSamples[definition.Canonical]
+		if len(historicalInvalid[definition.Canonical]) > 0 {
+			out.HistoricalMetrics[definition.Canonical] = MetricValue{State: ValueInvalid, Unit: definition.Unit, EvidenceIDs: historicalInvalid[definition.Canonical], Reason: "observed metric was not a finite number"}
+		} else if len(metricSamples) > 0 {
+			value, refs := reduce(metricSamples, definition.Reducer)
+			out.HistoricalMetrics[definition.Canonical] = MetricValue{State: ValuePresent, Value: &value, Unit: definition.Unit, EvidenceIDs: refs}
 		}
 	}
 	return out
+}
+
+// outcomeEvidenceWindow keeps recovery criteria tied to evidence gathered
+// after the latest executed mutation. Read-only inspect/no_op actions do not move
+// the boundary. Runs without a mutation use their normal start boundary.
+func outcomeEvidenceWindow(input EvaluationInput) recoveryEvidenceWindow {
+	boundary := input.Run.CreatedAt
+	if input.Run.StartedAt != nil {
+		boundary = *input.Run.StartedAt
+	}
+	window := recoveryEvidenceWindow{mutationAt: boundary}
+	for _, action := range input.Actions {
+		if action.RunID != input.Run.ID || !actionWithinRunWindow(input, action) || action.Status != "executed" || !action.Authorized || action.ActionType == "inspect" || action.ActionType == "no_op" {
+			continue
+		}
+		occurred := actionEffectiveTimestamp(action)
+		if occurred.After(boundary) {
+			boundary = occurred
+			window.mutationActionID = action.ID
+			window.mutationAt = occurred
+			window.hasMutation = true
+		}
+	}
+	// A trailing Prometheus rate is fully post-action only after its complete
+	// lookback has elapsed. Samples before this point remain baseline/history.
+	window.eligibleAt = boundary.Add(telemetry.RateWindow)
+	return window
+}
+
+func recordRecoveryMetric(samples map[string][]metricSample, invalid map[string][]string, states map[string]*recoveryMetricState, key string, raw, requestRateRaw json.RawMessage, event evidence.RunEvent, ref string, window recoveryEvidenceWindow) {
+	if len(raw) == 0 || string(raw) == "null" || event.OccurredAt.Before(window.mutationAt) {
+		return
+	}
+	state := states[key]
+	if state == nil {
+		state = &recoveryMetricState{}
+		states[key] = state
+	}
+	state.postBoundarySample = true
+	if event.OccurredAt.Before(window.eligibleAt) {
+		return
+	}
+	state.eligibleSample = true
+	definition, _ := evaluationmetric.Lookup(key)
+	if definition.RequiresPositiveTraffic {
+		requestRate, ok := nonnegativeMetric(requestRateRaw)
+		if !ok || requestRate <= 0 {
+			return
+		}
+		state.positiveTraffic = true
+	}
+	addJSONMetric(samples, invalid, key, raw, event, ref)
+}
+
+func recoverySelection(window recoveryEvidenceWindow) string {
+	if window.hasMutation {
+		return fmt.Sprintf("complete lookback after latest executed mutating action %s at %s; eligible at %s", window.mutationActionID, window.mutationAt.UTC().Format(time.RFC3339Nano), window.eligibleAt.UTC().Format(time.RFC3339Nano))
+	}
+	return fmt.Sprintf("complete lookback after run start; eligible at %s", window.eligibleAt.UTC().Format(time.RFC3339Nano))
+}
+
+func nonnegativeMetric(raw json.RawMessage) (float64, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var value float64
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0, false
+	}
+	return value, true
 }
 
 func addJSONMetric(samples map[string][]metricSample, invalid map[string][]string, key string, raw json.RawMessage, event evidence.RunEvent, ref string) {
@@ -158,9 +252,18 @@ func addJSONMetric(samples map[string][]metricSample, invalid map[string][]strin
 		return
 	}
 	var value float64
-	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || ((key == "availability" || key == "error_rate") && value > 100) {
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
 		invalid[key] = append(invalid[key], ref)
 		return
+	}
+	if key == "availability" || key == "error_rate" || key == "current_error_rate" {
+		if value > 100+percentageRoundoffTolerance {
+			invalid[key] = append(invalid[key], ref)
+			return
+		}
+		if value > 100 {
+			value = 100
+		}
 	}
 	addSample(samples, key, value, event, ref)
 }
@@ -195,10 +298,10 @@ func reduce(samples []metricSample, reducer string) (float64, []string) {
 	return selected.value, refs
 }
 
-func uniqueDefinitions() []metricDefinition {
+func uniqueDefinitions() []evaluationmetric.Definition {
 	seen := map[string]bool{}
-	result := make([]metricDefinition, 0)
-	for _, definition := range metricDefinitions {
+	result := make([]evaluationmetric.Definition, 0)
+	for _, definition := range evaluationmetric.Definitions() {
 		if !seen[definition.Canonical] {
 			seen[definition.Canonical] = true
 			result = append(result, definition)
@@ -224,11 +327,18 @@ func withinRunWindow(input EvaluationInput, occurred time.Time) bool {
 }
 
 func actionWithinRunWindow(input EvaluationInput, action evidence.AgentAction) bool {
+	return withinRunWindow(input, actionEffectiveTimestamp(action))
+}
+
+func actionEffectiveTimestamp(action evidence.AgentAction) time.Time {
 	timestamp := action.CreatedAt
 	if action.StartedAt != nil {
 		timestamp = *action.StartedAt
 	}
-	return withinRunWindow(input, timestamp)
+	if action.CompletedAt != nil {
+		timestamp = *action.CompletedAt
+	}
+	return timestamp
 }
 
 func isRuntimeFailureCode(code string) bool {
@@ -241,7 +351,7 @@ func isRuntimeFailureCode(code string) bool {
 }
 
 func metricFor(key string, normalized evaluationEvidence) (MetricValue, bool) {
-	definition, ok := metricDefinitions[key]
+	definition, ok := evaluationmetric.Lookup(key)
 	if !ok {
 		return MetricValue{State: ValueUnavailable, Reason: fmt.Sprintf("unsupported evaluator metric %q", key)}, false
 	}

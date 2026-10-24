@@ -1,0 +1,10 @@
+DROP TABLE operational_guidance_experiments;
+DROP TABLE operational_guidance_requests;
+DROP TABLE operational_guidance_credentials;
+DROP TABLE operational_lesson_decisions;
+DROP TABLE operational_lessons;
+DROP TABLE operational_episode_decisions;
+DROP TABLE operational_episode_relationships;
+DROP TABLE operational_episodes;
+ALTER TABLE operational_assessment_reports
+    DROP CONSTRAINT operational_assessment_reports_episode_scope_key;

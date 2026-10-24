@@ -8,6 +8,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
+	"time"
 )
 
 // ExecuteRun accepts only an atomically claimed provisioning run. Terminal retries
@@ -34,6 +35,13 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 	}
 	var env observation.EnvironmentContext
 	var provisionAttempted, ready bool
+	currentStage := "run_setup"
+	markStage := func(name, status string) {
+		if status == "started" {
+			currentStage = name
+		}
+		w.stage(name, status)
+	}
 	// Independent bounded finalization survives caller cancellation. Cleanup gets a
 	// separate budget so evaluation outages cannot consume its deadline.
 	defer func() {
@@ -56,8 +64,17 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 		if cause != nil {
 			err = errors.Join(err, cause)
 		}
+		if err != nil {
+			failureStage := currentStage
+			var staged *StageFailure
+			if errors.As(err, &staged) {
+				failureStage = staged.Stage
+			}
+			w.failure("worker_failure", failureStage, err)
+		}
 		final, done := context.WithTimeout(context.Background(), w.config.FinalizeTimeout)
 		defer done()
+		var preTerminalPersistenceErr error
 		if err != nil {
 			code, class := "runtime_failure", "platform"
 			var f *Failure
@@ -69,15 +86,37 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 			} else if errors.Is(cause, context.DeadlineExceeded) {
 				code, class = "run_timeout", "platform"
 			}
-			err = errors.Join(err, w.event(final, run.RunID, "system", code, map[string]any{"classification": class}))
+			preTerminalPersistenceErr = w.event(final, run.RunID, "system", code, map[string]any{"classification": class})
+			if preTerminalPersistenceErr != nil {
+				w.failure("persistence_failure", "failure_event", preTerminalPersistenceErr)
+			}
+			err = errors.Join(err, preTerminalPersistenceErr)
 		}
 		if ready && ctx.Err() == nil {
+			w.stage("final_snapshot", "started")
 			if e := w.observe(ctx, env, "final_observation_collected"); e != nil {
-				err = errors.Join(err, platform("final_observation_failed", e))
-				err = errors.Join(err, w.event(final, run.RunID, "system", "runtime_failure", map[string]any{"classification": "platform", "reason_code": "final_observation_failed"}))
+				observationErr := platform("final_observation_failed", e)
+				if err == nil {
+					w.failure("worker_failure", "final_snapshot", observationErr)
+				}
+				err = errors.Join(err, observationErr)
+				eventErr := w.event(final, run.RunID, "system", "runtime_failure", map[string]any{"classification": "platform", "reason_code": "final_observation_failed"})
+				preTerminalPersistenceErr = errors.Join(preTerminalPersistenceErr, eventErr)
+				if eventErr != nil {
+					w.failure("persistence_failure", "final_observation_event", eventErr)
+				}
+				err = errors.Join(err, eventErr)
+				w.stage("final_snapshot", "failed")
+			} else {
+				w.stage("final_snapshot", "completed")
 			}
 		} else {
-			err = errors.Join(err, w.event(final, run.RunID, "system", "final_observation_unavailable", nil))
+			eventErr := w.event(final, run.RunID, "system", "final_observation_unavailable", nil)
+			preTerminalPersistenceErr = errors.Join(preTerminalPersistenceErr, eventErr)
+			if eventErr != nil {
+				w.failure("persistence_failure", "final_observation_event", eventErr)
+			}
+			err = errors.Join(err, eventErr)
 		}
 		// Recheck the durable stop flag to close the final loop/transition race.
 		current, stop, e := w.deps.Lifecycle.RunStatus(final, run.WorkspaceID, run.RunID)
@@ -85,6 +124,7 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 			err = errors.Join(err, e)
 		}
 		var terminalErr error
+		w.stage("persistence", "started")
 		switch {
 		case e != nil:
 			terminalErr = e
@@ -96,10 +136,26 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 		default:
 			terminalErr = w.deps.Lifecycle.CompleteOwnedRun(final, run.RunID, w.config.WorkerID)
 		}
-		err = errors.Join(err, terminalErr)
+		if terminalErr != nil {
+			w.failure("persistence_failure", "run_terminal_transition", terminalErr)
+		}
+		persistenceErr := errors.Join(preTerminalPersistenceErr, terminalErr)
 		if terminalErr == nil {
-			err = errors.Join(err, w.evaluate(run))
-			err = errors.Join(err, w.settleBilling(run))
+			evaluationErr := w.evaluate(run)
+			billingErr := w.settleBilling(run)
+			persistenceErr = errors.Join(persistenceErr, evaluationErr, billingErr)
+			if evaluationErr != nil {
+				w.failure("persistence_failure", "evaluation_or_verification", evaluationErr)
+			}
+			if billingErr != nil {
+				w.failure("persistence_failure", "billing_settlement", billingErr)
+			}
+		}
+		err = errors.Join(err, persistenceErr)
+		if persistenceErr != nil {
+			w.stage("persistence", "failed")
+		} else {
+			w.stage("persistence", "completed")
 		}
 	}()
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
@@ -155,6 +211,7 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 	if err = w.event(ctx, run.RunID, "system", "environment_provisioning_started", nil); err != nil {
 		return err
 	}
+	markStage("environment_setup", "started")
 	provisionAttempted = true
 	environment, runEnvPins, err := w.provisionEnvironment(ctx, run, sv, id)
 	if err != nil {
@@ -167,20 +224,54 @@ func (w *Worker) ExecuteRun(parent context.Context, run execution.ExecutionRun) 
 	if err = w.deps.Runtime.Prepare(ctx, env, sv, run.HiddenVariant); err != nil {
 		return platform("scenario_prepare_failed", err)
 	}
+	markStage("environment_setup", "completed")
 	ready = true
+	if w.deps.Verification != nil {
+		markStage("baseline_capture", "started")
+		if err = w.observe(ctx, env, "verification_baseline_captured"); err != nil {
+			return platform("baseline_snapshot_failed", err)
+		}
+		markStage("baseline_capture", "completed")
+	}
+	markStage("telemetry_start", "started")
 	if err = w.deps.Runtime.Start(ctx, env, sv, run.HiddenVariant); err != nil {
 		return platform("scenario_start_failed", err)
 	}
+	markStage("telemetry_start", "completed")
 	if err = w.event(ctx, run.RunID, "scenario", "scenario_started", nil); err != nil {
 		return err
 	}
 	if err = w.deps.Lifecycle.MarkOwnedRunRunning(ctx, run.RunID, w.config.WorkerID, environment.Reference); err != nil {
 		return err
 	}
+	markStage("agent_execution", "started")
 	if err = w.agentLoop(ctx, run, env, sv.AgentView(), av); err != nil {
 		return err
 	}
-	return platform("scenario_finish_failed", w.deps.Runtime.Finish(ctx, env))
+	markStage("agent_execution", "completed")
+	markStage("traffic_completion", "started")
+	if err = w.deps.Runtime.Finish(ctx, env); err != nil {
+		return platform("scenario_finish_failed", err)
+	}
+	markStage("traffic_completion", "completed")
+	markStage("stability_observation", "started")
+	err = w.observeStability(ctx, env)
+	if err == nil {
+		markStage("stability_observation", "completed")
+	}
+	return err
+}
+
+func (w *Worker) stage(name, status string) {
+	if w.deps.OnStage != nil {
+		w.deps.OnStage(name, status)
+	}
+}
+
+func (w *Worker) failure(kind, stage string, err error) {
+	if err != nil && w.deps.OnFailure != nil {
+		w.deps.OnFailure(kind, stage, err)
+	}
 }
 
 func (w *Worker) settleBilling(run execution.ExecutionRun) error {
@@ -217,9 +308,60 @@ func (w *Worker) evaluate(run execution.ExecutionRun) (err error) {
 		defer done()
 		return errors.Join(platform("evaluation_persistence_failed", err), w.event(record, run.RunID, "system", "evaluation_persistence_failed", map[string]any{"classification": "platform"}))
 	}
-	return w.event(ctx, run.RunID, "evaluation", "evaluation_completed", nil)
+	if err := w.event(ctx, run.RunID, "evaluation", "evaluation_completed", nil); err != nil {
+		return err
+	}
+	if w.deps.Verification != nil {
+		w.stage("gitops_consistency_and_forward_risk_derivation", "started")
+		if err := w.deps.Verification.DeriveRun(ctx, run.WorkspaceID, run.RunID); err != nil {
+			w.stage("gitops_consistency_and_forward_risk_derivation", "failed")
+			return platform("verification_persistence_failed", err)
+		}
+		w.stage("gitops_consistency_and_forward_risk_derivation", "completed")
+		return w.event(ctx, run.RunID, "evaluation", "verification_completed", nil)
+	}
+	return nil
+}
+
+func (w *Worker) observeStability(ctx context.Context, env observation.EnvironmentContext) error {
+	if w.deps.Verification == nil {
+		return nil
+	}
+	now := w.deps.Now
+	if now == nil {
+		now = time.Now
+	}
+	started := now()
+	for {
+		if err := w.observe(ctx, env, "stability_observation_collected"); err != nil {
+			return platform("stability_observation_failed", err)
+		}
+		remaining := w.config.StabilityWindow - now().Sub(started)
+		if remaining <= 0 {
+			return nil
+		}
+		delay := w.config.StabilityInterval
+		if remaining < delay {
+			delay = remaining
+		}
+		waiter := w.deps.Wait
+		if waiter == nil {
+			waiter = wait
+		}
+		if err := waiter(ctx, delay); err != nil {
+			return err
+		}
+	}
 }
 func (w *Worker) cleanup(id kubeenv.RunIdentity) (err error) {
+	w.stage("cleanup", "started")
+	defer func() {
+		if err != nil {
+			w.stage("cleanup", "failed")
+		} else {
+			w.stage("cleanup", "completed")
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), w.config.CleanupTimeout)
 	defer cancel()
 	startErr := w.event(ctx, id.RunID, "system", "cleanup_started", nil)

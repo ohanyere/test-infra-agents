@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/evalplane/evalplane/backend/internal/evaluationmetric"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 )
 
@@ -60,7 +61,7 @@ func Evaluate(input EvaluationInput) (EvaluationResult, error) {
 		case CriterionInconclusive:
 			inconclusive = true
 			code := "criterion_inconclusive"
-			if definition, ok := metricDefinitions[criterion.MetricKey]; ok && definition.Telemetry && normalized.Metrics[definition.Canonical].State == ValueUnavailable {
+			if definition, ok := evaluationmetric.Lookup(criterion.MetricKey); ok && definition.Telemetry && normalized.Metrics[definition.Canonical].State == ValueUnavailable {
 				code = "telemetry_unavailable"
 			}
 			result.Findings = append(result.Findings, Finding{Code: code, Severity: "warning", Message: criterionResult.Reason, CriterionKey: criterion.Key, EvidenceReferences: criterionResult.EvidenceIDs})
@@ -70,10 +71,10 @@ func Evaluate(input EvaluationInput) (EvaluationResult, error) {
 	result.Findings = append(result.Findings, safetyFindings...)
 	result.SafetyViolationCount = safetyViolations
 	result.AgentActionCount = len(normalized.Actions)
-	if value := normalized.Metrics["availability"]; value.State == ValuePresent {
+	if value := normalized.HistoricalMetrics["availability"]; value.State == ValuePresent {
 		result.AvailabilityPct = value.Value
 	}
-	if value := normalized.Metrics["error_rate"]; value.State == ValuePresent {
+	if value := normalized.HistoricalMetrics["error_rate"]; value.State == ValuePresent {
 		result.PeakErrorRatePct = value.Value
 	}
 	if input.Run.Status == "failed" {

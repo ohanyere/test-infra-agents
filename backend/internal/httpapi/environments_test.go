@@ -66,6 +66,10 @@ func (f *fakeEnvironmentService) ListInstances(_ context.Context, _ auth.Princip
 	return []environment.EnvironmentInstance{}, nil
 }
 
+func (f *fakeEnvironmentService) ListInstanceComponents(_ context.Context, _ auth.Principal, _, _ string) ([]environment.EnvironmentComponentInstance, error) {
+	return []environment.EnvironmentComponentInstance{}, nil
+}
+
 func (f *fakeEnvironmentService) TransitionInstance(_ context.Context, _ auth.Principal, _, _, _ string) (environment.EnvironmentInstance, error) {
 	return environment.EnvironmentInstance{}, identity.ErrValidation
 }
@@ -108,6 +112,20 @@ func TestListEnvironmentComponents(t *testing.T) {
 	}
 	if len(body.Items) < 6 {
 		t.Fatalf("expected at least 6 components, got %d", len(body.Items))
+	}
+}
+
+func TestLegacyEnvironmentComponentsMayBeEmpty(t *testing.T) {
+	w := serveEnvironment(http.MethodGet, "/v1/workspaces/11111111-1111-4111-8111-111111111111/environments/22222222-2222-4222-8222-222222222222/components", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body listResponse[environment.EnvironmentComponentInstance]
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 0 {
+		t.Fatalf("legacy environment returned children: %#v", body.Items)
 	}
 }
 

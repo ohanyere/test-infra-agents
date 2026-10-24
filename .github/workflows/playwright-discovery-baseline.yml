@@ -1,0 +1,90 @@
+name: Playwright discovery baseline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - infrastructure-agent-verification
+    paths:
+      - .github/workflows/playwright-discovery-baseline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Compare project and clean Playwright discovery
+        run: |
+          set -euo pipefail
+          mkdir -p .playwright-baseline
+          cat > .playwright-baseline/playwright.config.cjs <<'EOF'
+          module.exports = { testDir: __dirname, testMatch: 'isolated.spec.cjs', reporter: 'list' };
+          EOF
+          cat > .playwright-baseline/isolated.spec.cjs <<'EOF'
+          const { test, expect } = require('@playwright/test');
+          test('isolated assertion', () => { expect(1).toBe(1); });
+          EOF
+
+          run_discovery() {
+            local label="$1" runner="$2" config="$3" start status
+            start="$(date +%s)"
+            if timeout --signal=TERM --kill-after=2s 20s "$runner" test --config="$config" --list > "$RUNNER_TEMP/$label.log" 2>&1; then
+              status=0
+            else
+              status=$?
+            fi
+            printf '%s status=%s elapsed=%ss\n' "$label" "$status" "$(( $(date +%s) - start ))" | tee -a "$RUNNER_TEMP/discovery-summary.log"
+            cat "$RUNNER_TEMP/$label.log"
+            if [ "$status" -ne 0 ] || ! grep -Fq 'Total: 1 test in 1 file' "$RUNNER_TEMP/$label.log"; then
+              return 1
+            fi
+          }
+
+          node --version
+          timeout 5m npm ci
+          timeout 3m npm install --no-save --package-lock=false @playwright/test@1.51.1
+          node -e 'const version = require("@playwright/test/package.json").version; console.log(`project @playwright/test ${version}`); if (version !== "1.51.1") process.exit(1)'
+          if run_discovery project ./node_modules/.bin/playwright .playwright-baseline/playwright.config.cjs; then
+            echo 'Project discovery passed; clean comparison unnecessary.' | tee -a "$RUNNER_TEMP/discovery-summary.log"
+            exit 0
+          fi
+
+          clean_dir="$RUNNER_TEMP/clean-playwright-baseline"
+          mkdir -p "$clean_dir"
+          cp .playwright-baseline/{playwright.config.cjs,isolated.spec.cjs} "$clean_dir/"
+          if timeout 3m npm install --prefix "$clean_dir" --no-save --package-lock=false @playwright/test@1.51.1 > "$RUNNER_TEMP/clean-install.log" 2>&1; then
+            cat "$RUNNER_TEMP/clean-install.log"
+          else
+            status=$?
+            printf 'clean-install status=%s; comparison inconclusive\n' "$status" | tee -a "$RUNNER_TEMP/discovery-summary.log"
+            cat "$RUNNER_TEMP/clean-install.log"
+            exit "$status"
+          fi
+          node -e 'const version = require(process.argv[1]).version; console.log(`clean @playwright/test ${version}`); if (version !== "1.51.1") process.exit(1)' "$clean_dir/node_modules/@playwright/test/package.json"
+          if run_discovery clean "$clean_dir/node_modules/.bin/playwright" "$clean_dir/playwright.config.cjs"; then
+            echo 'Project discovery failed; clean discovery passed.' | tee -a "$RUNNER_TEMP/discovery-summary.log"
+          else
+            echo 'Project and clean discovery both failed.' | tee -a "$RUNNER_TEMP/discovery-summary.log"
+          fi
+          exit 1
+
+      - name: Retain discovery results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-discovery-baseline
+          path: |
+            ${{ runner.temp }}/discovery-summary.log
+            ${{ runner.temp }}/project.log
+            ${{ runner.temp }}/clean-install.log
+            ${{ runner.temp }}/clean.log
+          retention-days: 7

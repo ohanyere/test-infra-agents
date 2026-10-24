@@ -1,0 +1,202 @@
+name: Operation explanation browser acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, infrastructure-agent-verification]
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    name: Real API and Next.js with a labeled synthetic source fixture
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[verify-browser]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: operation_browser
+          POSTGRES_PASSWORD: operation_browser
+          POSTGRES_DB: infra_agents_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U operation_browser -d infra_agents_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://operation_browser:operation_browser@127.0.0.1:5432/infra_agents_test?sslmode=disable
+      OPERATION_PROOF_DISPOSABLE: "1"
+      GOMAXPROCS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Migrate the disposable database
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          test "$(psql "$DATABASE_URL" -Atc 'SELECT current_database()')" = infra_agents_test
+          go run ./cmd/migrate up
+          expected="$(find migrations -name '*.up.sql' -printf '%f\n' | sort | tail -1 | cut -c1-6)"
+          version="$(psql "$DATABASE_URL" -Atc 'SELECT version || chr(32) || dirty FROM schema_migrations')"
+          test "$version" = "$((10#$expected)) false"
+
+      - name: Seed a provisional operation and assessment
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -base64 32 | tr -d '\n')"
+          echo "::add-mask::$password"
+          echo "OPERATION_PROOF_PASSWORD=$password" >> "$GITHUB_ENV"
+          export OPERATION_PROOF_PASSWORD="$password"
+          private="$RUNNER_TEMP/operation-proof-private.json"
+          public="$RUNNER_TEMP/operation-proof.json"
+          echo "OPERATION_PROOF_FILE=$public" >> "$GITHUB_ENV"
+          go run ./cmd/operationproof -phase begin -fixture "$private" -namespace checkout -name checkout -cluster browser-synthetic-fixture
+          go run ./cmd/operationproof -phase finish -fixture "$private" > "$public"
+          jq -e '.fixture_kind == "synthetic_browser_fixture" and .source_classification == "INSUFFICIENT_PROVENANCE" and .audit_origin_status == "unverified"' "$public" >/dev/null
+          rm -f "$private"
+
+      - name: Install frontend and pinned Playwright browser
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          timeout 5m npm ci
+          timeout 3m npm install --no-save --package-lock=false @playwright/test@1.51.1
+          test -x ./node_modules/.bin/playwright
+          timeout 8m ./node_modules/.bin/playwright install --with-deps chromium
+          ./node_modules/.bin/playwright --version
+          chromium_path="$(node -e 'console.log(require("@playwright/test").chromium.executablePath())')"
+          test -x "$chromium_path"
+          echo "Chromium executable available at $chromium_path"
+
+      - name: Discover browser tests and launch Chromium
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          export OPERATION_PHASE_FILE="$RUNNER_TEMP/operation-playwright-discovery-phases.log"
+          : > "$OPERATION_PHASE_FILE"
+          bash tests/diagnose-playwright-discovery.sh
+          echo "Launching Chromium, creating a context, and opening a local document"
+          DEBUG=pw:browser timeout --signal=TERM --kill-after=5s 30s node --input-type=module -e '
+            import { chromium } from "@playwright/test";
+            const browser = await chromium.launch({ headless: true });
+            try {
+              const context = await browser.newContext();
+              const page = await context.newPage();
+              await page.goto("data:text/html,<title>Realverax browser preflight</title>");
+              console.log("Chromium launch, context, and navigation: PASS");
+              await context.close();
+            } finally {
+              await browser.close();
+            }
+          '
+
+      - name: Build API and frontend
+        timeout-minutes: 12
+        env:
+          APP_ORIGIN: http://127.0.0.1:3000
+          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8080
+          ENVIRONMENT: development
+          COOKIE_SECURE: "false"
+          PORT: "8080"
+        run: |
+          set -euo pipefail
+          echo "Building Go API"
+          (cd backend && timeout 8m go build -o "$RUNNER_TEMP/realverax-api" ./cmd/api)
+          echo "Building Next.js frontend"
+          timeout 8m npm run build
+
+      - name: Accept against running API and frontend
+        timeout-minutes: 10
+        env:
+          APP_ORIGIN: http://127.0.0.1:3000
+          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8080
+          ENVIRONMENT: development
+          COOKIE_SECURE: "false"
+          PORT: "8080"
+        run: |
+          set -euo pipefail
+          encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
+          echo "::add-mask::$encryption_key"
+          export AGENT_CREDENTIAL_ENCRYPTION_KEY="$encryption_key"
+          "$RUNNER_TEMP/realverax-api" > "$RUNNER_TEMP/operation-api.log" 2>&1 &
+          api_pid=$!
+          npm run start -- --hostname 127.0.0.1 --port 3000 > "$RUNNER_TEMP/operation-frontend.log" 2>&1 &
+          frontend_pid=$!
+          diagnostics() {
+            echo "API process: $(ps -p "$api_pid" -o pid=,stat=,comm= || true)"
+            echo "Frontend process: $(ps -p "$frontend_pid" -o pid=,stat=,comm= || true)"
+            echo "API log (last 80 lines):"
+            tail -n 80 "$RUNNER_TEMP/operation-api.log" | sed -E 's#postgres(ql)?://[^@[:space:]]+@#postgres://***@#g' || true
+            echo "Frontend log (last 80 lines):"
+            tail -n 80 "$RUNNER_TEMP/operation-frontend.log" || true
+          }
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then diagnostics; fi
+            kill "$frontend_pid" "$api_pid" 2>/dev/null || true
+            wait "$frontend_pid" "$api_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          wait_for_service() {
+            label=$1 url=$2 pid=$3
+            deadline=$((SECONDS + 90))
+            echo "Waiting for $label at $url"
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "$label process exited before readiness" >&2
+                return 1
+              fi
+              if curl --noproxy '*' --fail --silent --connect-timeout 2 --max-time 5 "$url" >/dev/null; then
+                echo "$label ready"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "$label readiness exceeded 90 seconds" >&2
+            return 1
+          }
+          wait_for_service API http://127.0.0.1:8080/readyz "$api_pid"
+          wait_for_service frontend http://127.0.0.1:3000/login "$frontend_pid"
+          echo "Starting Playwright operation-explanation assertions"
+          export OPERATION_PHASE_FILE="$RUNNER_TEMP/operation-playwright-phases.log"
+          : > "$OPERATION_PHASE_FILE"
+          if DEBUG=pw:browser timeout --signal=TERM --kill-after=10s 6m ./node_modules/.bin/playwright test --config=tests/playwright.config.cjs; then
+            echo "Playwright operation-explanation assertions passed"
+          else
+            status=$?
+            echo "Playwright exited with status $status (124 indicates the 6-minute limit)" >&2
+            echo "Playwright phase markers:" >&2
+            cat "$OPERATION_PHASE_FILE" >&2
+            exit "$status"
+          fi
+
+      - name: Retain browser acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operation-explanation-browser
+          path: |
+            test-results/
+            ${{ runner.temp }}/operation-proof.json
+            ${{ runner.temp }}/playwright-discovery-diagnostics/
+            ${{ runner.temp }}/operation-playwright-discovery-phases.log
+            ${{ runner.temp }}/operation-playwright-phases.log
+          retention-days: 7

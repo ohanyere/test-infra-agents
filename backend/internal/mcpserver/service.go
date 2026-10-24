@@ -15,6 +15,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/actionexec"
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 )
 
 type Observer interface {
@@ -124,25 +125,22 @@ func (s *Service) effectiveTools(scope Scope) []string {
 	for _, capability := range scope.Version.Capabilities {
 		allowed[capability] = true
 	}
-	viewObs, viewActions := map[string]bool{}, map[string]bool{}
-	for _, capability := range scope.AgentView.AllowedObservations {
-		viewObs[capability] = true
-	}
+	viewObs, viewActions := observablecatalog.Resolve(scope.AgentView.AllowedObservations), map[string]bool{}
 	for _, capability := range scope.AgentView.AllowedActions {
 		viewActions[capability] = true
 	}
 	var out []string
-	if allowed["kubernetes_workloads"] && viewObs["kubernetes_workloads"] {
+	if viewObs[observablecatalog.Workloads] && observablecatalog.HasCapability(observablecatalog.Workloads, allowed) {
 		out = append(out, ToolObserveWorkloads)
 	}
-	if allowed["kubernetes_pods"] && viewObs["kubernetes_pods"] {
+	if viewObs[observablecatalog.Pods] && observablecatalog.HasCapability(observablecatalog.Pods, allowed) {
 		out = append(out, ToolObservePods)
 	}
-	if (allowed["kubernetes_events"] || allowed["events"]) && (viewObs["kubernetes_events"] || viewObs["events"]) {
+	if viewObs[observablecatalog.Events] && observablecatalog.HasCapability(observablecatalog.Events, allowed) {
 		out = append(out, ToolObserveEvents)
 	}
-	for _, metric := range []string{"request_rate", "error_rate", "p95_latency", "availability"} {
-		if allowed[metric] && viewObs[metric] {
+	for _, definition := range observablecatalog.Definitions() {
+		if definition.MetricKey != "" && viewObs[definition.ID] && observablecatalog.HasCapability(definition.ID, allowed) {
 			out = append(out, ToolGetTelemetry)
 			break
 		}

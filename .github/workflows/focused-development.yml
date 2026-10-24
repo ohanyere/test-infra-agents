@@ -1,0 +1,101 @@
+name: Focused feature verification
+
+on:
+  push:
+    branches: [infrastructure-agent-verification]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focused-development-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused:
+    name: Focused code checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select checks for changed files
+        id: changes
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff-tree --check -r "$GITHUB_SHA"
+            changed="$(git ls-files)"
+          else
+            git diff --check "$BEFORE_SHA" "$GITHUB_SHA"
+            changed="$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA")"
+          fi
+          backend=false frontend=false browser=false shell_files=false migrations=false
+          while IFS= read -r file; do
+            case "$file" in
+              backend/*.go|backend/go.mod|backend/go.sum) backend=true ;;
+              backend/migrations/*.sql) migrations=true ;;
+            esac
+            case "$file" in
+              app/*|lib/*|package.json|package-lock.json|tsconfig.json|next.config.*) frontend=true ;;
+              tests/*.cjs|tests/*.js) browser=true ;;
+              backend/e2e/*.sh|scripts/*.sh|tests/*.sh) shell_files=true ;;
+            esac
+          done <<< "$changed"
+          {
+            echo "backend=$backend"
+            echo "frontend=$frontend"
+            echo "browser=$browser"
+            echo "shell_files=$shell_files"
+            echo "migrations=$migrations"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Selected: backend=%s frontend=%s browser=%s shell=%s migrations=%s\n' "$backend" "$frontend" "$browser" "$shell_files" "$migrations"
+
+      - uses: actions/setup-go@v5
+        if: steps.changes.outputs.backend == 'true'
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Test focused agent and verification packages
+        if: steps.changes.outputs.backend == 'true'
+        working-directory: backend
+        run: go test -p 1 ./cmd/externalagent ./internal/agentgateway ./internal/actionexec ./internal/customerattribution ./internal/verification ./internal/operational ./internal/httpapi
+
+      - name: Validate migration files
+        if: steps.changes.outputs.migrations == 'true'
+        run: ./scripts/check-migrations.sh
+
+      - uses: actions/setup-node@v4
+        if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.browser == 'true'
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Typecheck frontend and verify routes
+        if: steps.changes.outputs.frontend == 'true'
+        run: |
+          npm ci
+          npm run typecheck
+          npm run check:routes
+
+      - name: Check browser JavaScript syntax
+        if: steps.changes.outputs.browser == 'true'
+        run: |
+          for file in tests/*.cjs tests/*.js; do
+            [[ -f "$file" ]] || continue
+            node --check "$file"
+          done
+
+      - name: Check shell syntax
+        if: steps.changes.outputs.shell_files == 'true'
+        run: |
+          for file in backend/e2e/*.sh scripts/*.sh tests/*.sh; do
+            [[ -f "$file" ]] || continue
+            bash -n "$file"
+          done

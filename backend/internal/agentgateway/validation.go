@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-var allowedActions = map[string]struct{}{"inspect": {}, "scale_workload": {}, "restart_pod": {}, "no_op": {}}
+var allowedActions = map[string]struct{}{"inspect": {}, "scale_workload": {}, "restart_pod": {}, "set_workload_image": {}, "set_live_workload_image": {}, "set_desired_workload_image": {}, "no_op": {}}
 
 type EndpointPolicy struct {
 	AllowPrivate bool
@@ -227,6 +227,14 @@ func validateAction(action ProposedAction) error {
 		replicas, ok := action.Parameters["replicas"].(float64)
 		if !ok || replicas < 1 || replicas > 100 || replicas != float64(int(replicas)) {
 			return fmt.Errorf("%w: replicas must be an integer from 1 to 100", ErrInvalidResponse)
+		}
+	case "set_workload_image", "set_live_workload_image", "set_desired_workload_image":
+		if action.Target.Kind != "Deployment" {
+			return fmt.Errorf("%w: image target must be a Deployment", ErrInvalidResponse)
+		}
+		image, ok := action.Parameters["image"].(string)
+		if !ok || strings.TrimSpace(image) == "" || len(image) > 255 || strings.Contains(image, "://") {
+			return fmt.Errorf("%w: image must be a bounded container image reference", ErrInvalidResponse)
 		}
 	case "restart_pod":
 		if action.Target.Kind != "Pod" {

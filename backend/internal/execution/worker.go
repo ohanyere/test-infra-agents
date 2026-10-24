@@ -19,6 +19,6 @@ func (s *Service) LoadVersions(ctx context.Context, workspaceID, runID string) (
 		return sv, agent.Version{}, err
 	}
 	var av agent.Version
-	err = s.pool.QueryRow(ctx, `SELECT av.id,av.version_label,av.interface_kind,av.tool_access_mode,COALESCE(av.endpoint_url,''),av.capabilities,av.metadata,av.created_at FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN agent_versions av ON av.id=r.agent_version_id WHERE r.id=$1 AND b.workspace_id=$2`, runID, workspaceID).Scan(&av.ID, &av.VersionLabel, &av.InterfaceKind, &av.ToolAccessMode, &av.EndpointURL, &av.Capabilities, &av.Metadata, &av.CreatedAt)
+	err = s.pool.QueryRow(ctx, `SELECT av.id,av.version_label,av.interface_kind,av.tool_access_mode,COALESCE(av.endpoint_url,''),av.capabilities,r.agent_implementation_identity,av.metadata,av.created_at FROM runs r JOIN evaluation_batches b ON b.id=r.batch_id JOIN agent_versions av ON av.id=r.agent_version_id WHERE r.id=$1 AND b.workspace_id=$2`, runID, workspaceID).Scan(&av.ID, &av.VersionLabel, &av.InterfaceKind, &av.ToolAccessMode, &av.EndpointURL, &av.Capabilities, &av.ImplementationIdentity, &av.Metadata, &av.CreatedAt)
 	return sv, av, mapDB(err)
 }

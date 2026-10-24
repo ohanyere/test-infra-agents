@@ -76,6 +76,30 @@ func TestEvaluationBatchIntegration(t *testing.T) {
 		t.Fatalf("two=%+v", twoBatch)
 	}
 	assertExactVersions(t, ctx, pool, twoBatch.ID, scenarioVersionID, []string{agent1, agent2})
+	var pinnedIdentity json.RawMessage
+	if e := pool.QueryRow(ctx, `SELECT agent_implementation_identity FROM runs WHERE batch_id=$1 AND agent_version_id=$2 ORDER BY attempt_number LIMIT 1`, twoBatch.ID, agent1).Scan(&pinnedIdentity); e != nil {
+		t.Fatal(e)
+	}
+	var pinned map[string]any
+	if e := json.Unmarshal(pinnedIdentity, &pinned); e != nil || pinned["identifier"] != "agent-a-revision" {
+		t.Fatalf("run identity was not pinned: identity=%s error=%v", pinnedIdentity, e)
+	}
+	if _, e := pool.Exec(ctx, `UPDATE agent_versions SET implementation_identity=jsonb_set(implementation_identity,'{identifier}','"replacement"') WHERE id=$1`, agent1); e == nil {
+		t.Fatal("agent version implementation identity mutation must be rejected")
+	}
+	var stillPinned json.RawMessage
+	if e := pool.QueryRow(ctx, `SELECT agent_implementation_identity FROM runs WHERE batch_id=$1 AND agent_version_id=$2 ORDER BY attempt_number LIMIT 1`, twoBatch.ID, agent1).Scan(&stillPinned); e != nil || string(stillPinned) != string(pinnedIdentity) {
+		t.Fatalf("historical run identity changed: before=%s after=%s error=%v", pinnedIdentity, stillPinned, e)
+	}
+	ciInput := CreateInput{ScenarioVersionID: scenarioVersionID, AgentVersionIDs: []string{agent1}, RunsPerAgent: 1, EnvironmentMode: "isolated", IdempotencyKey: "github:org/repo:abc123:suite", SourceMetadata: SourceMetadata{Provider: "github", Repository: "org/repo", CommitSHA: "abc1234", PullRequest: "248", Workflow: "verify"}}
+	ciFirst, e := svc.Create(ctx, p, one.ID, ciInput)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ciAgain, e := svc.Create(ctx, p, one.ID, ciInput)
+	if e != nil || ciAgain.ID != ciFirst.ID || ciAgain.SourceMetadata.CommitSHA != "abc1234" {
+		t.Fatalf("idempotent CI batch first=%+v again=%+v error=%v", ciFirst, ciAgain, e)
+	}
 	runs, e := svc.ListRuns(ctx, p, one.ID, twoBatch.ID, Filters{Pagination: identity.Pagination{Limit: 50}})
 	if e != nil || len(runs) != 6 {
 		t.Fatalf("runs=%d error=%v", len(runs), e)
@@ -128,7 +152,7 @@ func insertAgentVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 	if err := pool.QueryRow(ctx, `INSERT INTO agents(owner_workspace_id,slug,name,visibility,status) VALUES($1,$2,$2,$3,$4) RETURNING id`, workspaceID, slug, visibility, status).Scan(&agentID); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `INSERT INTO agent_versions(agent_id,version_label) VALUES($1,'v1') RETURNING id`, agentID).Scan(&versionID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO agent_versions(agent_id,version_label,implementation_identity) VALUES($1,'v1',jsonb_build_object('contract_version','agent-implementation-identity:v1','kind','source_revision','identifier',$2 || '-revision','provenance_level','declared')) RETURNING id`, agentID, slug).Scan(&versionID); err != nil {
 		t.Fatal(err)
 	}
 	return versionID

@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import { PublicNavigation } from "../site-navigation";
+import { SiteFooter } from "../site-footer";
 import styles from "./pricing.module.css";
 
 export const metadata: Metadata = {
-  title: "Pricing — Evalplane",
+  title: "Pricing — Realverax",
   description: "Qualification plans and evaluation credits for infrastructure agents.",
 };
 
@@ -57,12 +58,12 @@ const plans = [
 
 export default function PricingPage() {
   return <main className={styles.page}>
-    <PublicNavigation active="pricing" />
+    <PublicNavigation />
 
     <header className={`${styles.intro} ${styles.shell}`}>
       <p className={styles.eyebrow}>PRICING</p>
-      <h1>Pricing for real trials.</h1>
-      <p>Plans scale with evaluation usage, environment fidelity, and evidence retention.</p>
+      <h1>Pricing for infrastructure qualification.</h1>
+      <p>Plans scale with controlled trial usage, environment fidelity, and evidence retention.</p>
     </header>
 
     <section className={`${styles.plans} ${styles.shell}`} aria-label="Plans">
@@ -92,5 +93,6 @@ export default function PricingPage() {
       <p>Only the Kubernetes Sandbox is available today. GitOps, dedicated Kubernetes, and AWS sandboxes are planned or future and are not billed until they ship. Features marked “planned” above are not yet implemented.</p>
       <a className={styles.secondaryAction} href="/environments">View environment status</a>
     </section>
+    <SiteFooter />
   </main>;
 }

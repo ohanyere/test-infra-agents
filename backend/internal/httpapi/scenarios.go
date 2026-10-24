@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/evalplane/evalplane/backend/internal/auth"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
 	"github.com/go-chi/chi/v5"
@@ -37,24 +38,25 @@ type criterionRequest struct {
 	SortOrder   int             `json:"sort_order"`
 }
 type scenarioVersionRequest struct {
-	Description         string             `json:"description"`
-	Category            string             `json:"category"`
-	Difficulty          string             `json:"difficulty"`
-	DurationSeconds     int                `json:"duration_seconds"`
-	Environment         json.RawMessage    `json:"environment"`
-	Conditions          json.RawMessage    `json:"conditions"`
-	Observables         []string           `json:"observables"`
-	ExpectedBehaviors   []string           `json:"expected_behaviors"`
-	ForbiddenBehaviors  []string           `json:"forbidden_behaviors"`
-	Criteria            []criterionRequest `json:"criteria"`
-	AuthoringMethod     string             `json:"authoring_method"`
-	AgentTask           string             `json:"agent_task"`
-	AgentVisibleContext json.RawMessage    `json:"agent_visible_context"`
-	AllowedActions      []string           `json:"allowed_actions"`
-	AllowedResources    json.RawMessage    `json:"allowed_resources"`
-	GroundTruth         json.RawMessage    `json:"ground_truth"`
-	ExecutionSpec       json.RawMessage    `json:"execution_spec"`
-	SourceMetadata      json.RawMessage    `json:"source_metadata"`
+	Description          string                        `json:"description"`
+	Category             string                        `json:"category"`
+	Difficulty           string                        `json:"difficulty"`
+	DurationSeconds      int                           `json:"duration_seconds"`
+	Environment          json.RawMessage               `json:"environment"`
+	Conditions           json.RawMessage               `json:"conditions"`
+	Observables          []string                      `json:"observables"`
+	ExpectedBehaviors    []string                      `json:"expected_behaviors"`
+	ForbiddenBehaviors   []string                      `json:"forbidden_behaviors"`
+	Criteria             []criterionRequest            `json:"criteria"`
+	AuthoringMethod      string                        `json:"authoring_method"`
+	AgentTask            string                        `json:"agent_task"`
+	AgentVisibleContext  json.RawMessage               `json:"agent_visible_context"`
+	AllowedActions       []string                      `json:"allowed_actions"`
+	AllowedResources     json.RawMessage               `json:"allowed_resources"`
+	GroundTruth          json.RawMessage               `json:"ground_truth"`
+	ExecutionSpec        json.RawMessage               `json:"execution_spec"`
+	SourceMetadata       json.RawMessage               `json:"source_metadata"`
+	EvidenceRequirements evidencecontract.Requirements `json:"evidence_requirements"`
 }
 type createScenarioRequest struct {
 	Name           string                 `json:"name"`
@@ -219,7 +221,7 @@ func scenarioVersionInput(q scenarioVersionRequest) scenario.VersionInput {
 	for i, c := range q.Criteria {
 		criteria[i] = scenario.CriterionInput{Key: c.Key, Name: c.Name, MetricKey: c.MetricKey, Operator: c.Operator, TargetValue: c.TargetValue, Unit: c.Unit, SortOrder: c.SortOrder}
 	}
-	return scenario.VersionInput{Description: q.Description, Category: q.Category, Difficulty: q.Difficulty, DurationSeconds: q.DurationSeconds, Environment: q.Environment, Conditions: q.Conditions, Observables: q.Observables, ExpectedBehaviors: q.ExpectedBehaviors, ForbiddenBehaviors: q.ForbiddenBehaviors, Criteria: criteria, AuthoringMethod: q.AuthoringMethod, AgentTask: q.AgentTask, AgentVisibleContext: q.AgentVisibleContext, AllowedActions: q.AllowedActions, AllowedResources: q.AllowedResources, GroundTruth: q.GroundTruth, ExecutionSpec: q.ExecutionSpec, SourceMetadata: q.SourceMetadata}
+	return scenario.VersionInput{Description: q.Description, Category: q.Category, Difficulty: q.Difficulty, DurationSeconds: q.DurationSeconds, Environment: q.Environment, Conditions: q.Conditions, Observables: q.Observables, ExpectedBehaviors: q.ExpectedBehaviors, ForbiddenBehaviors: q.ForbiddenBehaviors, Criteria: criteria, AuthoringMethod: q.AuthoringMethod, AgentTask: q.AgentTask, AgentVisibleContext: q.AgentVisibleContext, AllowedActions: q.AllowedActions, AllowedResources: q.AllowedResources, GroundTruth: q.GroundTruth, ExecutionSpec: q.ExecutionSpec, SourceMetadata: q.SourceMetadata, EvidenceRequirements: q.EvidenceRequirements}
 }
 func decodeScenario(w http.ResponseWriter, r *http.Request, v any) bool {
 	if decodeJSON(w, r, v) != nil {

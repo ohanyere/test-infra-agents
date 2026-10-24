@@ -1,0 +1,9 @@
+[
+  {"id":"kubernetes-workloads","aliases":["kubernetes_workloads"],"capability":"kubernetes_workloads","metric_key":"","label":"Kubernetes workloads","category":"infrastructure","authoring_default":true},
+  {"id":"kubernetes-pods","aliases":["kubernetes_pods","pods"],"capability":"kubernetes_pods","capability_aliases":["pods"],"metric_key":"","label":"Kubernetes pods","category":"infrastructure","authoring_default":true},
+  {"id":"kubernetes-events","aliases":["kubernetes_events","events"],"capability":"kubernetes_events","capability_aliases":["events"],"metric_key":"","label":"Kubernetes events","category":"infrastructure","authoring_default":true},
+  {"id":"request-rate","aliases":["request_rate","request_rate_rps"],"capability":"request_rate","metric_key":"request_rate_rps","label":"Request rate","category":"telemetry"},
+  {"id":"error-rate","aliases":["error_rate","error_rate_pct"],"capability":"error_rate","metric_key":"error_rate_pct","label":"Error rate","category":"telemetry"},
+  {"id":"p95-latency","aliases":["p95_latency","p95_latency_ms"],"capability":"p95_latency","metric_key":"p95_latency_ms","label":"P95 latency","category":"telemetry"},
+  {"id":"availability","aliases":["availability_pct"],"capability":"availability","metric_key":"availability_pct","label":"Availability","category":"telemetry"}
+]

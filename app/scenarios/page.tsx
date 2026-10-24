@@ -1,14 +1,16 @@
 import type { Metadata } from "next";
 import { ScenarioDirectory } from "./scenario-directory";
 import { PublicNavigation } from "../site-navigation";
+import { SiteFooter } from "../site-footer";
 import styles from "./scenarios.module.css";
 
-export const metadata: Metadata = { title: "Evaluation Tasks — Evalplane", description: "Browse evaluation tasks grouped by task family for qualifying infrastructure agents." };
+export const metadata: Metadata = { title: "Infrastructure Verification Tests — Realverax", description: "Browse controlled infrastructure test cases for resulting-state verification." };
 
 export default function ScenariosPage() {
   return <main className={styles.page}>
-    <PublicNavigation active="tasks" />
-    <header className={`${styles.intro} ${styles.shell}`}><p className={styles.sectionLabel}>TASK CATALOG</p><h1>Evaluation tasks</h1><p>Real operational problems used to test infrastructure agents.</p><a className={styles.primaryAction} href="/scenarios/new">Define task</a></header>
+    <PublicNavigation />
+    <header className={`${styles.intro} ${styles.shell}`}><p className={styles.sectionLabel}>DEVELOPMENT TESTS</p><h1>Infrastructure test cases</h1><p>Supporting fixtures for creating reproducible autonomous changes and independently checking the resulting state.</p><a className={styles.primaryAction} href="/scenarios/new">Define test case</a></header>
     <ScenarioDirectory />
+    <SiteFooter />
   </main>;
 }

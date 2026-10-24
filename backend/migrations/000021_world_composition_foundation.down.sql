@@ -1,0 +1,12 @@
+DROP TRIGGER IF EXISTS environment_plan_immutable ON environment_instances;
+DROP FUNCTION IF EXISTS enforce_environment_plan_immutability();
+DROP TRIGGER IF EXISTS composition_plans_immutable ON composition_plans;
+DROP FUNCTION IF EXISTS prevent_composition_plan_update();
+DROP TRIGGER IF EXISTS world_specs_immutable ON world_specs;
+DROP FUNCTION IF EXISTS prevent_world_spec_update();
+ALTER TABLE mcp_run_grants DROP COLUMN IF EXISTS tool_contract_version, DROP COLUMN IF EXISTS component_scope, DROP COLUMN IF EXISTS composition_plan_hash, DROP COLUMN IF EXISTS composition_plan_id, DROP COLUMN IF EXISTS environment_instance_id;
+ALTER TABLE runs DROP COLUMN IF EXISTS environment_instance_id, DROP COLUMN IF EXISTS composition_plan_id;
+DROP TABLE IF EXISTS environment_component_instances;
+ALTER TABLE environment_instances DROP COLUMN IF EXISTS selected_fidelity, DROP COLUMN IF EXISTS composition_plan_id;
+DROP TABLE IF EXISTS composition_plans;
+DROP TABLE IF EXISTS world_specs;

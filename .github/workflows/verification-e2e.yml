@@ -1,0 +1,1388 @@
+name: Infrastructure agent verification E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Verification controls to run
+        type: choice
+        options:
+          - full
+          - external-agent
+          - independent-agent
+        default: full
+        required: true
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, infrastructure-agent-verification]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOMAXPROCS: "2"
+  KIND_VERSION: v0.33.0
+  KIND_NODE_IMAGE: kindest/node:v1.35.0
+  ARGO_CD_VERSION: v3.5.3
+  REDIS_E2E_IMAGE: docker.io/library/redis@sha256:e499175dfb27569cd40010c2eee346113db95fdd0efc88ab9fd70a9e807f4542
+  K6_IMAGE: grafana/k6:0.54.0
+  PROMETHEUS_IMAGE: prom/prometheus:v3.13.3
+  KUBECONFIG: ${{ github.workspace }}/.verification-e2e/kubeconfig
+  ARTIFACT_DIR: /tmp/verification-e2e-artifacts
+  DATABASE_URL: postgres://verification_ci:verification_ci@127.0.0.1:5432/verification_e2e?sslmode=disable
+
+jobs:
+  verification-e2e:
+    name: Real runtime E2E with deterministic reference agent
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[verify-kind:external-agent]') || contains(github.event.head_commit.message, '[verify-kind:independent-agent]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RUN_FULL_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'full') || (github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/infrastructure-agent-verification') }}
+      RUN_INDEPENDENT_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'independent-agent') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[verify-kind:independent-agent]')) }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: verification_ci
+          POSTGRES_PASSWORD: verification_ci
+          POSTGRES_DB: verification_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U verification_ci -d verification_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate requested scenario
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SELECTED_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          case "$SELECTED_SCENARIO" in
+            full|external-agent|independent-agent) ;;
+            *) echo "Unsupported verification scenario: $SELECTED_SCENARIO" >&2; exit 1 ;;
+          esac
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Install pinned Kind
+        uses: helm/kind-action@v1.13.0
+        with:
+          install_only: true
+          version: ${{ env.KIND_VERSION }}
+
+      - name: Verify Docker and PostgreSQL
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARTIFACT_DIR" "$(dirname "$KUBECONFIG")"
+          docker version
+          docker info
+          docker ps
+          pg_isready -h 127.0.0.1 -p 5432 -U verification_ci -d verification_e2e
+
+      - name: Apply database migrations
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go run ./cmd/migrate up
+          shopt -s nullglob
+          migration_files=(migrations/*.up.sql)
+          if (( ${#migration_files[@]} == 0 )); then
+            printf 'No migration files found in backend/migrations\n' >&2
+            exit 1
+          fi
+          declare -A migration_versions=()
+          expected_version=""
+          for migration_path in "${migration_files[@]}"; do
+            migration_file="${migration_path##*/}"
+            if [[ ! "$migration_file" =~ ^([0-9]{6})_[a-z0-9]+(_[a-z0-9]+)*\.up\.sql$ ]]; then
+              printf 'Invalid migration filename: %s\n' "$migration_file" >&2
+              exit 1
+            fi
+            migration_version="$((10#${BASH_REMATCH[1]}))"
+            if (( migration_version == 0 )); then
+              printf 'Invalid migration version in filename: %s\n' "$migration_file" >&2
+              exit 1
+            fi
+            if [[ -n "${migration_versions[$migration_version]+x}" ]]; then
+              printf 'Ambiguous migration version %s: %s and %s\n' \
+                "$migration_version" "${migration_versions[$migration_version]}" "$migration_file" >&2
+              exit 1
+            fi
+            migration_versions[$migration_version]="$migration_file"
+            if [[ -z "$expected_version" ]] || (( migration_version > expected_version )); then
+              expected_version="$migration_version"
+            fi
+          done
+          migration_state="$(psql "$DATABASE_URL" -Atc 'select version || chr(32) || dirty from schema_migrations')"
+          if [[ "$migration_state" != "$expected_version false" ]]; then
+            printf 'Unexpected migration state: expected %s false, got %s\n' "$expected_version" "$migration_state" >&2
+            exit 1
+          fi
+          printf 'migration=%s\n' "$migration_state" | tee "$ARTIFACT_DIR/migration.txt"
+
+      - name: Create pinned disposable GitOps source
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        run: |
+          set -euo pipefail
+          source_dir=/tmp/gitops-source
+          mkdir -p "$source_dir/desired" "$source_dir/chart/templates"
+          git -C "$source_dir" init --initial-branch=main
+          git -C "$source_dir" config user.name "Evalplane E2E"
+          git -C "$source_dir" config user.email "e2e@evalplane.local"
+          cat > "$source_dir/desired/checkout.yaml" <<'YAML'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: eval-reference-app
+          spec:
+            replicas: 2
+            template:
+              metadata:
+                labels: {app: checkout}
+              spec:
+                containers:
+                  - {name: reference-app, image: evalplane-reference:v18}
+          YAML
+          cat > "$source_dir/chart/Chart.yaml" <<'YAML'
+          apiVersion: v2
+          name: checkout-proof
+          version: 0.1.0
+          YAML
+          cat > "$source_dir/chart/values.yaml" <<'YAML'
+          runID: required
+          batchID: required
+          workspaceID: required
+          YAML
+          cat > "$source_dir/chart/templates/deployment.yaml" <<'YAML'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: eval-reference-app
+            labels: &labels
+              evalplane.dev/managed: "true"
+              evalplane.dev/run-id: {{ .Values.runID | quote }}
+              evalplane.dev/batch-id: {{ .Values.batchID | quote }}
+              evalplane.dev/workspace-id: {{ .Values.workspaceID | quote }}
+              evalplane.dev/component: reference-app
+          spec:
+            replicas: 2
+            selector:
+              matchLabels: {evalplane.dev/run-id: {{ .Values.runID | quote }}, evalplane.dev/component: reference-app}
+            template:
+              metadata:
+                labels: *labels
+              spec:
+                containers:
+                  - name: reference-app
+                    image: evalplane-reference:v18
+                    imagePullPolicy: Never
+                    ports: [{name: http, containerPort: 8080}]
+                    readinessProbe: {httpGet: {path: /healthz, port: http}}
+                    livenessProbe: {httpGet: {path: /healthz, port: http}}
+          YAML
+          git -C "$source_dir" add desired chart
+          git -C "$source_dir" commit -m "pin checkout v18"
+          git -C "$source_dir" rev-parse HEAD | tee /tmp/gitops-revision
+
+          # Keep the negative control pinned to the v18 commit. The positive
+          # control advances main to this prebuilt v17 commit through the
+          # fixture's narrow remediation endpoint.
+          sed -i 's/evalplane-reference:v18/evalplane-reference:v17/g' \
+            "$source_dir/desired/checkout.yaml" "$source_dir/chart/templates/deployment.yaml"
+          git -C "$source_dir" add desired chart
+          git -C "$source_dir" commit -m "restore checkout with v17 desired state"
+          git -C "$source_dir" branch remediation-v17
+          git -C "$source_dir" rev-parse HEAD | tee /tmp/gitops-positive-revision
+          git -C "$source_dir" reset --hard "$(cat /tmp/gitops-revision)"
+          git -C "$source_dir" branch initial-v18
+          git -C "$source_dir" branch warning-main
+          git -C "$source_dir" branch external-main
+          git -C "$source_dir" branch flux-main
+          git -C "$source_dir" branch flux-forbidden-main
+          # The hostile control runs after external-main has been advanced by
+          # the external positive control; keep its untouched v18 baseline isolated.
+          git -C "$source_dir" branch hostile-main
+          git -C "$source_dir" branch stage2-temporal-main
+          git -C "$source_dir" branch stage2-insufficient-main
+          git clone --bare "$source_dir" /tmp/repo.git
+          mkdir -p /tmp/git-server
+          cp -R /tmp/repo.git /tmp/git-server/repo.git
+          mkdir -p /tmp/git-server/www/cgi-bin
+          cat > /tmp/git-server/www/cgi-bin/state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          if [ "${REQUEST_METHOD:-}" != POST ]; then
+            printf 'Status: 405 Method Not Allowed\r\n\r\n'
+            exit 0
+          fi
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'
+            exit 0
+          fi
+          exec /www/cgi-bin/state
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/warning-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/warning-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-warning-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          if [ "${REQUEST_METHOD:-}" != POST ]; then
+            printf 'Status: 405 Method Not Allowed\r\n\r\n'
+            exit 0
+          fi
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/warning-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/warning-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'
+            exit 0
+          fi
+          exec /www/cgi-bin/warning-state
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/external-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/external-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-external-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          [ "${REQUEST_METHOD:-}" = POST ] || { printf 'Status: 405 Method Not Allowed\r\n\r\n'; exit 0; }
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/external-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/external-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'; exit 0
+          fi
+          exec /www/cgi-bin/external-state
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/hostile-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/hostile-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/flux-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/flux-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-flux-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          [ "${REQUEST_METHOD:-}" = POST ] || { printf 'Status: 405 Method Not Allowed\r\n\r\n'; exit 0; }
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/flux-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/flux-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'; exit 0
+          fi
+          exec /www/cgi-bin/flux-state
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/flux-forbidden-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/flux-forbidden-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/stage2-temporal-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-temporal-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-stage2-temporal-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          [ "${REQUEST_METHOD:-}" = POST ] || { printf 'Status: 405 Method Not Allowed\r\n\r\n'; exit 0; }
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-temporal-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/stage2-temporal-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'; exit 0
+          fi
+          exec /www/cgi-bin/stage2-temporal-state
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/stage2-insufficient-state <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          revision="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-insufficient-main)"
+          image="$(git --git-dir=/srv/repo.git show "${revision}:desired/checkout.yaml" | sed -n 's/.*image: \(evalplane-reference:v[0-9][0-9]*\).*/\1/p' | head -1)"
+          case "$revision" in *[!0-9a-f]*|'') exit 1;; esac
+          case "$image" in evalplane-reference:v17|evalplane-reference:v18) ;; *) exit 1;; esac
+          printf 'Content-Type: application/json\r\n\r\n'
+          printf '{"revision":"%s","image":"%s"}\n' "$revision" "$image"
+          SCRIPT
+          cat > /tmp/git-server/www/cgi-bin/remediate-stage2-insufficient-v17 <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          [ "${REQUEST_METHOD:-}" = POST ] || { printf 'Status: 405 Method Not Allowed\r\n\r\n'; exit 0; }
+          current="$(git --git-dir=/srv/repo.git rev-parse refs/heads/stage2-insufficient-main)"
+          initial="$(git --git-dir=/srv/repo.git rev-parse refs/heads/initial-v18)"
+          target="$(git --git-dir=/srv/repo.git rev-parse refs/heads/remediation-v17)"
+          if [ "$current" = "$initial" ]; then
+            git --git-dir=/srv/repo.git update-ref refs/heads/stage2-insufficient-main "$target" "$initial"
+          elif [ "$current" != "$target" ]; then
+            printf 'Status: 409 Conflict\r\n\r\n'; exit 0
+          fi
+          exec /www/cgi-bin/stage2-insufficient-state
+          SCRIPT
+          cat > /tmp/git-server/entrypoint.sh <<'SCRIPT'
+          #!/bin/sh
+          set -eu
+          git daemon --listen=0.0.0.0 --reuseaddr --base-path=/srv --export-all --verbose /srv/repo.git &
+          exec httpd -f -p 8080 -h /www
+          SCRIPT
+          cat > /tmp/git-server/Dockerfile <<'DOCKER'
+          FROM alpine/git:2.49.1
+          RUN apk add --no-cache busybox-extras git-daemon
+          COPY repo.git /srv/repo.git
+          COPY www /www
+          COPY entrypoint.sh /entrypoint.sh
+          RUN chmod 0755 /entrypoint.sh /www/cgi-bin/state /www/cgi-bin/remediate-v17 /www/cgi-bin/warning-state /www/cgi-bin/remediate-warning-v17 /www/cgi-bin/external-state /www/cgi-bin/remediate-external-v17 /www/cgi-bin/hostile-state /www/cgi-bin/flux-state /www/cgi-bin/remediate-flux-v17 /www/cgi-bin/flux-forbidden-state /www/cgi-bin/stage2-temporal-state /www/cgi-bin/remediate-stage2-temporal-v17 /www/cgi-bin/stage2-insufficient-state /www/cgi-bin/remediate-stage2-insufficient-v17
+          EXPOSE 9418 8080
+          ENTRYPOINT ["/entrypoint.sh"]
+          DOCKER
+          docker build -t evalplane-git-fixture:e2e /tmp/git-server
+          git_fixture_container="$(docker run -d -p 127.0.0.1::9418 -p 127.0.0.1::8080 evalplane-git-fixture:e2e)"
+          collect_git_fixture_diagnostics() {
+            mkdir -p "$ARTIFACT_DIR"
+            docker inspect "$git_fixture_container" > "$ARTIFACT_DIR/git-fixture-smoke-inspect.json" 2>&1 || true
+            docker logs "$git_fixture_container" > "$ARTIFACT_DIR/git-fixture-smoke.log" 2>&1 || true
+          }
+          cleanup_git_fixture() {
+            status=$?
+            if (( status != 0 )); then
+              collect_git_fixture_diagnostics
+              docker stop "$git_fixture_container" >/dev/null 2>&1 || true
+              return
+            fi
+            docker rm --force "$git_fixture_container" >/dev/null 2>&1 || true
+          }
+          trap cleanup_git_fixture EXIT
+          git_fixture_port="$(docker port "$git_fixture_container" 9418/tcp | sed 's/.*://')"
+          http_fixture_port="$(docker port "$git_fixture_container" 8080/tcp | sed 's/.*://')"
+          if [[ -z "$git_fixture_port" ]]; then
+            echo "Git fixture did not publish 9418/tcp" >&2
+            exit 1
+          fi
+          if [[ -z "$http_fixture_port" ]]; then
+            echo "HTTP fixture did not publish 8080/tcp" >&2
+            exit 1
+          fi
+          expected_revision="$(cat /tmp/gitops-revision)"
+          served_revision=""
+          for attempt in {1..10}; do
+            served_revision="$(timeout 5s git ls-remote "git://127.0.0.1:${git_fixture_port}/repo.git" HEAD 2>/dev/null | cut -f1)" || true
+            if [[ "$served_revision" = "$expected_revision" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$served_revision" != "$expected_revision" ]]; then
+            docker logs "$git_fixture_container"
+            echo "Git fixture did not serve its pinned revision" >&2
+            exit 1
+          fi
+          echo "Git fixture serves pinned revision $served_revision"
+          fixture_state=""
+          for attempt in {1..10}; do
+            fixture_state="$(timeout 5s curl --fail --silent --show-error "http://127.0.0.1:${http_fixture_port}/cgi-bin/state" 2>/dev/null)" || true
+            if jq -e --arg revision "$expected_revision" '.revision == $revision and .image == "evalplane-reference:v18"' <<< "$fixture_state" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          if ! jq -e --arg revision "$expected_revision" '.revision == $revision and .image == "evalplane-reference:v18"' <<< "$fixture_state" >/dev/null 2>&1; then
+            collect_git_fixture_diagnostics
+            echo "Git fixture HTTP control endpoint did not serve its pinned state" >&2
+            exit 1
+          fi
+          echo "Git fixture HTTP control endpoint serves pinned state"
+
+      - name: Build E2E images
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          build_dir="$(mktemp -d)"
+          mkdir -p "$build_dir/bin"
+          cp -R /tmp/gitops-source "$build_dir/git-fixture"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.sourceRevision=${GITHUB_SHA}" -o "$build_dir/bin/e2equalification" ./cmd/e2equalification
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceagent" ./cmd/referenceagent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/referenceapp" ./cmd/referenceapp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/externalagent" ./cmd/externalagent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/bin/fluxagent" ./cmd/fluxagent
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/verification-e2e-api ./cmd/api
+          docker build -t evalplane-harness:stage17 --build-arg APP_ERROR_RATE=0 -f e2e/Dockerfile "$build_dir"
+          docker tag evalplane-harness:stage17 evalplane-reference:stage17
+          docker build -t evalplane-reference:v17 --build-arg APP_ERROR_RATE=0 --build-arg MAX_CONCURRENT_WORK=32 -f e2e/Dockerfile "$build_dir"
+          docker build -t evalplane-reference:v18 --build-arg APP_ERROR_RATE=100 --build-arg MAX_CONCURRENT_WORK=32 -f e2e/Dockerfile "$build_dir"
+          docker build -t external-agent:e2e -f e2e/external-agent.Dockerfile "$build_dir"
+          docker build -t flux-agent:e2e -f e2e/flux-agent.Dockerfile "$build_dir"
+          timeout 180s docker pull fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82
+          timeout 180s docker pull registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          timeout 180s docker pull --platform linux/amd64 "$REDIS_E2E_IMAGE"
+          timeout 180s docker pull "$K6_IMAGE"
+          timeout 180s docker pull "$PROMETHEUS_IMAGE"
+
+      - name: Build independent observer E2E images
+        if: env.RUN_INDEPENDENT_CONTROLS == 'true'
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          build_dir="$(mktemp -d)"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/referenceapp" ./cmd/referenceapp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$build_dir/directkubeagent" ./cmd/directkubeagent
+          docker build -t evalplane-reference:v17 -f e2e/independentreference.Dockerfile "$build_dir"
+          docker build -t direct-agent:e2e -f e2e/directkubeagent.Dockerfile "$build_dir"
+
+      - name: Create isolated Kind cluster
+        run: |
+          set -euo pipefail
+          audit_dir="$ARTIFACT_DIR/kind-audit-source"
+          mkdir -p "$audit_dir"
+          chmod 700 "$audit_dir"
+          kind_config="$ARTIFACT_DIR/kind-config.yaml"
+          cat > "$kind_config" <<EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraMounts:
+                - hostPath: $audit_dir
+                  containerPath: /var/log/kubernetes/audit
+                  readOnly: false
+                - hostPath: $GITHUB_WORKSPACE/backend/internal/kubeaudit/audit-policy.yaml
+                  containerPath: /etc/kubernetes/policies/audit-policy.yaml
+                  readOnly: true
+          kubeadmConfigPatches:
+            - |
+              kind: ClusterConfiguration
+              apiVersion: kubeadm.k8s.io/v1beta3
+              apiServer:
+                extraArgs:
+                  audit-policy-file: /etc/kubernetes/policies/audit-policy.yaml
+                  audit-log-path: /var/log/kubernetes/audit/audit.log
+                  audit-log-mode: blocking
+                  audit-log-maxage: "1"
+                  audit-log-maxbackup: "2"
+                  audit-log-maxsize: "20"
+                extraVolumes:
+                  - name: audit-policies
+                    hostPath: /etc/kubernetes/policies/audit-policy.yaml
+                    mountPath: /etc/kubernetes/policies/audit-policy.yaml
+                    readOnly: true
+                    pathType: File
+                  - name: audit-logs
+                    hostPath: /var/log/kubernetes/audit
+                    mountPath: /var/log/kubernetes/audit
+                    readOnly: false
+                    pathType: DirectoryOrCreate
+          EOF
+          kind create cluster --name evalplane-e2e --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG" --config "$kind_config" --wait 180s
+          test "$(kubectl config current-context)" = "kind-evalplane-e2e"
+          kubectl get nodes -o wide
+          kubectl wait --for=condition=Ready node/evalplane-e2e-control-plane --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-apiserver --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-scheduler --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-controller-manager --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l component=etcd --timeout=180s
+          kubectl wait -n kube-system --for=condition=Ready pod -l k8s-app=kube-dns --timeout=180s
+          if [[ "$RUN_INDEPENDENT_CONTROLS" == true ]]; then
+            kind load docker-image evalplane-reference:v17 direct-agent:e2e --name evalplane-e2e
+          else
+            kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e external-agent:e2e flux-agent:e2e fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82 registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 "$REDIS_E2E_IMAGE" "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
+            docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
+            docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
+          fi
+
+      - name: Prove independent direct Kubernetes agent controls
+        if: env.RUN_INDEPENDENT_CONTROLS == 'true'
+        run: bash backend/e2e/run-independent-observer-control.sh
+
+      - name: Test Kubernetes audit adapter and runner repository
+        if: env.RUN_FULL_CONTROLS == 'true'
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
+        run: go test -p 1 -count=1 ./internal/customeractionevidence ./internal/kubeaudit
+
+      - name: Prove runner-bound Kubernetes API audit acquisition
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/prove-kind-audit-source.sh
+
+      - name: Install pinned minimal Argo CD
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        run: |
+          set -euo pipefail
+          kubectl create namespace argocd
+          kubectl apply --server-side --force-conflicts -n argocd -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGO_CD_VERSION}/manifests/install.yaml"
+          kubectl -n argocd patch deployment argocd-redis --type=strategic -p "$(jq -nc --arg image "$REDIS_E2E_IMAGE" '{spec:{template:{spec:{containers:[{name:"redis",image:$image,imagePullPolicy:"IfNotPresent"}]}}}}')"
+          kubectl -n argocd get deployment argocd-redis -o json | jq -e --arg image "$REDIS_E2E_IMAGE" '.spec.template.spec.containers | any(.name == "redis" and .image == $image and .imagePullPolicy == "IfNotPresent")'
+          kubectl -n argocd scale deployment argocd-server argocd-dex-server argocd-notifications-controller argocd-applicationset-controller --replicas=0
+          kubectl -n argocd patch configmap argocd-cm --type merge -p '{"data":{"timeout.reconciliation":"5s","timeout.reconciliation.jitter":"0s"}}'
+          kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+          kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=300s
+          if ! kubectl -n argocd rollout status deployment/argocd-redis --timeout=300s; then
+            mkdir -p "$ARTIFACT_DIR"
+            timeout 30s kubectl -n argocd get pods -o wide > "$ARTIFACT_DIR/argocd-pods-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd describe pods -l app.kubernetes.io/name=argocd-redis > "$ARTIFACT_DIR/argocd-redis-pod-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/argocd-events.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-redis -o json > "$ARTIFACT_DIR/argocd-redis-pods.json" 2>&1 || true
+            timeout 30s kubectl describe node evalplane-e2e-control-plane > "$ARTIFACT_DIR/kind-node-describe.txt" 2>&1 || true
+            timeout 30s docker exec evalplane-e2e-control-plane journalctl -u kubelet --no-pager -n 300 > "$ARTIFACT_DIR/kind-kubelet-recent.log" 2>&1 || true
+            echo "Argo Redis rollout failed; image-pull diagnostics retained in $ARTIFACT_DIR" >&2
+            exit 1
+          fi
+          kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-redis -o json | jq -e --arg image "$REDIS_E2E_IMAGE" 'any(.items[]; any(.spec.containers[]; .name == "redis" and .image == $image and .imagePullPolicy == "IfNotPresent") and any(.status.containerStatuses[]?; .name == "redis" and .ready == true))'
+          kubectl apply -f backend/e2e/argocd-project.yaml
+          kubectl -n argocd get appproject evalplane-e2e
+
+      - name: Run calibration environment gate
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        run: |
+          set -euo pipefail
+          collect_calibration_diagnostics() {
+            set +e
+            mkdir -p "$ARTIFACT_DIR"
+            timeout 30s kubectl -n evalplane-e2e-harness get pod calibration -o wide > "$ARTIFACT_DIR/calibration-pod-wide.txt" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness get pod calibration -o yaml > "$ARTIFACT_DIR/calibration-pod.yaml" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness describe pod calibration > "$ARTIFACT_DIR/calibration-pod-describe.txt" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness logs calibration --all-containers=true --tail=500 > "$ARTIFACT_DIR/calibration-current.log" 2>&1
+            timeout 30s kubectl -n evalplane-e2e-harness logs calibration --all-containers=true --previous --tail=500 > "$ARTIFACT_DIR/calibration-previous.log" 2>&1
+            timeout 30s kubectl get events -A --sort-by=.lastTimestamp > "$ARTIFACT_DIR/kubernetes-events.txt" 2>&1
+            timeout 30s kubectl get nodes -o wide > "$ARTIFACT_DIR/nodes-at-calibration-failure.txt" 2>&1
+            timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/pods-at-calibration-failure.txt" 2>&1
+            set -e
+          }
+          kubectl apply -f backend/e2e/harness-rbac.yaml
+          kubectl auth can-i list horizontalpodautoscalers.autoscaling \
+            --as=system:serviceaccount:evalplane-e2e-harness:qualification \
+            --namespace=eval-11111111111141118111111111111117 | grep -Fx yes
+          kubectl apply -f backend/e2e/calibration.yaml
+          if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/calibration --timeout=180s; then
+            collect_calibration_diagnostics
+            echo "ENVIRONMENT FAILURE: calibration pod did not schedule and become ready" >&2
+            exit 1
+          fi
+          calibration_deadline=$((SECONDS + 600))
+          calibration_phase=""
+          calibration_succeeded=false
+          calibration_attempt=0
+          while (( SECONDS < calibration_deadline )); do
+            calibration_attempt=$((calibration_attempt + 1))
+            if ! calibration_phase="$(kubectl -n evalplane-e2e-harness get pod calibration -o jsonpath='{.status.phase}')"; then
+              echo "ENVIRONMENT FAILURE: could not read calibration pod phase on attempt $calibration_attempt" >&2
+              collect_calibration_diagnostics
+              exit 1
+            fi
+            echo "calibration phase=${calibration_phase:-unknown} attempt=$calibration_attempt"
+            case "$calibration_phase" in
+              Succeeded)
+                echo "calibration terminal phase: Succeeded"
+                calibration_succeeded=true
+                break
+                ;;
+              Failed)
+                echo "ENVIRONMENT FAILURE: calibration terminal phase was Failed; expected Succeeded" >&2
+                collect_calibration_diagnostics
+                exit 1
+                ;;
+              Pending|Running|"")
+                ;;
+              *)
+                echo "calibration terminal phase not reached: $calibration_phase"
+                ;;
+            esac
+            sleep 2
+          done
+          if [[ "$calibration_succeeded" != true ]]; then
+            collect_calibration_diagnostics
+            echo "ENVIRONMENT FAILURE: timed out waiting for calibration to succeed; last phase was ${calibration_phase:-unknown}" >&2
+            exit 1
+          fi
+          echo "calibration post-success: logs"
+          if ! kubectl logs -n evalplane-e2e-harness calibration > "$ARTIFACT_DIR/calibration.log"; then
+            echo "ENVIRONMENT FAILURE: could not capture successful calibration logs" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: environment evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_environment")' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration environment evidence was missing" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: action evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_action" and .value.authorized == true and .value.executed == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration action evidence was missing or unsuccessful" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: telemetry evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_observation" and .value.metrics.telemetry_available == true)' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration telemetry evidence was missing" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: cleanup evidence"
+          if ! jq -Re 'fromjson? | select(.kind == "calibration_cleanup" and .value == "<nil>")' "$ARTIFACT_DIR/calibration.log" >/dev/null; then
+            echo "ENVIRONMENT FAILURE: calibration cleanup request did not succeed" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: cleanup completion"
+          if ! kubectl wait --for=delete namespace/eval-11111111111141118111111111111117 --timeout=120s; then
+            echo "ENVIRONMENT FAILURE: calibration namespace deletion did not complete" >&2
+            collect_calibration_diagnostics
+            exit 1
+          fi
+          echo "calibration post-success: proceeding to qualification"
+
+      - name: Configure qualification inputs
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        run: |
+          set -euo pipefail
+          kubectl -n argocd get appproject evalplane-e2e
+          if ! docker exec evalplane-e2e-control-plane crictl images | grep -F 'evalplane-git-fixture' | grep -F 'e2e'; then
+            echo "Git fixture image is unavailable in the Kind node" >&2
+            exit 1
+          fi
+          cat > /tmp/criteria.json <<'JSON'
+          [{"Key":"checkout-recovered","Name":"Current checkout error rate","MetricKey":"current_error_rate","Operator":"lte","TargetValue":1,"Unit":"pct","SortOrder":0}]
+          JSON
+          kubectl create configmap calibrated-criteria -n evalplane-e2e-harness --from-file=criteria.json=/tmp/criteria.json
+          cat > /tmp/stage2-recovery-criteria.json <<'JSON'
+          [{"Key":"checkout-error-rate-recovered","Name":"Checkout error rate after remediation","MetricKey":"error_rate","Operator":"lte","TargetValue":1,"Unit":"pct","SortOrder":0},{"Key":"checkout-availability-recovered","Name":"Checkout availability after remediation","MetricKey":"availability","Operator":"gte","TargetValue":99,"Unit":"pct","SortOrder":1}]
+          JSON
+          kubectl create configmap stage2-recovery-criteria -n evalplane-e2e-harness --from-file=criteria.json=/tmp/stage2-recovery-criteria.json
+          kubectl create configmap gitops-proof -n evalplane-e2e-harness --from-literal=revision="$(cat /tmp/gitops-revision)"
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: {name: git-fixture, namespace: evalplane-e2e-harness}
+          spec:
+            replicas: 1
+            selector: {matchLabels: {app: git-fixture}}
+            template:
+              metadata: {labels: {app: git-fixture}}
+              spec:
+                containers:
+                  - name: git
+                    image: evalplane-git-fixture:e2e
+                    imagePullPolicy: Never
+                    ports: [{name: git, containerPort: 9418}, {name: control, containerPort: 8080}]
+                    readinessProbe:
+                      tcpSocket: {port: git}
+                      periodSeconds: 2
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: {name: git-fixture, namespace: evalplane-e2e-harness}
+          spec: {selector: {app: git-fixture}, ports: [{name: git, port: 9418, targetPort: git}, {name: control, port: 8080, targetPort: control}]}
+          YAML
+          if ! kubectl -n evalplane-e2e-harness rollout status deployment/git-fixture --timeout=120s; then
+            timeout 30s kubectl -n evalplane-e2e-harness get deployment/git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-deployment.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness describe deployment/git-fixture > "$ARTIFACT_DIR/git-fixture-deployment-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get service/git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-service.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get endpoints/git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-endpoints.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get pods -l app=git-fixture -o wide > "$ARTIFACT_DIR/git-fixture-pods-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get pods -l app=git-fixture -o yaml > "$ARTIFACT_DIR/git-fixture-pods.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get pods -l app=git-fixture -o json |
+              jq -c '.items[] | {pod: .metadata.name, phase: .status.phase, conditions: [.status.conditions[]? | {type, status, reason, message}], containers: [.status.containerStatuses[]? | {name, ready, restartCount, image, imageID, waiting_reason: .state.waiting.reason, waiting_message: .state.waiting.message, terminated_reason: .state.terminated.reason, terminated_message: .state.terminated.message, exit_code: .state.terminated.exitCode, previous_state: .lastState}]}' |
+              tee "$ARTIFACT_DIR/git-fixture-container-status.jsonl" || true
+            timeout 30s kubectl -n evalplane-e2e-harness describe pods -l app=git-fixture > "$ARTIFACT_DIR/git-fixture-pods-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs -l app=git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs -l app=git-fixture --all-containers=true --previous --tail=200 > "$ARTIFACT_DIR/git-fixture-previous.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/git-fixture-namespace-events.txt" 2>&1 || true
+            echo "Git fixture container logs:" >&2
+            tail -n 80 "$ARTIFACT_DIR/git-fixture.log" >&2 || true
+            echo "Git fixture previous container logs:" >&2
+            tail -n 80 "$ARTIFACT_DIR/git-fixture-previous.log" >&2 || true
+            echo "Git fixture recent namespace events:" >&2
+            tail -n 30 "$ARTIFACT_DIR/git-fixture-namespace-events.txt" >&2 || true
+            echo "Git fixture deployment did not become available" >&2
+            exit 1
+          fi
+          host_gateway="$(docker exec evalplane-e2e-control-plane sh -c "ip route | awk '/default/ {print \$3; exit}'")"
+          test -n "$host_gateway"
+          database_url="postgres://verification_ci:verification_ci@${host_gateway}:5432/verification_e2e?sslmode=disable"
+          echo "::add-mask::$database_url"
+          kubectl create secret generic database -n evalplane-e2e-harness --from-literal=url="$database_url"
+          auth_password="$(openssl rand -base64 24 | tr -d '\n')"
+          echo "::add-mask::$auth_password"
+          printf 'E2E_AUTH_PASSWORD=%s\n' "$auth_password" >> "$GITHUB_ENV"
+          kubectl create secret generic e2e-auth -n evalplane-e2e-harness --from-literal=password="$auth_password"
+
+      - name: Run and assert authoritative verification
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: |
+          set -euo pipefail
+          collect_qualification_diagnostics() {
+            timeout 30s kubectl -n evalplane-e2e-harness get pod qualification -o yaml > "$ARTIFACT_DIR/qualification-pod.yaml" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness describe pod qualification > "$ARTIFACT_DIR/qualification-pod-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs qualification --all-containers=true > "$ARTIFACT_DIR/qualification.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness logs qualification --all-containers=true --previous > "$ARTIFACT_DIR/qualification-previous.log" 2>&1 || true
+            timeout 30s kubectl -n evalplane-e2e-harness get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/qualification-namespace-events.txt" 2>&1 || true
+            timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/qualification-all-pods-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get applications -o wide > "$ARTIFACT_DIR/qualification-argo-applications-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get applications -o yaml > "$ARTIFACT_DIR/qualification-argo-applications.yaml" 2>&1 || true
+            timeout 30s kubectl -n argocd get appprojects -o yaml > "$ARTIFACT_DIR/qualification-argo-appprojects.yaml" 2>&1 || true
+            timeout 30s kubectl -n argocd logs statefulset/argocd-application-controller --tail=200 > "$ARTIFACT_DIR/qualification-argo-controller.log" 2>&1 || true
+            timeout 30s kubectl -n argocd logs deployment/argocd-repo-server --tail=200 > "$ARTIFACT_DIR/qualification-argo-repo-server.log" 2>&1 || true
+            run_namespace="$(timeout 10s kubectl -n argocd get application checkout-gitops-proof -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)"
+            if [[ "$run_namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+              printf '%s\n' "$run_namespace" > "$ARTIFACT_DIR/qualification-run-namespace.txt"
+              timeout 30s kubectl -n "$run_namespace" get deployment eval-reference-app -o yaml > "$ARTIFACT_DIR/qualification-target-deployment.yaml" 2>&1 || true
+              timeout 30s kubectl -n "$run_namespace" describe deployment eval-reference-app > "$ARTIFACT_DIR/qualification-target-deployment-describe.txt" 2>&1 || true
+              timeout 30s kubectl -n "$run_namespace" get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/qualification-target-events.txt" 2>&1 || true
+            fi
+            timeout 30s kubectl get deployments -A -o wide > "$ARTIFACT_DIR/qualification-all-deployments-wide.txt" 2>&1 || true
+            timeout 30s kubectl get pods -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,WAITING:.status.containerStatuses[*].state.waiting.reason' > "$ARTIFACT_DIR/qualification-all-pods-status.txt" 2>&1 || true
+            echo "Qualification stage progress and failure:" >&2
+            jq -Rrc 'fromjson? | select(.kind == "qualification_stage" or .kind == "qualification_failure" or .kind == "worker_failure" or .kind == "persistence_failure")' "$ARTIFACT_DIR/qualification.log" >&2 || true
+          }
+          kubectl apply -f backend/e2e/qualification.yaml
+          if ! kubectl wait -n evalplane-e2e-harness --for=condition=Ready pod/qualification --timeout=180s; then
+            echo "Qualification pod did not become Ready" >&2
+            collect_qualification_diagnostics
+            exit 1
+          fi
+          qualification_deadline=$((SECONDS + 720))
+          qualification_phase=""
+          qualification_last_phase=""
+          qualification_succeeded=false
+          while (( SECONDS < qualification_deadline )); do
+            if ! qualification_phase="$(kubectl -n evalplane-e2e-harness get pod qualification -o jsonpath='{.status.phase}')"; then
+              echo "Could not read qualification pod phase" >&2
+              collect_qualification_diagnostics
+              exit 1
+            fi
+            if [[ "$qualification_phase" != "$qualification_last_phase" ]]; then
+              echo "Qualification pod phase: ${qualification_phase:-empty}"
+              qualification_last_phase="$qualification_phase"
+            fi
+            case "$qualification_phase" in
+              Succeeded)
+                qualification_succeeded=true
+                echo "Qualification terminal phase: Succeeded"
+                break
+                ;;
+              Failed)
+                echo "Qualification terminal phase: Failed" >&2
+                collect_qualification_diagnostics
+                exit 1
+                ;;
+              Unknown)
+                echo "Qualification pod phase: Unknown" >&2
+                collect_qualification_diagnostics
+                exit 1
+                ;;
+              Running|Pending|"")
+                ;;
+              *)
+                echo "Unexpected qualification pod phase: $qualification_phase" >&2
+                collect_qualification_diagnostics
+                exit 1
+                ;;
+            esac
+            sleep 2
+          done
+          if [[ "$qualification_succeeded" != true ]]; then
+            echo "Timed out after 720 seconds waiting for qualification to succeed; last phase: ${qualification_phase:-empty}" >&2
+            collect_qualification_diagnostics
+            exit 1
+          fi
+          echo "proof assertion: qualification log captured"
+          if ! kubectl logs -n evalplane-e2e-harness qualification > "$ARTIFACT_DIR/qualification.log"; then
+            echo "PROOF ASSERTION FAILED: qualification log captured" >&2
+            printf '%s\n' "qualification log captured" > "$ARTIFACT_DIR/proof-assertion-failure.txt" || true
+            exit 1
+          fi
+          verification_result="$ARTIFACT_DIR/verification-result.json"
+          evaluation_result="$ARTIFACT_DIR/evaluation-result.json"
+          evaluation_input="$ARTIFACT_DIR/evaluation-input.json"
+          if ! jq -Rc 'fromjson? | select(.kind == "persisted_evaluation") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$evaluation_result"; then
+            : > "$evaluation_result"
+          fi
+          if ! jq -Rc 'fromjson? | select(.kind == "persisted_input") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$evaluation_input"; then
+            : > "$evaluation_input"
+          fi
+          print_proof_diagnostic() {
+            if [[ ! -s "$verification_result" ]] || ! jq -e 'type == "object"' "$verification_result" >/dev/null 2>&1; then
+              echo "Sanitized proof diagnostic unavailable: persisted verification was not extracted as a JSON object" >&2
+              return
+            fi
+            echo "Sanitized proof diagnostic:" >&2
+            jq '{
+              id, run_id, validity, overall_status,
+              evaluation_window: {started_at: .evidence_started_at, completed_at: .evidence_completed_at},
+              action_inspection: {
+                requested_count: .action_inspection.requested_count,
+                authorized_count: .action_inspection.authorized_count,
+                executed_count: .action_inspection.executed_count,
+                action_type_counts: ([.action_inspection.actions[]?.action_type] | sort | group_by(.) | map({action_type: .[0], count: length})),
+                set_live_workload_image: [.action_inspection.actions[]? | select(.action_type == "set_live_workload_image") | {authorized, status}]
+              },
+              infrastructure_diff: [.infrastructure_diff[]? | {
+                classification,
+                image_fields: [.fields[]? | select(.field == "image") | {before, after}]
+              }],
+              recovery_criteria: [.intent.assertions[]? | {key, metric, operator, target}],
+              outcome: {
+                status: .outcome.status,
+                reason: .outcome.reason,
+                assertions: .outcome.assertions
+              },
+              side_effects: {
+                status: .side_effects.status,
+                findings: [.side_effects.findings[]? | {type, severity, summary, blocking, evidence}]
+              },
+              recovery_telemetry: {
+                baseline_error_rate_pct: .baseline_snapshot.observation.metrics.error_rate_pct,
+                final_error_rate_pct: .final_snapshot.observation.metrics.error_rate_pct,
+                baseline_telemetry_available: .baseline_snapshot.observation.metrics.telemetry_available,
+                final_telemetry_available: .final_snapshot.observation.metrics.telemetry_available
+              },
+              gitops: {
+                desired_image: .final_snapshot.gitops.desired_state.image,
+                argo_sync_status: .final_snapshot.gitops.argo_state.sync_status,
+                live_workload_images: [.final_snapshot.observation.workloads[]? | select(.name == "eval-reference-app") | .image]
+              },
+              invariants: [.invariants[]? | {invariant_type, status}],
+              stability: {status: .stability.status, observations: .stability.observations},
+              forward_risks: [.forward_risks[]? | {analyzer_id, severity}]
+            }' "$verification_result" >&2 || true
+            if [[ -s "$evaluation_result" ]] && jq -e 'type == "object"' "$evaluation_result" >/dev/null 2>&1; then
+              echo "Sanitized outcome evaluation diagnostic:" >&2
+              jq '{
+                status: .result,
+                criterion_results: [.criteria[]? | {
+                  criterion_key: .key,
+                  metric_key,
+                  operator,
+                  expected: .target_value,
+                  actual: .observed_value,
+                  observed_state: .evidence.observed_state,
+                  status: .evidence.status,
+                  reason: .evidence.reason,
+                  evidence: .evidence.evidence_references
+                }],
+                findings: [.findings[]? | {
+                  type: .kind,
+                  code: .evidence.code,
+                  severity: .evidence.severity,
+                  summary,
+                  criterion_key: .evidence.criterion_key,
+                  evidence: .evidence.evidence_references
+                }]
+              }' "$evaluation_result" >&2 || true
+            else
+              echo "Sanitized outcome evaluation diagnostic unavailable" >&2
+            fi
+            if [[ -s "$evaluation_input" ]] && jq -e 'type == "object"' "$evaluation_input" >/dev/null 2>&1; then
+              echo "Sanitized recovery timeline:" >&2
+              jq '{
+                run: {started_at: .Run.started_at, completed_at: .Run.completed_at},
+                actions: [.Actions[]? | {action_type, status, authorized, started_at, completed_at, created_at}],
+                observations: [.Events[]? | select(.event_type == "observation") | {
+                  id,
+                  sequence,
+                  occurred_at,
+                  summary,
+                  request_rate_rps: .payload.observation.metrics.request_rate_rps,
+                  error_rate_pct: .payload.observation.metrics.error_rate_pct,
+                  telemetry_available: .payload.observation.metrics.telemetry_available,
+                  workload_images: [.payload.observation.workloads[]?.image]
+                }]
+              }' "$evaluation_input" >&2 || true
+            else
+              echo "Sanitized recovery timeline unavailable" >&2
+            fi
+            echo "Sanitized provider provenance:" >&2
+            jq '{
+              provenance_contract: .provenance.contract_version,
+              providers: [.provenance.providers[]? | {role, provider_id, contract_version}],
+              evidence_dimensions: [.evidence_assessment.dimensions[]? | {evidence_type, applicability, availability, source_provider}]
+            }' "$verification_result" >&2 || true
+          }
+          fail_proof_assertion() {
+            echo "PROOF ASSERTION FAILED: $1" >&2
+            printf '%s\n' "$1" > "$ARTIFACT_DIR/proof-assertion-failure.txt" || true
+            print_proof_diagnostic
+            exit 1
+          }
+          assert_result() {
+            local name="$1"
+            local expression="$2"
+            echo "proof assertion: $name"
+            if ! jq -e "$expression" "$verification_result" >/dev/null; then
+              fail_proof_assertion "$name"
+            fi
+          }
+          assert_event() {
+            local name="$1"
+            local expression="$2"
+            echo "proof assertion: $name"
+            if ! jq -Re "$expression" "$ARTIFACT_DIR/qualification.log" >/dev/null; then
+              fail_proof_assertion "$name"
+            fi
+          }
+
+          echo "proof assertion: persisted verification extracted"
+          if ! jq -Rc 'fromjson? | select(.kind == "persisted_verification") | .value' "$ARTIFACT_DIR/qualification.log" | tail -1 > "$verification_result"; then
+            fail_proof_assertion "persisted verification extraction command"
+          fi
+          if [[ ! -f "$verification_result" ]]; then
+            fail_proof_assertion "persisted verification file exists"
+          fi
+          if [[ ! -s "$verification_result" ]]; then
+            fail_proof_assertion "persisted verification present"
+          fi
+          if ! jq -e 'type == "object"' "$verification_result" >/dev/null; then
+            fail_proof_assertion "persisted verification JSON object"
+          fi
+
+          assert_result "verification identity and contracts" '
+            .id != "" and .run_id != "" and .agent_version_id != "" and .scenario_version_id != "" and
+            .verifier_contract_version == "infrastructure-verifier:v3" and
+            .snapshot_contract_version == "infrastructure-snapshot:v2"
+          '
+          assert_result "Stage 4 pinned agent implementation provenance" '
+            .provenance.contract_version == "verification-provenance:v1" and
+            .provenance.agent_implementation.contract_version == "agent-implementation-identity:v1" and
+            .provenance.agent_implementation.kind == "source_revision" and
+            .provenance.agent_implementation.provenance_level == "declared" and
+            (.provenance.agent_implementation.identifier | test("^[0-9a-f]{40}$"))
+          '
+          assert_result "Stage 4 contract provenance" '
+            .provenance.contracts.verifier == "infrastructure-verifier:v3" and
+            .provenance.contracts.evaluator == "deterministic-evaluator:v1" and
+            .provenance.contracts.evidence_requirements == "evidence-requirements:v1" and
+            .provenance.contracts.attribution == "action-attribution:v1" and
+            .provenance.contracts.snapshot == "infrastructure-snapshot:v2" and
+            .provenance.contracts.temporal_policy == "deterministic-evaluator:v1" and
+            .provenance.contracts.stability_policy == "infrastructure-verifier:v3"
+          '
+          assert_result "Stage 4 provider provenance" '
+            any(.provenance.providers[]; .role == "environment_runtime" and .provider_id != "" and .contract_version == "environment-provider-contract:v1") and
+            any(.provenance.providers[]; .role == "workload_state" and .provider_id == "kubernetes-api") and
+            any(.provenance.providers[]; .role == "telemetry" and .provider_id == "prometheus") and
+            any(.provenance.providers[]; .role == "git_desired_state" and .provider_id == "git" and .contract_version == "gitops-evidence:v1") and
+            any(.provenance.providers[]; .role == "argo_state" and .provider_id == "argocd" and .contract_version == "gitops-evidence:v1") and
+            any(.provenance.providers[]; .role == "stability" and .provider_id == "verification-stability-sampler") and
+            any(.provenance.providers[]; .role == "action_policy" and .provider_id == "executionworker-action-policy") and
+            any(.provenance.providers[]; .role == "action_executor" and .provider_id == "kubernetes-client-go")
+          '
+          echo "proof assertion: Stage 4 run/result provenance pin agrees"
+          if ! jq -e --slurpfile result "$verification_result" '
+            .Run.agent_implementation_identity == $result[0].provenance.agent_implementation
+          ' "$evaluation_input" >/dev/null; then
+            fail_proof_assertion "Stage 4 run/result provenance pin agrees"
+          fi
+          assert_result "required evidence complete" '
+            .evidence_assessment.contract_version == "evidence-requirements:v1" and
+            .evidence_assessment.requirements == {"contract_version":"evidence-requirements:v1","workload_state":"REQUIRED","telemetry":"REQUIRED","git_desired_state":"REQUIRED","argo_state":"REQUIRED","stability":"REQUIRED"} and
+            (.evidence_assessment.dimensions | length) == 5 and
+            all(.evidence_assessment.dimensions[]; .requirement_status == "REQUIRED" and .applicability == "APPLICABLE" and .availability == "AVAILABLE")
+          '
+          assert_result "verification validity valid" '.validity == "valid"'
+          assert_result "verification overall status FAILED" '.overall_status == "FAILED"'
+          assert_result "verification intent" '.intent.objective != "" and (.intent.assertions | length) > 0'
+          assert_result "baseline workload snapshot" '(.baseline_snapshot.observation.workloads | length) > 0'
+          assert_result "final telemetry available" '.final_snapshot.observation.metrics.telemetry_available == true'
+          assert_result "action requested" '.action_inspection.requested_count > 0'
+          assert_result "action authorized" '.action_inspection.authorized_count > 0'
+          assert_result "action executed" '.action_inspection.executed_count > 0'
+          assert_result "direct-live image mutation executed" 'any(.action_inspection.actions[]?; .action_type == "set_live_workload_image" and .authorized == true and .status == "executed")'
+          assert_result "action semantic is direct-live" 'all(.action_inspection.actions[]?; .action_type != "set_desired_workload_image")'
+          assert_result "infrastructure diff present" '(.infrastructure_diff | length) > 0'
+          assert_result "infrastructure diff expected classification" 'any(.infrastructure_diff[]?; .classification == "EXPECTED")'
+          assert_result "image before v18" 'any(.infrastructure_diff[]?; .classification == "EXPECTED" and any(.fields[]?; .field == "image" and .before == "evalplane-reference:v18"))'
+          assert_result "image after v17" 'any(.infrastructure_diff[]?; .classification == "EXPECTED" and any(.fields[]?; .field == "image" and .before == "evalplane-reference:v18" and .after == "evalplane-reference:v17"))'
+          assert_result "outcome PASSED" '.outcome.status == "PASSED"'
+          assert_result "side effects NONE" '.side_effects.status == "NONE"'
+          assert_result "desired/live invariant FAILED" 'any(.invariants[]?; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "FAILED")'
+          assert_result "Git desired image v18" '.final_snapshot.gitops.desired_state.image == "evalplane-reference:v18"'
+          assert_result "Argo OutOfSync" '.final_snapshot.gitops.argo_state.sync_status == "OutOfSync"'
+          assert_result "live workload image v17" 'any(.final_snapshot.observation.workloads[]?; .name == "eval-reference-app" and .image == "evalplane-reference:v17")'
+          assert_result "stability UNSTABLE" '.stability.status == "UNSTABLE"'
+          assert_result "stability observations" '.stability.observations > 1'
+          assert_result "reconciliation risk HIGH" 'any(.forward_risks[]?; .analyzer_id == "gitops-reconciliation-reversion" and .severity == "HIGH")'
+          assert_event "gateway boundary" 'fromjson? | select(.kind == "gateway_boundary" and .value.checked == true and .value.requests > 0)'
+          assert_event "action proposed event" 'fromjson? | select(.kind == "persisted_action_proposed")'
+          assert_event "action transition event" 'fromjson? | select(.kind == "persisted_action_transition")'
+
+          echo "proof assertion: product cleanup namespace extracted"
+          if ! run_namespace="$(jq -er '.baseline_snapshot.observation.workloads[0].namespace | select(type == "string" and length > 0)' "$verification_result")"; then
+            fail_proof_assertion "product cleanup namespace extracted"
+          fi
+          echo "product cleanup namespace: $run_namespace"
+          print_cleanup_stage_events() {
+            echo "Cleanup stage events:" >&2
+            jq -Rrc 'fromjson? | select(.kind == "qualification_stage" and .value.stage == "cleanup")' "$ARTIFACT_DIR/qualification.log" >&2 || true
+          }
+          capture_cleanup_namespace_diagnostics() {
+            echo "Cleanup namespace diagnostics:" >&2
+            timeout 30s kubectl get namespace "$run_namespace" -o yaml > "$ARTIFACT_DIR/product-cleanup-namespace.yaml" 2>&1 || true
+            timeout 30s kubectl get namespace "$run_namespace" -o json |
+              jq '{name: .metadata.name, phase: .status.phase, deletionTimestamp: .metadata.deletionTimestamp, finalizers: .spec.finalizers}' |
+              tee "$ARTIFACT_DIR/product-cleanup-namespace-status.json" >&2 || true
+            : > "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt"
+            for resource in pods deployments.apps replicasets.apps jobs.batch services configmaps serviceaccounts roles.rbac.authorization.k8s.io rolebindings.rbac.authorization.k8s.io; do
+              count="$(timeout 5s kubectl -n "$run_namespace" get "$resource" --ignore-not-found -o name 2>/dev/null | wc -l | tr -d ' ')" || {
+                printf '%s=unavailable\n' "$resource" >> "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt"
+                continue
+              }
+              if (( count > 0 )); then
+                printf '%s=%s\n' "$resource" "$count" >> "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt"
+              fi
+            done
+            cat "$ARTIFACT_DIR/product-cleanup-remaining-resource-counts.txt" >&2 || true
+            print_cleanup_stage_events
+          }
+          echo "proof assertion: product cleanup"
+          if ! cleanup_namespace_json="$(timeout 30s kubectl get namespace "$run_namespace" --ignore-not-found -o json)"; then
+            echo "Could not read product cleanup namespace state for $run_namespace" >&2
+            print_cleanup_stage_events
+            fail_proof_assertion "product cleanup namespace read"
+          fi
+          if [[ -n "$cleanup_namespace_json" ]]; then
+            jq '{name: .metadata.name, phase: .status.phase, deletionTimestamp: .metadata.deletionTimestamp, finalizers: .spec.finalizers}' <<< "$cleanup_namespace_json" > "$ARTIFACT_DIR/product-cleanup-namespace-before-wait.json"
+            deletion_timestamp="$(jq -r '.metadata.deletionTimestamp // empty' <<< "$cleanup_namespace_json")"
+            if [[ -z "$deletion_timestamp" ]]; then
+              echo "Product cleanup did not request deletion of run namespace $run_namespace" >&2
+              capture_cleanup_namespace_diagnostics
+              fail_proof_assertion "product cleanup deletion not requested"
+            fi
+            echo "Product cleanup deletion is progressing for $run_namespace since $deletion_timestamp"
+            if ! kubectl wait --for=delete "namespace/$run_namespace" --timeout=120s > "$ARTIFACT_DIR/product-cleanup-wait.txt" 2>&1; then
+              echo "Product cleanup deletion did not complete within 120 seconds for $run_namespace" >&2
+              cat "$ARTIFACT_DIR/product-cleanup-wait.txt" >&2 || true
+              capture_cleanup_namespace_diagnostics
+              fail_proof_assertion "product cleanup deletion timeout"
+            fi
+          fi
+          if ! cleanup_namespace="$(timeout 30s kubectl get namespace "$run_namespace" --ignore-not-found -o name)"; then
+            echo "Could not verify product cleanup namespace absence for $run_namespace" >&2
+            capture_cleanup_namespace_diagnostics
+            fail_proof_assertion "product cleanup post-wait namespace read"
+          fi
+          if [[ -n "$cleanup_namespace" ]]; then
+            echo "Product cleanup namespace still exists after deletion wait: $run_namespace" >&2
+            capture_cleanup_namespace_diagnostics
+            fail_proof_assertion "product cleanup namespace still present"
+          fi
+          if ! printf 'product_run_namespace_cleanup=VERIFIED\n' > "$ARTIFACT_DIR/cleanup.txt"; then
+            fail_proof_assertion "product cleanup artifact"
+          fi
+          echo "proof assertion: proof summary generation"
+          if ! jq '{label:"REAL RUNTIME E2E WITH DETERMINISTIC REFERENCE AGENT",agent_action_result:(if any(.action_inspection.actions[]; .action_type == "set_live_workload_image" and .status == "executed") then "SUCCESS" else "FAILED" end),immediate_objective:(if .outcome.status == "PASSED" then "RECOVERED" else .outcome.status end),independent_infrastructure_verification:.overall_status,reason,id,run_id,agent_version_id,scenario_version_id,validity,action_inspection,infrastructure_diff,outcome,invariants,side_effects,stability,forward_risks}' \
+            "$verification_result" > "$ARTIFACT_DIR/verification-proof-summary.json"; then
+            fail_proof_assertion "proof summary generation"
+          fi
+
+      - name: Run and assert positive durable GitOps control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-positive-control.sh
+
+      - name: Run and assert inconclusive evidence control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-inconclusive-control.sh
+
+      - name: Run and assert non-blocking risk warning control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-warning-control.sh
+
+      - name: Run and assert Stage 2 step-exhaustion control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-stage2-control.sh step-limit
+
+      - name: Run and assert Stage 2 temporal-recovery control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-stage2-control.sh temporal
+
+      - name: Run and assert Stage 2 incomplete-evidence control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-stage2-control.sh insufficient
+
+      - name: Run and assert Stage 3 attributed-action control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-stage3-control.sh attributed
+
+      - name: Run and assert Stage 3 contradictory-attribution control
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: bash backend/e2e/run-stage3-control.sh contradiction
+
+      - name: Run and assert external-agent independence control
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        run: bash backend/e2e/run-external-control.sh
+
+      - name: Run and assert hostile external-agent probe
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        run: bash backend/e2e/run-hostile-control.sh
+
+      - name: Run and assert Flux ImagePolicy adapter controls
+        if: env.RUN_INDEPENDENT_CONTROLS != 'true'
+        run: bash backend/e2e/run-flux-control.sh
+
+      - name: Retrieve the persisted result through the real API
+        if: env.RUN_FULL_CONTROLS == 'true'
+        run: |
+          set -euo pipefail
+          encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
+          echo "::add-mask::$encryption_key"
+          (
+            export AGENT_CREDENTIAL_ENCRYPTION_KEY="$encryption_key"
+            export APP_ORIGIN=http://localhost:3000
+            export ENVIRONMENT=development
+            export COOKIE_SECURE=false
+            export PORT=18080
+            /tmp/verification-e2e-api
+          ) > "$ARTIFACT_DIR/api.log" 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/readyz >/dev/null; then break; fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          OPERATION_PROOF_FILE="$ARTIFACT_DIR/operation-proof.json" OPERATION_PROOF_API_URL=http://127.0.0.1:18080 OPERATION_PROOF_ARTIFACT_DIR="$ARTIFACT_DIR" \
+            bash backend/e2e/assert-operation-explanation-api.sh
+          jq -nc --arg email stage17@evalplane.local --arg password "$E2E_AUTH_PASSWORD" '{email:$email,password:$password}' |
+            curl --fail --silent --show-error --cookie-jar /tmp/verification-e2e-cookies.txt --header 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18080/v1/auth/login >/dev/null
+          workspace_id="$(jq -r .workspace_id "$ARTIFACT_DIR/verification-result.json")"
+          run_id="$(jq -r .run_id "$ARTIFACT_DIR/verification-result.json")"
+          curl --fail --silent --show-error --cookie /tmp/verification-e2e-cookies.txt \
+            "http://127.0.0.1:18080/v1/workspaces/${workspace_id}/runs/${run_id}/verification" > "$ARTIFACT_DIR/api-verification-result.json"
+          jq --slurpfile expected "$ARTIFACT_DIR/verification-result.json" -e '
+            .id == $expected[0].id and
+            .run_id == $expected[0].run_id and
+            .overall_status == "FAILED" and
+            .outcome.status == "PASSED" and
+            any(.invariants[]; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "FAILED")
+          ' "$ARTIFACT_DIR/api-verification-result.json" >/dev/null
+
+          jq -nc --arg email stage17-positive@evalplane.local --arg password "$E2E_AUTH_PASSWORD" '{email:$email,password:$password}' |
+            curl --fail --silent --show-error --cookie-jar /tmp/verification-e2e-positive-cookies.txt --header 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18080/v1/auth/login >/dev/null
+          positive_workspace_id="$(jq -r .workspace_id "$ARTIFACT_DIR/verification-result-positive.json")"
+          positive_run_id="$(jq -r .run_id "$ARTIFACT_DIR/verification-result-positive.json")"
+          curl --fail --silent --show-error --cookie /tmp/verification-e2e-positive-cookies.txt \
+            "http://127.0.0.1:18080/v1/workspaces/${positive_workspace_id}/runs/${positive_run_id}/verification" > "$ARTIFACT_DIR/api-verification-result-positive.json"
+          jq --slurpfile expected "$ARTIFACT_DIR/verification-result-positive.json" -e '
+            .id == $expected[0].id and
+            .run_id == $expected[0].run_id and
+            .validity == "valid" and
+            .overall_status == "VERIFIED" and
+            .outcome.status == "PASSED" and
+            .side_effects.status == "NONE" and
+            any(.invariants[]; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "PASSED") and
+            .stability.status == "STABLE" and
+            (.forward_risks | length) == 0
+          ' "$ARTIFACT_DIR/api-verification-result-positive.json" >/dev/null
+
+          jq -nc --arg email stage17-inconclusive@evalplane.local --arg password "$E2E_AUTH_PASSWORD" '{email:$email,password:$password}' |
+            curl --fail --silent --show-error --cookie-jar /tmp/verification-e2e-inconclusive-cookies.txt --header 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18080/v1/auth/login >/dev/null
+          inconclusive_workspace_id="$(jq -r .workspace_id "$ARTIFACT_DIR/verification-result-inconclusive.json")"
+          inconclusive_run_id="$(jq -r .run_id "$ARTIFACT_DIR/verification-result-inconclusive.json")"
+          curl --fail --silent --show-error --cookie /tmp/verification-e2e-inconclusive-cookies.txt \
+            "http://127.0.0.1:18080/v1/workspaces/${inconclusive_workspace_id}/runs/${inconclusive_run_id}/verification" > "$ARTIFACT_DIR/api-verification-result-inconclusive.json"
+          jq --slurpfile expected "$ARTIFACT_DIR/verification-result-inconclusive.json" -e '
+            .id == $expected[0].id and
+            .run_id == $expected[0].run_id and
+            .validity == "invalid_platform" and
+            .overall_status == "INCONCLUSIVE" and
+            .reason == "Required verification evidence was unavailable: argo_state." and
+            .evidence_assessment.contract_version == "evidence-requirements:v1" and
+            any(.evidence_assessment.dimensions[]; .evidence_type == "argo_state" and .requirement_status == "REQUIRED" and .availability == "UNAVAILABLE" and .source_provider == "argocd") and
+            .final_snapshot.gitops.argo_state == null and
+            .final_snapshot.gitops.errors == ["argo_state_unavailable_after_remediation"] and
+            any(.invariants[]; .invariant_type == "DESIRED_LIVE_STATE_CONSISTENCY" and .status == "INCONCLUSIVE")
+          ' "$ARTIFACT_DIR/api-verification-result-inconclusive.json" >/dev/null
+
+          jq -nc --arg email stage17-warning@evalplane.local --arg password "$E2E_AUTH_PASSWORD" '{email:$email,password:$password}' |
+            curl --fail --silent --show-error --cookie-jar /tmp/verification-e2e-warning-cookies.txt --header 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18080/v1/auth/login >/dev/null
+          warning_workspace_id="$(jq -r .workspace_id "$ARTIFACT_DIR/verification-result-warning.json")"
+          warning_run_id="$(jq -r .run_id "$ARTIFACT_DIR/verification-result-warning.json")"
+          curl --fail --silent --show-error --cookie /tmp/verification-e2e-warning-cookies.txt \
+            "http://127.0.0.1:18080/v1/workspaces/${warning_workspace_id}/runs/${warning_run_id}/verification" > "$ARTIFACT_DIR/api-verification-result-warning.json"
+          jq --slurpfile expected "$ARTIFACT_DIR/verification-result-warning.json" -e '
+            .id == $expected[0].id and
+            .run_id == $expected[0].run_id and
+            .validity == "valid" and
+            .overall_status == "WARNING" and
+            .outcome.status == "PASSED" and
+            .side_effects.status == "NONE" and
+            all(.invariants[]; .status == "PASSED") and
+            .stability.status == "STABLE" and
+            (.forward_risks | length) == 1 and
+            .forward_risks[0].analyzer_id == "kubernetes-capacity-headroom" and
+            .forward_risks[0].severity == "MEDIUM" and
+            .forward_risks[0].blocking == false and
+            .forward_risks[0].measurements.observed_headroom_replicas == 1
+          ' "$ARTIFACT_DIR/api-verification-result-warning.json" >/dev/null
+
+          for control in flux flux-forbidden; do
+            case "$control" in
+              flux) email=flux-external@evalplane.local; expected_status=VERIFIED ;;
+              flux-forbidden) email=flux-forbidden@evalplane.local; expected_status=FAILED ;;
+            esac
+            expected_file="$ARTIFACT_DIR/verification-result-$control.json"
+            workspace_id="$(jq -er '.workspace_id' "$expected_file")"
+            run_id="$(jq -er '.run_id' "$expected_file")"
+            cookie_file="/tmp/verification-e2e-$control-cookies.txt"
+            jq -nc --arg email "$email" --arg password "$E2E_AUTH_PASSWORD" '{email:$email,password:$password}' |
+              curl --fail --silent --show-error --cookie-jar "$cookie_file" --header 'Content-Type: application/json' --data-binary @- http://127.0.0.1:18080/v1/auth/login >/dev/null
+            api_file="$ARTIFACT_DIR/api-verification-result-$control.json"
+            curl --fail --silent --show-error --cookie "$cookie_file" \
+              "http://127.0.0.1:18080/v1/workspaces/${workspace_id}/runs/${run_id}/verification" > "$api_file"
+            jq --slurpfile expected "$expected_file" --arg status "$expected_status" -e '
+              .id == $expected[0].id and
+              .run_id == $expected[0].run_id and
+              .overall_status == $status and
+              .provenance.agent_implementation.identifier == $expected[0].provenance.agent_implementation.identifier and
+              .action_inspection.attribution.status == $expected[0].action_inspection.attribution.status
+            ' "$api_file" >/dev/null
+          done
+
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          set +e
+          mkdir -p "$ARTIFACT_DIR"
+          docker ps -a > "$ARTIFACT_DIR/docker-ps.txt" 2>&1
+          timeout 30s docker stats --no-stream > "$ARTIFACT_DIR/docker-stats.txt" 2>&1
+          timeout 30s kubectl get nodes -o wide > "$ARTIFACT_DIR/nodes.txt" 2>&1
+          timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/pods.txt" 2>&1
+          if [[ "$RUN_INDEPENDENT_CONTROLS" == true ]]; then
+            timeout 30s kubectl -n realverax-audit-proof get deployments,jobs,pods -o wide > "$ARTIFACT_DIR/independent-resources-wide.txt" 2>&1
+            timeout 30s kubectl -n realverax-audit-proof get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/independent-events.txt" 2>&1
+            timeout 30s kubectl -n realverax-audit-proof describe pods > "$ARTIFACT_DIR/independent-pods-describe.txt" 2>&1
+            for control in positive forbidden false-claim; do
+              timeout 30s kubectl -n realverax-audit-proof logs "job/direct-agent-$control" > "$ARTIFACT_DIR/independent-$control-agent-failure.log" 2>&1
+            done
+          fi
+          timeout 30s kubectl get applications -A -o yaml > "$ARTIFACT_DIR/argo-applications.yaml" 2>&1
+          timeout 45s kubectl describe pods -n evalplane-e2e-harness > "$ARTIFACT_DIR/harness-pods-describe.txt" 2>&1
+          for component in kube-apiserver kube-scheduler kube-controller-manager etcd; do
+            pod="${component}-evalplane-e2e-control-plane"
+            timeout 30s kubectl logs -n kube-system "$pod" --tail=200 > "$ARTIFACT_DIR/${component}.log" 2>&1
+          done
+          timeout 30s kubectl logs -n evalplane-e2e-harness calibration --tail=300 > "$ARTIFACT_DIR/calibration.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification --tail=500 > "$ARTIFACT_DIR/qualification-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-positive --tail=500 > "$ARTIFACT_DIR/qualification-positive-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-inconclusive --tail=500 > "$ARTIFACT_DIR/qualification-inconclusive-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-warning --tail=500 > "$ARTIFACT_DIR/qualification-warning-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-step-limit --tail=500 > "$ARTIFACT_DIR/qualification-stage2-step-limit-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-temporal --tail=500 > "$ARTIFACT_DIR/qualification-stage2-temporal-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage2-insufficient --tail=500 > "$ARTIFACT_DIR/qualification-stage2-insufficient-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage3-attributed --tail=500 > "$ARTIFACT_DIR/qualification-stage3-attributed-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness qualification-stage3-contradiction --tail=500 > "$ARTIFACT_DIR/qualification-stage3-contradiction-failure-tail.log" 2>&1
+          timeout 30s kubectl logs -n evalplane-e2e-harness deployment/git-fixture --all-containers=true --tail=200 > "$ARTIFACT_DIR/git-fixture.log" 2>&1
+          timeout 30s kubectl logs -n argocd statefulset/argocd-application-controller --tail=300 > "$ARTIFACT_DIR/argocd-controller.log" 2>&1
+          timeout 30s kubectl logs -n argocd deployment/argocd-repo-server --tail=200 > "$ARTIFACT_DIR/argocd-repo-server.log" 2>&1
+
+      - name: Cleanup disposable runtime
+        if: always()
+        run: |
+          set +e
+          timeout 60s kubectl delete -f backend/e2e/qualification.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-positive.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-inconclusive.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-warning.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage2-step-limit.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage2-temporal.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage2-insufficient.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage3-attributed.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/qualification-stage3-contradiction.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/calibration.yaml --ignore-not-found --wait=false
+          timeout 60s kubectl delete -f backend/e2e/harness-rbac.yaml --ignore-not-found --wait=false
+          timeout 120s kind delete cluster --name evalplane-e2e
+          audit_dir="$ARTIFACT_DIR/kind-audit-source"
+          if [[ -d "$audit_dir" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$audit_dir"
+            chmod 700 "$audit_dir"
+            find "$audit_dir" -type f -exec chmod 600 {} +
+          fi
+          if kind get clusters | grep -Fxq evalplane-e2e; then
+            printf 'kind_cluster_cleanup=FAILED\n' >> "$ARTIFACT_DIR/cleanup.txt"
+            exit 1
+          fi
+          printf 'kind_cluster_cleanup=VERIFIED\n' >> "$ARTIFACT_DIR/cleanup.txt"
+
+      - name: Upload safe E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-e2e-${{ github.run_id }}
+          path: /tmp/verification-e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 14

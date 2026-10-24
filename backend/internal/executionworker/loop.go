@@ -11,6 +11,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/execution"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 	"github.com/evalplane/evalplane/backend/internal/mcpserver"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
@@ -46,7 +47,22 @@ func (w *Worker) observe(ctx context.Context, env observation.EnvironmentContext
 	if err != nil {
 		return err
 	}
-	return w.event(ctx, env.Identity.RunID, "observation", code, map[string]any{"observation": obs})
+	payload := map[string]any{"observation": obs}
+	if observer, ok := w.deps.Runtime.(GitOpsObserver); ok {
+		gitopsEvidence, evidenceErr := observer.ObserveGitOps(ctx, env)
+		gitopsEvidence = evidenceForEvent(gitopsEvidence, evidenceErr)
+		if gitopsEvidence.ContractVersion != "" || evidenceErr != nil {
+			payload["gitops_evidence"] = gitopsEvidence
+		}
+	}
+	return w.event(ctx, env.Identity.RunID, "observation", code, payload)
+}
+
+func evidenceForEvent(value gitops.Evidence, err error) gitops.Evidence {
+	if err != nil && len(value.Errors) == 0 {
+		value.Errors = []string{"gitops_evidence_unavailable"}
+	}
+	return value
 }
 func (w *Worker) observeSample(ctx context.Context, env observation.EnvironmentContext) (out agentgateway.Observation, err error) {
 	defer func() {
@@ -139,34 +155,38 @@ func (w *Worker) agentLoop(ctx context.Context, run execution.ExecutionRun, env 
 		if err = w.event(ctx, run.RunID, "decision", "agent_decision_received", map[string]any{"step": step, "action_count": len(response.Actions)}); err != nil {
 			return err
 		}
-		useful := false
+		useful, terminal := false, false
 		for _, action := range response.Actions {
 			if err = w.checkStop(ctx, run); err != nil {
 				return err
 			}
-			if action.Type != "no_op" {
+			if action.Type == "no_op" {
+				terminal = true
+			} else {
 				useful = true
 			}
 			if err = w.processAction(ctx, run, env, view, action); err != nil {
 				return err
 			}
 		}
+		w.stage("immediate_outcome_and_post_action_snapshot", "started")
 		if err = w.observe(ctx, env, "post_action_observation_collected"); err != nil {
 			return platform("observation_failed", err)
 		}
+		w.stage("immediate_outcome_and_post_action_snapshot", "completed")
 		if err = w.event(ctx, run.RunID, "system", "agent_step_completed", map[string]any{"step": step}); err != nil {
 			return err
 		}
-		if !useful {
+		if terminal || !useful {
 			return nil
-		} // Empty responses and exclusively no_op terminate decisions, not grading.
+		} // no_op is the protocol's explicit terminal decision; empty responses preserve the existing contract.
 		if step < w.config.MaxAgentSteps {
 			if err = wait(ctx, w.config.StepInterval); err != nil {
 				return err
 			}
 		}
 	}
-	return w.event(ctx, run.RunID, "system", "max_agent_steps_reached", nil)
+	return &Failure{Code: "agent_step_limit_reached", Class: "agent", Cause: ErrAgentStepLimitReached}
 }
 
 func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, env observation.EnvironmentContext, view scenario.AgentView, action agentgateway.ProposedAction) error {
@@ -209,7 +229,11 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 		defer cancel()
 		decision.Authorized = false
 		decision.Code = "authorization_unavailable"
-		return errors.Join(platform("action_authorization_unavailable", errors.New("resource verification failed")), w.persistAction(final, run.RunID, row.ID, decision))
+		cause := decision.Cause
+		if cause == nil {
+			cause = errors.New("resource verification failed")
+		}
+		return errors.Join(platform("action_authorization_unavailable", fmt.Errorf("action authorization failed: %w", cause)), w.persistAction(final, run.RunID, row.ID, decision))
 	}
 	if decision.Status != "denied" && (!decision.Authorized || decision.Status != "allowed") {
 		return platform("invalid_authorization_result", errors.New("invalid executor response"))
@@ -230,6 +254,7 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 		defer cancel()
 		return errors.Join(err, w.persistAction(final, run.RunID, row.ID, actionexec.ActionResult{Status: "failed", Authorized: true, Code: "action_cancelled"}))
 	}
+	w.stage("action_execution", "started")
 	result := w.deps.Actions.ExecuteAction(ctx, env, action)
 	// Persist the outcome even when a cancellation races with a Kubernetes request.
 	final, cancel := context.WithTimeout(context.Background(), w.config.FinalizeTimeout)
@@ -238,12 +263,25 @@ func (w *Worker) processAction(ctx context.Context, run execution.ExecutionRun, 
 		return err
 	}
 	if result.Status == "failed" {
-		return platform("action_execution_failed", errors.New("controlled action failed"))
+		w.stage("action_execution", "failed")
+	} else {
+		w.stage("action_execution", "completed")
+	}
+	if result.Status == "failed" {
+		cause := result.Cause
+		if cause == nil {
+			cause = errors.New(result.Summary)
+		}
+		return platform("action_execution_failed", fmt.Errorf("controlled action %s failed: %w", result.ActionType, cause))
 	}
 	return nil
 }
 func (w *Worker) persistAction(ctx context.Context, runID, actionID string, result actionexec.ActionResult) error {
-	payload, _ := json.Marshal(map[string]any{"status": result.Status, "authorized": result.Authorized, "executed": result.Executed, "code": result.Code})
+	if result.Attribution != nil {
+		result.Attribution.RunID = runID
+		result.Attribution.ActionID = actionID
+	}
+	payload, _ := json.Marshal(map[string]any{"status": result.Status, "authorized": result.Authorized, "executed": result.Executed, "code": result.Code, "attribution": result.Attribution})
 	if err := w.deps.Evidence.UpdateAgentAction(ctx, evidence.UpdateActionInput{RunID: runID, ActionID: actionID, Status: result.Status, Authorized: result.Authorized, ResultPayload: payload}); err != nil {
 		return platform("action_persistence_failed", err)
 	}
@@ -259,7 +297,7 @@ func (w *Worker) persistAction(ctx context.Context, runID, actionID string, resu
 }
 func safeActionType(value string) string {
 	switch value {
-	case "inspect", "no_op", "scale_workload", "restart_pod":
+	case "inspect", "no_op", "scale_workload", "restart_pod", "set_workload_image", "set_live_workload_image", "set_desired_workload_image":
 		return value
 	}
 	return "unsupported_action"
@@ -272,6 +310,11 @@ func safeProposal(action agentgateway.ProposedAction) map[string]any {
 			out["replicas"] = n
 		case int:
 			out["replicas"] = n
+		}
+	}
+	if action.Type == "set_workload_image" || action.Type == "set_live_workload_image" || action.Type == "set_desired_workload_image" {
+		if image, ok := action.Parameters["image"].(string); ok && len(image) <= 255 {
+			out["image"] = image
 		}
 	}
 	return out

@@ -52,7 +52,11 @@ type TrafficStage struct {
 }
 
 type TrafficSpikeProfile struct {
-	Stages []TrafficStage
+	Stages   []TrafficStage
+	StartVUs *int
+	// RequestPath optionally selects the uninstrumented reference-app health
+	// endpoint. Empty preserves the existing root-path behavior.
+	RequestPath string
 }
 
 func DevelopmentTrafficSpikeProfile() TrafficSpikeProfile {

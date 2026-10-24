@@ -1,0 +1,3 @@
+DROP TABLE customer_agent_action_claims;
+ALTER TABLE customer_observation_sessions
+    DROP CONSTRAINT customer_observation_sessions_workspace_environment_id_key;

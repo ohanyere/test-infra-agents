@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { AgentForm } from "./agent-form";
 
 export const metadata: Metadata = {
-  title: "Add agent — Evalplane",
+  title: "Add agent — Realverax",
   description: "Register an exact infrastructure agent version and test its HTTP connection.",
 };
 
