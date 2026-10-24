@@ -1,0 +1,238 @@
+# Flux image-reflector-controller v1.2.5, source commit
+# d245eae59b9ef4928f69c556c13cd1729753349c. Only ImagePolicy and
+# ImageRepository resources in this namespace are writable by the controller.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-reflector
+  namespace: evalplane-e2e-harness
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-reflector
+  namespace: evalplane-e2e-harness
+rules:
+  - apiGroups: [image.toolkit.fluxcd.io]
+    resources: [imagerepositories, imagepolicies]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [image.toolkit.fluxcd.io]
+    resources: [imagerepositories/status, imagepolicies/status]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-reflector
+  namespace: evalplane-e2e-harness
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: flux-reflector}
+subjects:
+  - {kind: ServiceAccount, name: flux-reflector, namespace: evalplane-e2e-harness}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: image-reflector-controller
+  namespace: evalplane-e2e-harness
+  labels: {app: image-reflector-controller}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: image-reflector-controller}
+  template:
+    metadata:
+      labels: {app: image-reflector-controller}
+    spec:
+      serviceAccountName: flux-reflector
+      securityContext: {fsGroup: 1337}
+      containers:
+        - name: reflector
+          image: fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82
+          args: ["--watch-all-namespaces=false", "--log-level=info", "--log-encoding=json"]
+          env:
+            - name: RUNTIME_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          ports:
+            - {name: healthz, containerPort: 9440}
+          readinessProbe:
+            httpGet: {path: /readyz, port: healthz}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: temp, mountPath: /tmp}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 1000m, memory: 1Gi}
+      volumes:
+        - {name: data, emptyDir: {}}
+        - {name: temp, emptyDir: {}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux-registry
+  namespace: evalplane-e2e-harness
+  labels: {app: flux-registry}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: flux-registry}
+  template:
+    metadata:
+      labels: {app: flux-registry}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: registry
+          image: registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          ports: [{name: registry, containerPort: 5000}]
+          readinessProbe:
+            httpGet: {path: /v2/, port: registry}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flux-registry
+  namespace: evalplane-e2e-harness
+spec:
+  selector: {app: flux-registry}
+  ports: [{name: registry, port: 5000, targetPort: registry}]
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImageRepository
+metadata:
+  name: checkout
+  namespace: evalplane-e2e-harness
+spec:
+  image: flux-registry.evalplane-e2e-harness.svc.cluster.local:5000/checkout
+  interval: 1m
+  insecure: true
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImagePolicy
+metadata:
+  name: checkout-stable
+  namespace: evalplane-e2e-harness
+spec:
+  imageRepositoryRef: {name: checkout}
+  # The fixture offers v16, v17, and unhealthy v18. Flux chooses the newest
+  # allowed v1 tag; the adapter does not choose among those tags.
+  filterTags: {pattern: '^v1[0-7]$'}
+  policy:
+    alphabetical: {order: asc}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-agent
+  namespace: evalplane-e2e-harness
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-agent-policy-read
+  namespace: evalplane-e2e-harness
+rules:
+  - apiGroups: [image.toolkit.fluxcd.io]
+    resources: [imagepolicies]
+    resourceNames: [checkout-stable]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-agent-policy-read
+  namespace: evalplane-e2e-harness
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: flux-agent-policy-read}
+subjects:
+  - {kind: ServiceAccount, name: flux-agent, namespace: evalplane-e2e-harness}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux-agent
+  namespace: evalplane-e2e-harness
+  labels: {app: flux-agent}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: flux-agent}
+  template:
+    metadata:
+      labels: {app: flux-agent}
+    spec:
+      serviceAccountName: flux-agent
+      containers:
+        - name: adapter
+          image: flux-agent:e2e
+          imagePullPolicy: Never
+          env:
+            - {name: FLUX_POLICY_NAMESPACE, value: evalplane-e2e-harness}
+            - {name: FLUX_POLICY_NAME, value: checkout-stable}
+          ports: [{name: http, containerPort: 8081}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flux-agent
+  namespace: evalplane-e2e-harness
+spec:
+  selector: {app: flux-agent}
+  ports: [{name: http, port: 8081, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux-agent-forbidden
+  namespace: evalplane-e2e-harness
+  labels: {app: flux-agent-forbidden}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: flux-agent-forbidden}
+  template:
+    metadata:
+      labels: {app: flux-agent-forbidden}
+    spec:
+      serviceAccountName: flux-agent
+      containers:
+        - name: adapter
+          image: flux-agent:e2e
+          imagePullPolicy: Never
+          env:
+            - {name: FLUX_POLICY_NAMESPACE, value: evalplane-e2e-harness}
+            - {name: FLUX_POLICY_NAME, value: checkout-stable}
+            - {name: FLUX_FORBIDDEN_CONTROL, value: "true"}
+          ports: [{name: http, containerPort: 8081}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flux-agent-forbidden
+  namespace: evalplane-e2e-harness
+spec:
+  selector: {app: flux-agent-forbidden}
+  ports: [{name: http, port: 8081, targetPort: http}]

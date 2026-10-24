@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
@@ -54,7 +54,7 @@ func TestStage3ContradictionPreservesFixtureUpdateFailure(t *testing.T) {
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: scenariorunner.ReferenceDeploymentName, Namespace: namespace}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "reference-app", Image: "evalplane-reference:v17"}}}}}}
 	client := fake.NewSimpleClientset(deployment)
 	conflict := apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, deployment.Name, errors.New("resource version changed"))
-	client.PrependReactor("update", "deployments", func(ktesting.Action) (bool, runtime.Object, error) { return true, nil, conflict })
+	client.PrependReactor("update", "deployments", func(ktesting.Action) (bool, k8sruntime.Object, error) { return true, nil, conflict })
 	delegate := fixedActions{result: actionexec.ActionResult{ActionType: "set_live_workload_image", Authorized: true, Executed: true, Status: "executed"}}
 	actions := stage3ContradictionActions{delegate: delegate, client: client}
 	target := agentgateway.ActionTarget{Kind: "Deployment", Namespace: namespace, Name: deployment.Name}

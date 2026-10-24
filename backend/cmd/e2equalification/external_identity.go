@@ -18,8 +18,9 @@ var containerDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // API (pod status container imageID), never from agent input: the external
 // agent is not an authority for its own implementation identity.
 //
-// The digest is normalized from imageID forms like
-// "docker://sha256:<hex>" to "sha256:<hex>". Anything else fails closed.
+// The digest is normalized from imageID forms like "docker://sha256:<hex>"
+// and "docker.io/owner/image@sha256:<hex>" to "sha256:<hex>".
+// Anything else fails closed.
 func observeExternalAgentDigest(ctx context.Context, client kubernetes.Interface, namespace, appLabel string) (string, error) {
 	if client == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(appLabel) == "" {
 		return "", errors.New("external agent identity observation requires a client, namespace, and app label")
@@ -52,7 +53,16 @@ func observeExternalAgentDigest(ctx context.Context, client kubernetes.Interface
 }
 
 func normalizeContainerDigest(imageID string) (string, bool) {
-	digest := strings.TrimSpace(strings.TrimPrefix(imageID, "docker://"))
+	digest := strings.TrimSpace(imageID)
+	for _, prefix := range []string{"docker://", "containerd://", "docker-pullable://"} {
+		digest = strings.TrimPrefix(digest, prefix)
+	}
+	if at := strings.LastIndexByte(digest, '@'); at >= 0 {
+		if at == 0 || !strings.Contains(digest[:at], "/") {
+			return "", false
+		}
+		digest = digest[at+1:]
+	}
 	if !containerDigestPattern.MatchString(digest) {
 		return "", false
 	}

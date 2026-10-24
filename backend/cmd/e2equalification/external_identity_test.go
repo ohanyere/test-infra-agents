@@ -25,10 +25,12 @@ func externalAgentPod(app, imageID string, ready bool) *corev1.Pod {
 
 func TestObserveExternalAgentDigestRequiresReadyPodWithValidDigest(t *testing.T) {
 	valid := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	client := kubernetesfake.NewSimpleClientset(externalAgentPod("external-agent", "docker://"+valid, true))
-	got, err := observeExternalAgentDigest(context.Background(), client, "evalplane-e2e-harness", "external-agent")
-	if err != nil || got != valid {
-		t.Fatalf("digest=%q err=%v", got, err)
+	for _, imageID := range []string{"docker://" + valid, "containerd://" + valid, "docker.io/fluxcd/image-reflector-controller@" + valid, "docker-pullable://docker.io/fluxcd/image-reflector-controller@" + valid} {
+		client := kubernetesfake.NewSimpleClientset(externalAgentPod("external-agent", imageID, true))
+		got, err := observeExternalAgentDigest(context.Background(), client, "evalplane-e2e-harness", "external-agent")
+		if err != nil || got != valid {
+			t.Fatalf("imageID=%q digest=%q err=%v", imageID, got, err)
+		}
 	}
 }
 
@@ -42,6 +44,7 @@ func TestObserveExternalAgentDigestFailsClosed(t *testing.T) {
 		{"no pods", nil, "external-agent"},
 		{"not ready", []*corev1.Pod{externalAgentPod("external-agent", valid, false)}, "external-agent"},
 		{"malformed digest", []*corev1.Pod{externalAgentPod("external-agent", "docker://sha256:zzz", true)}, "external-agent"},
+		{"malformed repository digest", []*corev1.Pod{externalAgentPod("external-agent", "docker.io/fluxcd/image-reflector-controller@sha256:zzz", true)}, "external-agent"},
 		{"tag instead of digest", []*corev1.Pod{externalAgentPod("external-agent", "external-agent:e2e", true)}, "external-agent"},
 		{"wrong app label", []*corev1.Pod{externalAgentPod("external-agent", valid, true)}, "other-agent"},
 	} {

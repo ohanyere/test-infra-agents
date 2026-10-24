@@ -171,6 +171,12 @@ func (r *runtime) hostile() bool { return r.control == hostileControl }
 // externalAgentApp is the Kubernetes app label of the genuinely separate
 // external-agent deployment serving this control.
 func (r *runtime) externalAgentApp() string {
+	if os.Getenv("E2E_FLUX_AGENT") == "true" {
+		if r.hostile() {
+			return "flux-agent-forbidden"
+		}
+		return "flux-agent"
+	}
 	if r.hostile() {
 		return "external-agent-hostile"
 	}
@@ -670,6 +676,17 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		workspaceName, workspaceSlug = "Hostile probe qualification", "hostile-probe-qualification"
 		email = "hostile-probe@evalplane.local"
 	}
+	if os.Getenv("E2E_FLUX_AGENT") == "true" && (r.external() || r.hostile()) {
+		if r.external() {
+			identityName, identitySlug = "Flux Policy Adapter Harness", "flux-external-agent"
+			workspaceName, workspaceSlug = "Flux external qualification", "flux-external-qualification"
+			email = "flux-external@evalplane.local"
+		} else {
+			identityName, identitySlug = "Flux Forbidden Control", "flux-forbidden-control"
+			workspaceName, workspaceSlug = "Flux forbidden qualification", "flux-forbidden-qualification"
+			email = "flux-forbidden@evalplane.local"
+		}
+	}
 	startStage("qualification_criteria")
 	raw, err := os.ReadFile("/criteria/criteria.json")
 	if err != nil {
@@ -732,6 +749,19 @@ func qualification(ctx context.Context, r *runtime, client kubernetes.Interface)
 		emit("external_agent_identity", map[string]string{"observed_digest": observedDigest, "pinned_identifier": observedDigest, "observer": "qualification-harness", "source": "kubernetes-pod-imageID", "control": r.control})
 		agentIdentity = provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindArtifactDigest, Identifier: observedDigest, ProvenanceLevel: provenance.LevelDeclared}
 		agentMetadata = json.RawMessage(`{"external":true}`)
+		if os.Getenv("E2E_FLUX_AGENT") == "true" {
+			upstreamDigest, digestErr := observeExternalAgentDigest(ctx, client, harnessNamespace, "image-reflector-controller")
+			if digestErr != nil {
+				return digestErr
+			}
+			agentName, agentSlug = "Flux image reflector adapter", "flux-image-reflector-adapter"
+			agentDescription = "Flux v1.2.5 image policy decision translated to the direct HTTP gateway"
+			agentMetadata, err = json.Marshal(map[string]string{"upstream_source": "https://github.com/fluxcd/image-reflector-controller", "upstream_version": "v1.2.5", "upstream_commit": "d245eae59b9ef4928f69c556c13cd1729753349c", "upstream_observed_digest": upstreamDigest})
+			if err != nil {
+				return err
+			}
+			emit("flux_upstream_identity", map[string]string{"observed_digest": upstreamDigest, "version": "v1.2.5", "commit": "d245eae59b9ef4928f69c556c13cd1729753349c"})
+		}
 	}
 	av, err := agent.NewService(pool, agent.NewRepository(), roles).Create(ctx, p, ws.ID, agent.CreateInput{Name: agentName, Slug: agentSlug, Description: agentDescription, InitialVersion: agent.VersionInput{VersionLabel: "stage17-v1", InterfaceKind: "http", EndpointURL: agentEndpoint, Capabilities: agentCapabilities, ImplementationIdentity: agentIdentity, Metadata: agentMetadata}})
 	if err != nil {
@@ -959,6 +989,13 @@ func run() (err error) {
 		application = argoExternalApplication
 	} else if control == hostileControl {
 		application = argoHostileApplication
+	}
+	if os.Getenv("E2E_FLUX_AGENT") == "true" {
+		if control == externalControl {
+			application = "checkout-gitops-proof-flux"
+		} else if control == hostileControl {
+			application = "checkout-gitops-proof-flux-forbidden"
+		}
 	}
 	gitHTTP := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
 	r := &runtime{KubernetesRuntime: base, client: client, dynamic: dynamicClient, gitRoot: os.Getenv("GITOPS_REPOSITORY_ROOT"), gitRepo: os.Getenv("GITOPS_REPOSITORY_URL"), gitRevision: os.Getenv("GITOPS_REVISION"), gitStateURL: os.Getenv("GITOPS_STATE_URL"), gitUpdateURL: os.Getenv("GITOPS_UPDATE_URL"), gitHTTP: gitHTTP, control: control, application: application, argoEnabled: os.Getenv("E2E_GITOPS") == "true"}
