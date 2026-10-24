@@ -28,6 +28,7 @@ env:
   KIND_VERSION: v0.33.0
   KIND_NODE_IMAGE: kindest/node:v1.35.0
   ARGO_CD_VERSION: v3.5.3
+  REDIS_E2E_IMAGE: docker.io/library/redis@sha256:e499175dfb27569cd40010c2eee346113db95fdd0efc88ab9fd70a9e807f4542
   K6_IMAGE: grafana/k6:0.54.0
   PROMETHEUS_IMAGE: prom/prometheus:v3.13.3
   KUBECONFIG: ${{ github.workspace }}/.verification-e2e/kubeconfig
@@ -484,6 +485,7 @@ jobs:
           docker build -t flux-agent:e2e -f e2e/flux-agent.Dockerfile "$build_dir"
           timeout 180s docker pull fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82
           timeout 180s docker pull registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          timeout 180s docker pull --platform linux/amd64 "$REDIS_E2E_IMAGE"
           timeout 180s docker pull "$K6_IMAGE"
           timeout 180s docker pull "$PROMETHEUS_IMAGE"
 
@@ -539,7 +541,7 @@ jobs:
           kubectl wait -n kube-system --for=condition=Ready pod -l component=kube-controller-manager --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l component=etcd --timeout=180s
           kubectl wait -n kube-system --for=condition=Ready pod -l k8s-app=kube-dns --timeout=180s
-          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e external-agent:e2e flux-agent:e2e fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82 registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
+          kind load docker-image evalplane-harness:stage17 evalplane-reference:stage17 evalplane-reference:v17 evalplane-reference:v18 evalplane-git-fixture:e2e external-agent:e2e flux-agent:e2e fluxcd/image-reflector-controller@sha256:c83ce5c06fed9ebb308cd5165bd144ee934c720f6b47e0da2180869092063c82 registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 "$REDIS_E2E_IMAGE" "$K6_IMAGE" "$PROMETHEUS_IMAGE" --name evalplane-e2e
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'grafana/k6'
           docker exec evalplane-e2e-control-plane crictl images | grep -F 'prom/prometheus'
 
@@ -559,6 +561,8 @@ jobs:
           set -euo pipefail
           kubectl create namespace argocd
           kubectl apply --server-side --force-conflicts -n argocd -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGO_CD_VERSION}/manifests/install.yaml"
+          kubectl -n argocd patch deployment argocd-redis --type=strategic -p "$(jq -nc --arg image "$REDIS_E2E_IMAGE" '{spec:{template:{spec:{containers:[{name:"redis",image:$image,imagePullPolicy:"IfNotPresent"}]}}}}')"
+          kubectl -n argocd get deployment argocd-redis -o json | jq -e --arg image "$REDIS_E2E_IMAGE" '.spec.template.spec.containers | any(.name == "redis" and .image == $image and .imagePullPolicy == "IfNotPresent")'
           kubectl -n argocd scale deployment argocd-server argocd-dex-server argocd-notifications-controller argocd-applicationset-controller --replicas=0
           kubectl -n argocd patch configmap argocd-cm --type merge -p '{"data":{"timeout.reconciliation":"5s","timeout.reconciliation.jitter":"0s"}}'
           kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
@@ -574,6 +578,7 @@ jobs:
             echo "Argo Redis rollout failed; image-pull diagnostics retained in $ARTIFACT_DIR" >&2
             exit 1
           fi
+          kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-redis -o json | jq -e --arg image "$REDIS_E2E_IMAGE" 'any(.items[]; any(.spec.containers[]; .name == "redis" and .image == $image and .imagePullPolicy == "IfNotPresent") and any(.status.containerStatuses[]?; .name == "redis" and .ready == true))'
           kubectl apply -f backend/e2e/argocd-project.yaml
           kubectl -n argocd get appproject evalplane-e2e
 
