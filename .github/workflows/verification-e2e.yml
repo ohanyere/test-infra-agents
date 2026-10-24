@@ -563,7 +563,17 @@ jobs:
           kubectl -n argocd patch configmap argocd-cm --type merge -p '{"data":{"timeout.reconciliation":"5s","timeout.reconciliation.jitter":"0s"}}'
           kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
           kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=300s
-          kubectl -n argocd rollout status deployment/argocd-redis --timeout=300s
+          if ! kubectl -n argocd rollout status deployment/argocd-redis --timeout=300s; then
+            mkdir -p "$ARTIFACT_DIR"
+            timeout 30s kubectl -n argocd get pods -o wide > "$ARTIFACT_DIR/argocd-pods-wide.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd describe pods -l app.kubernetes.io/name=argocd-redis > "$ARTIFACT_DIR/argocd-redis-pod-describe.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/argocd-events.txt" 2>&1 || true
+            timeout 30s kubectl -n argocd get pods -l app.kubernetes.io/name=argocd-redis -o json > "$ARTIFACT_DIR/argocd-redis-pods.json" 2>&1 || true
+            timeout 30s kubectl describe node evalplane-e2e-control-plane > "$ARTIFACT_DIR/kind-node-describe.txt" 2>&1 || true
+            timeout 30s docker exec evalplane-e2e-control-plane journalctl -u kubelet --no-pager -n 300 > "$ARTIFACT_DIR/kind-kubelet-recent.log" 2>&1 || true
+            echo "Argo Redis rollout failed; image-pull diagnostics retained in $ARTIFACT_DIR" >&2
+            exit 1
+          fi
           kubectl apply -f backend/e2e/argocd-project.yaml
           kubectl -n argocd get appproject evalplane-e2e
 
