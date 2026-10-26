@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -22,8 +23,8 @@ type Repository struct{}
 func NewRepository() *Repository { return &Repository{} }
 
 const scenarioColumns = `s.id,s.owner_workspace_id,s.slug,s.name,s.kind,s.visibility,s.status,s.created_at,s.updated_at,
-	v.id,v.version,v.description,v.category,v.difficulty,v.duration_seconds,v.environment,v.conditions,v.observables,v.expected_behaviors,v.forbidden_behaviors,v.authoring_method,v.agent_task,v.agent_visible_context,v.allowed_actions,v.allowed_resources,v.ground_truth,v.execution_spec,v.source_metadata,v.created_at,v.criteria,f.task_family_id,f.case_type,f.contract_version`
-const latestJoin = `LEFT JOIN LATERAL (SELECT sv.id,sv.version,sv.description,sv.category,sv.difficulty,sv.duration_seconds,sv.environment,sv.conditions,sv.observables,sv.expected_behaviors,sv.forbidden_behaviors,sv.authoring_method,sv.agent_task,sv.agent_visible_context,sv.allowed_actions,sv.allowed_resources,sv.ground_truth,sv.execution_spec,sv.source_metadata,sv.created_at,
+	v.id,v.version,v.description,v.category,v.difficulty,v.duration_seconds,v.environment,v.conditions,v.observables,v.expected_behaviors,v.forbidden_behaviors,v.authoring_method,v.agent_task,v.agent_visible_context,v.allowed_actions,v.allowed_resources,v.ground_truth,v.execution_spec,v.source_metadata,v.evidence_requirements,v.created_at,v.criteria,f.task_family_id,f.case_type,f.contract_version`
+const latestJoin = `LEFT JOIN LATERAL (SELECT sv.id,sv.version,sv.description,sv.category,sv.difficulty,sv.duration_seconds,sv.environment,sv.conditions,sv.observables,sv.expected_behaviors,sv.forbidden_behaviors,sv.authoring_method,sv.agent_task,sv.agent_visible_context,sv.allowed_actions,sv.allowed_resources,sv.ground_truth,sv.execution_spec,sv.source_metadata,sv.evidence_requirements,sv.created_at,
 	COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'key',c.key,'name',c.name,'metric_key',c.metric_key,'operator',c.operator,'target_value',c.target_value,'unit',c.unit,'sort_order',c.sort_order,'created_at',c.created_at) ORDER BY c.sort_order,c.id) FROM scenario_criteria c WHERE c.scenario_version_id=sv.id),'[]'::jsonb) criteria
 	FROM scenario_versions sv WHERE sv.scenario_id=s.id ORDER BY sv.version DESC LIMIT 1) v ON true LEFT JOIN scenario_version_task_family f ON f.scenario_version_id=v.id`
 
@@ -34,7 +35,11 @@ func (r *Repository) Create(ctx context.Context, db DBTX, workspaceID string, in
 }
 func (r *Repository) CreateVersion(ctx context.Context, db DBTX, scenarioID string, number int, in VersionInput) (Version, error) {
 	var v Version
-	err := db.QueryRow(ctx, `INSERT INTO scenario_versions(scenario_id,version,description,category,difficulty,duration_seconds,environment,conditions,observables,expected_behaviors,forbidden_behaviors,authoring_method,agent_task,agent_visible_context,allowed_actions,allowed_resources,ground_truth,execution_spec,source_metadata)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)RETURNING id,version,description,category,difficulty,duration_seconds,environment,conditions,observables,expected_behaviors,forbidden_behaviors,authoring_method,agent_task,agent_visible_context,allowed_actions,allowed_resources,ground_truth,execution_spec,source_metadata,created_at`, scenarioID, number, in.Description, in.Category, in.Difficulty, in.DurationSeconds, in.Environment, in.Conditions, in.Observables, in.ExpectedBehaviors, in.ForbiddenBehaviors, in.AuthoringMethod, in.AgentTask, in.AgentVisibleContext, in.AllowedActions, in.AllowedResources, in.GroundTruth, in.ExecutionSpec, in.SourceMetadata).Scan(&v.ID, &v.Version, &v.Description, &v.Category, &v.Difficulty, &v.DurationSeconds, &v.Environment, &v.Conditions, &v.Observables, &v.ExpectedBehaviors, &v.ForbiddenBehaviors, &v.AuthoringMethod, &v.AgentTask, &v.AgentVisibleContext, &v.AllowedActions, &v.AllowedResources, &v.GroundTruth, &v.ExecutionSpec, &v.SourceMetadata, &v.CreatedAt)
+	requirements, _ := json.Marshal(in.EvidenceRequirements)
+	err := db.QueryRow(ctx, `INSERT INTO scenario_versions(scenario_id,version,description,category,difficulty,duration_seconds,environment,conditions,observables,expected_behaviors,forbidden_behaviors,authoring_method,agent_task,agent_visible_context,allowed_actions,allowed_resources,ground_truth,execution_spec,source_metadata,evidence_requirements)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)RETURNING id,version,description,category,difficulty,duration_seconds,environment,conditions,observables,expected_behaviors,forbidden_behaviors,authoring_method,agent_task,agent_visible_context,allowed_actions,allowed_resources,ground_truth,execution_spec,source_metadata,evidence_requirements,created_at`, scenarioID, number, in.Description, in.Category, in.Difficulty, in.DurationSeconds, in.Environment, in.Conditions, in.Observables, in.ExpectedBehaviors, in.ForbiddenBehaviors, in.AuthoringMethod, in.AgentTask, in.AgentVisibleContext, in.AllowedActions, in.AllowedResources, in.GroundTruth, in.ExecutionSpec, in.SourceMetadata, requirements).Scan(&v.ID, &v.Version, &v.Description, &v.Category, &v.Difficulty, &v.DurationSeconds, &v.Environment, &v.Conditions, &v.Observables, &v.ExpectedBehaviors, &v.ForbiddenBehaviors, &v.AuthoringMethod, &v.AgentTask, &v.AgentVisibleContext, &v.AllowedActions, &v.AllowedResources, &v.GroundTruth, &v.ExecutionSpec, &v.SourceMetadata, &requirements, &v.CreatedAt)
+	if err == nil {
+		err = json.Unmarshal(requirements, &v.EvidenceRequirements)
+	}
 	return v, mapDB(err)
 }
 func (r *Repository) CreateCriteria(ctx context.Context, db DBTX, versionID string, inputs []CriterionInput) ([]Criterion, error) {
@@ -140,7 +145,7 @@ func (r *Repository) GetRunVersion(ctx context.Context, db DBTX, workspaceID, ru
 	return scanVersion(db.QueryRow(ctx, versionSelect+` JOIN evaluation_batches b ON b.scenario_version_id=sv.id JOIN runs r ON r.batch_id=b.id WHERE r.id=$1 AND b.workspace_id=$2`, runID, workspaceID))
 }
 
-const versionSelect = `SELECT sv.id,sv.version,sv.description,sv.category,sv.difficulty,sv.duration_seconds,sv.environment,sv.conditions,sv.observables,sv.expected_behaviors,sv.forbidden_behaviors,sv.authoring_method,sv.agent_task,sv.agent_visible_context,sv.allowed_actions,sv.allowed_resources,sv.ground_truth,sv.execution_spec,sv.source_metadata,sv.created_at,COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'key',c.key,'name',c.name,'metric_key',c.metric_key,'operator',c.operator,'target_value',c.target_value,'unit',c.unit,'sort_order',c.sort_order,'created_at',c.created_at) ORDER BY c.sort_order,c.id)FROM scenario_criteria c WHERE c.scenario_version_id=sv.id),'[]'::jsonb),f.task_family_id,f.case_type,f.contract_version FROM scenario_versions sv JOIN scenarios s ON s.id=sv.scenario_id LEFT JOIN scenario_version_task_family f ON f.scenario_version_id=sv.id`
+const versionSelect = `SELECT sv.id,sv.version,sv.description,sv.category,sv.difficulty,sv.duration_seconds,sv.environment,sv.conditions,sv.observables,sv.expected_behaviors,sv.forbidden_behaviors,sv.authoring_method,sv.agent_task,sv.agent_visible_context,sv.allowed_actions,sv.allowed_resources,sv.ground_truth,sv.execution_spec,sv.source_metadata,sv.evidence_requirements,sv.created_at,COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'key',c.key,'name',c.name,'metric_key',c.metric_key,'operator',c.operator,'target_value',c.target_value,'unit',c.unit,'sort_order',c.sort_order,'created_at',c.created_at) ORDER BY c.sort_order,c.id)FROM scenario_criteria c WHERE c.scenario_version_id=sv.id),'[]'::jsonb),f.task_family_id,f.case_type,f.contract_version FROM scenario_versions sv JOIN scenarios s ON s.id=sv.scenario_id LEFT JOIN scenario_version_task_family f ON f.scenario_version_id=sv.id`
 
 type scanner interface{ Scan(...any) error }
 
@@ -150,16 +155,19 @@ func scanScenario(row scanner) (Scenario, error) {
 	var number *int
 	var d, cat, diff, authoring, task *string
 	var dur *int
-	var env, cond, visible, resources, ground, execution, metadata, criteria []byte
+	var env, cond, visible, resources, ground, execution, metadata, requirements, criteria []byte
 	var obs, expected, forbidden, actions []string
 	var created *time.Time
 	var familyID, caseType, familyContract *string
-	err := row.Scan(&s.ID, &s.OwnerWorkspaceID, &s.Slug, &s.Name, &s.Kind, &s.Visibility, &s.Status, &s.CreatedAt, &s.UpdatedAt, &id, &number, &d, &cat, &diff, &dur, &env, &cond, &obs, &expected, &forbidden, &authoring, &task, &visible, &actions, &resources, &ground, &execution, &metadata, &created, &criteria, &familyID, &caseType, &familyContract)
+	err := row.Scan(&s.ID, &s.OwnerWorkspaceID, &s.Slug, &s.Name, &s.Kind, &s.Visibility, &s.Status, &s.CreatedAt, &s.UpdatedAt, &id, &number, &d, &cat, &diff, &dur, &env, &cond, &obs, &expected, &forbidden, &authoring, &task, &visible, &actions, &resources, &ground, &execution, &metadata, &requirements, &created, &criteria, &familyID, &caseType, &familyContract)
 	if err != nil {
 		return s, mapDB(err)
 	}
 	if id != nil {
-		v := Version{ID: *id, Version: *number, Description: *d, Category: *cat, Difficulty: *diff, DurationSeconds: *dur, Environment: env, Conditions: cond, Observables: obs, ExpectedBehaviors: expected, ForbiddenBehaviors: forbidden, AuthoringMethod: *authoring, AgentTask: *task, AgentVisibleContext: visible, AllowedActions: actions, AllowedResources: resources, GroundTruth: ground, ExecutionSpec: execution, SourceMetadata: metadata, CreatedAt: *created}
+		v := Version{ID: *id, Version: *number, Description: *d, Category: *cat, Difficulty: *diff, DurationSeconds: *dur, Environment: env, Conditions: cond, Observables: observablecatalog.CanonicalizeKnown(obs), ExpectedBehaviors: expected, ForbiddenBehaviors: forbidden, AuthoringMethod: *authoring, AgentTask: *task, AgentVisibleContext: visible, AllowedActions: actions, AllowedResources: resources, GroundTruth: ground, ExecutionSpec: execution, SourceMetadata: metadata, CreatedAt: *created}
+		if err = json.Unmarshal(requirements, &v.EvidenceRequirements); err != nil {
+			return s, err
+		}
 		if familyID != nil {
 			v.TaskFamilyID = *familyID
 		}
@@ -178,11 +186,15 @@ func scanScenario(row scanner) (Scenario, error) {
 }
 func scanVersion(row scanner) (Version, error) {
 	var v Version
-	var criteria []byte
+	var requirements, criteria []byte
 	var familyID, caseType, familyContract *string
-	err := row.Scan(&v.ID, &v.Version, &v.Description, &v.Category, &v.Difficulty, &v.DurationSeconds, &v.Environment, &v.Conditions, &v.Observables, &v.ExpectedBehaviors, &v.ForbiddenBehaviors, &v.AuthoringMethod, &v.AgentTask, &v.AgentVisibleContext, &v.AllowedActions, &v.AllowedResources, &v.GroundTruth, &v.ExecutionSpec, &v.SourceMetadata, &v.CreatedAt, &criteria, &familyID, &caseType, &familyContract)
+	err := row.Scan(&v.ID, &v.Version, &v.Description, &v.Category, &v.Difficulty, &v.DurationSeconds, &v.Environment, &v.Conditions, &v.Observables, &v.ExpectedBehaviors, &v.ForbiddenBehaviors, &v.AuthoringMethod, &v.AgentTask, &v.AgentVisibleContext, &v.AllowedActions, &v.AllowedResources, &v.GroundTruth, &v.ExecutionSpec, &v.SourceMetadata, &requirements, &v.CreatedAt, &criteria, &familyID, &caseType, &familyContract)
 	if err != nil {
 		return v, mapDB(err)
+	}
+	v.Observables = observablecatalog.CanonicalizeKnown(v.Observables)
+	if err = json.Unmarshal(requirements, &v.EvidenceRequirements); err != nil {
+		return v, err
 	}
 	if familyID != nil {
 		v.TaskFamilyID = *familyID

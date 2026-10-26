@@ -1,0 +1,31 @@
+:root {
+  --background: #fcfcfb;
+}
+
+.hero {
+  padding: 58px 0 76px;
+}
+
+.hero h1 {
+  font-size: clamp(4rem, 6vw, 5.15rem);
+  line-height: 0.98;
+}
+
+.hero-description {
+  font-size: 19px;
+}
+
+@media (max-width: 760px) {
+  .hero {
+    min-height: auto;
+    padding: 82px 0 90px;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.85rem, 13vw, 4.2rem);
+  }
+
+  .hero-description {
+    font-size: 17px;
+  }
+}

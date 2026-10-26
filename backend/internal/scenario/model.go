@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 )
 
 type Criterion struct {
@@ -19,26 +21,27 @@ type Criterion struct {
 	CreatedAt   time.Time       `json:"created_at"`
 }
 type Version struct {
-	ID                  string          `json:"id"`
-	Version             int             `json:"version"`
-	Description         string          `json:"description"`
-	Category            string          `json:"category"`
-	Difficulty          string          `json:"difficulty"`
-	DurationSeconds     int             `json:"duration_seconds"`
-	Environment         json.RawMessage `json:"environment"`
-	Conditions          json.RawMessage `json:"conditions"`
-	Observables         []string        `json:"observables"`
-	ExpectedBehaviors   []string        `json:"expected_behaviors"`
-	ForbiddenBehaviors  []string        `json:"forbidden_behaviors"`
-	AuthoringMethod     string          `json:"authoring_method"`
-	AgentTask           string          `json:"agent_task"`
-	AgentVisibleContext json.RawMessage `json:"agent_visible_context"`
-	AllowedActions      []string        `json:"allowed_actions"`
-	AllowedResources    json.RawMessage `json:"allowed_resources"`
-	GroundTruth         json.RawMessage `json:"ground_truth"`
-	ExecutionSpec       json.RawMessage `json:"execution_spec"`
-	SourceMetadata      json.RawMessage `json:"source_metadata"`
-	Criteria            []Criterion     `json:"criteria"`
+	ID                   string                        `json:"id"`
+	Version              int                           `json:"version"`
+	Description          string                        `json:"description"`
+	Category             string                        `json:"category"`
+	Difficulty           string                        `json:"difficulty"`
+	DurationSeconds      int                           `json:"duration_seconds"`
+	Environment          json.RawMessage               `json:"environment"`
+	Conditions           json.RawMessage               `json:"conditions"`
+	Observables          []string                      `json:"observables"`
+	ExpectedBehaviors    []string                      `json:"expected_behaviors"`
+	ForbiddenBehaviors   []string                      `json:"forbidden_behaviors"`
+	AuthoringMethod      string                        `json:"authoring_method"`
+	AgentTask            string                        `json:"agent_task"`
+	AgentVisibleContext  json.RawMessage               `json:"agent_visible_context"`
+	AllowedActions       []string                      `json:"allowed_actions"`
+	AllowedResources     json.RawMessage               `json:"allowed_resources"`
+	GroundTruth          json.RawMessage               `json:"ground_truth"`
+	ExecutionSpec        json.RawMessage               `json:"execution_spec"`
+	SourceMetadata       json.RawMessage               `json:"source_metadata"`
+	EvidenceRequirements evidencecontract.Requirements `json:"evidence_requirements"`
+	Criteria             []Criterion                   `json:"criteria"`
 	// TaskFamilyID and CaseType are the explicit coverage assignment for this
 	// ScenarioVersion (task-family-contract:v1). Empty when unassigned;
 	// unassigned versions never contribute coverage. Never inferred.
@@ -75,6 +78,7 @@ type VersionInput struct {
 	AgentVisibleContext, AllowedResources              json.RawMessage
 	AllowedActions                                     []string
 	GroundTruth, ExecutionSpec, SourceMetadata         json.RawMessage
+	EvidenceRequirements                               evidencecontract.Requirements
 }
 
 type AgentSpec struct {
@@ -101,7 +105,7 @@ type EvaluatorSpec struct {
 }
 
 func (v Version) AgentView() AgentView {
-	return AgentView{Task: v.AgentTask, VisibleContext: cloneJSON(v.AgentVisibleContext, `{}`), AllowedObservations: append([]string(nil), v.Observables...), AllowedActions: append([]string(nil), v.AllowedActions...), AllowedResources: cloneJSON(v.AllowedResources, `[]`)}
+	return AgentView{Task: v.AgentTask, VisibleContext: cloneJSON(v.AgentVisibleContext, `{}`), AllowedObservations: observablecatalog.KnownOnly(v.Observables), AllowedActions: append([]string(nil), v.AllowedActions...), AllowedResources: cloneJSON(v.AllowedResources, `[]`)}
 }
 func cloneJSON(value json.RawMessage, fallback string) json.RawMessage {
 	if len(value) == 0 {

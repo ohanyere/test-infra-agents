@@ -149,13 +149,14 @@ export function AgentDetail({ agentID }: { agentID: string }) {
   if (authError || error || !agent) return <main className={styles.page}><div className={styles.state}><p>{authError || error || "Agent not found."}</p><button onClick={authError ? retry : load}>Try again</button></div></main>;
 
   return <main className={styles.page}>
-    <header className={styles.topNav}><a href="/">evalplane</a><a href="/agents">Agents</a></header>
-    <header className={styles.agentHeader + " " + styles.shell}><p className={styles.label}>AGENT</p><h1>{agent.name}</h1><p className={styles.description}>{agent.description || "No description provided."}</p><div className={styles.actions}><a className={styles.primaryButton} href={"/agents/new?agent=" + agent.id}>Register version</a><a className={styles.secondaryButton} href="/workspace/tasks">View tasks</a></div></header>
-	<section className={styles.section + " " + styles.shell}><div className={styles.sectionIntro}><p className={styles.label}>REGISTERED VERSIONS</p><h2>Exact versions and connections.</h2><p>Behavior changes create a new version. Authentication changes update the existing version credential. Each version carries claimed capabilities; tested capabilities and qualification status (Qualified / Not qualified / Inconclusive) appear only after qualification trials run.</p></div>
+    <header className={styles.topNav}><a href="/">Realverax</a><a href="/agents">Agents</a></header>
+    <header className={styles.agentHeader + " " + styles.shell}><p className={styles.label}>AUTONOMOUS INFRASTRUCTURE AGENT</p><h1>{agent.name}</h1><p className={styles.description}>{agent.description || "No description provided."}</p><div className={styles.actions}><a className={styles.primaryButton} href={"/agents/new?agent=" + agent.id}>Register version</a><a className={styles.secondaryButton} href="/verifications">Verifications</a></div><nav aria-label="Agent sections"><a href="#overview">Overview</a> · <a href="#versions">Versions</a> · <a href="/verifications">Verifications</a> · <a href="/workspace/tasks">Tests</a> · <a href="#versions">Connection</a></nav></header>
+	<section id="overview" className={styles.section + " " + styles.shell}><div className={styles.sectionIntro}><p className={styles.label}>RESULTING STATES</p><h2>What states does this agent leave behind?</h2><p>Verification evidence stays pinned to the exact version that acted. Open Verifications for authoritative result distribution, actual deltas, collateral effects, stability, and residual risk.</p></div></section>
+	<section id="versions" className={styles.section + " " + styles.shell}><div className={styles.sectionIntro}><p className={styles.label}>VERSIONS · VERIFICATIONS · CONNECTION</p><h2>Exact versions and resulting-state evidence.</h2><p>Behavior changes create a new version. Connection credentials can rotate without changing version identity. Verification outcomes remain attached to the exact version that acted.</p></div>
       <div className={styles.versionList}>{versions.map((version) => { const connection = connections[version.id]; const versionClaims = claimsFor(version); return <article className={styles.versionRow} key={version.id}>
         <div><h3>{version.version_label}</h3><code>{version.id}</code></div><dl><div><dt>Invocation</dt><dd>{version.interface_kind.toUpperCase()}</dd></div><div><dt>Tool access</dt><dd>{version.tool_access_mode === "mcp" ? "MCP" : "Direct"}</dd></div><div><dt>Connection</dt><dd>{statusText[connection?.last_check_status || "untested"]}</dd></div><div><dt>Last checked</dt><dd>{connection?.last_checked_at ? new Date(connection.last_checked_at).toLocaleString() : "Never"}</dd></div><div><dt>Connection &amp; tool access</dt><dd>{version.capabilities.join(" · ") || "None declared"}</dd></div><div><dt>Qualified</dt><dd>—</dd></div></dl>
         <p className={styles.endpoint}>{version.endpoint_url}</p>
-        <div><h4>Capability claims</h4><p className={styles.endpoint}>Claims are not qualifications. TESTED means the coverage contract was satisfied by valid evidence; it does not mean the agent succeeded or is qualified.{version.capability_catalog_version ? " Catalog: " + version.capability_catalog_version : ""}</p>
+        <details><summary>Legacy capability claims and coverage</summary><div><h4>Capability claims</h4><p className={styles.endpoint}>Supporting qualification machinery remains available, but claims are not verification results. TESTED means only that a coverage contract was satisfied by valid evidence.{version.capability_catalog_version ? " Catalog: " + version.capability_catalog_version : ""}</p>
           {versionClaims.length === 0 ? <p className={styles.endpoint}>No capability claims declared.</p> : <ul>{versionClaims.map((claim) => {
             const detail = coverageFor(version.id, claim.capability_id);
             // TESTED is exclusively the Stage-27 capability-coverage verdict.
@@ -169,8 +170,8 @@ export function AgentDetail({ agentID }: { agentID: string }) {
                 {missing.length > 0 ? <span><br />Missing: {missing.map((requirement) => requirement.family_id || requirement.code).join(", ")}</span> : null}</> : null}
             </li>;
           })}</ul>}
-        </div>
-        <div><h4>Qualification</h4><p className={styles.endpoint}>Evalplane derives what must be tested from this version&apos;s claimed capabilities. READY means an authoritative qualification suite can be constructed — not that the agent passed it.</p>
+        </div></details>
+        <details><summary>Legacy qualification planning</summary><div><h4>Qualification</h4><p className={styles.endpoint}>This downstream policy workflow remains available for compatibility. It is not the primary verification result.</p>
           {(() => {
             const plan = plans[version.id];
             const failure = planError[version.id];
@@ -195,8 +196,8 @@ export function AgentDetail({ agentID }: { agentID: string }) {
               </> : null}
             </>;
           })()}
-        </div>
-        <div><h4>Reliability</h4><p className={styles.endpoint}>Repeated-trial reliability under reliability-metrics-contract:v1. Consistency (pass^k: all k attempts succeed) is the primary signal; at-least-once (pass@k) is secondary. Platform-invalid trials never count as agent failures.</p>
+        </div></details>
+        <div><h4>Legacy trial reliability</h4><p className={styles.endpoint}>Supporting repeated-trial evidence under reliability-metrics-contract:v1. This is not an intelligence score or a substitute for authoritative resulting-state VerificationResults. Platform-invalid trials never count as agent failures.</p>
           {(() => {
             const report = reliability[version.id];
             if (!report) return <p className={styles.endpoint}>No reliability evidence yet.</p>;

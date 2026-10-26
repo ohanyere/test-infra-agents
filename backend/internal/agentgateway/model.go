@@ -33,17 +33,32 @@ type AgentTask struct {
 	Message string `json:"message"`
 }
 type WorkloadObservation struct {
-	Kind              string `json:"kind"`
-	Name              string `json:"name"`
-	Namespace         string `json:"namespace"`
-	ReadyReplicas     int32  `json:"ready_replicas"`
-	DesiredReplicas   int32  `json:"desired_replicas"`
-	AvailableReplicas int32  `json:"available_replicas"`
-	UpdatedReplicas   int32  `json:"updated_replicas"`
-	CPURequest        string `json:"cpu_request,omitempty"`
-	CPULimit          string `json:"cpu_limit,omitempty"`
-	MemoryRequest     string `json:"memory_request,omitempty"`
-	MemoryLimit       string `json:"memory_limit,omitempty"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	ReadyReplicas      int32  `json:"ready_replicas"`
+	DesiredReplicas    int32  `json:"desired_replicas"`
+	AvailableReplicas  int32  `json:"available_replicas"`
+	UpdatedReplicas    int32  `json:"updated_replicas"`
+	CPURequest         string `json:"cpu_request,omitempty"`
+	CPULimit           string `json:"cpu_limit,omitempty"`
+	MemoryRequest      string `json:"memory_request,omitempty"`
+	MemoryLimit        string `json:"memory_limit,omitempty"`
+	Image              string `json:"image,omitempty"`
+	UID                string `json:"uid,omitempty"`
+	ResourceVersion    string `json:"resource_version,omitempty"`
+	Generation         int64  `json:"generation,omitempty"`
+	ObservedGeneration int64  `json:"observed_generation,omitempty"`
+}
+type AutoscalerObservation struct {
+	Name            string `json:"name"`
+	Namespace       string `json:"namespace"`
+	TargetKind      string `json:"target_kind"`
+	TargetName      string `json:"target_name"`
+	MinReplicas     int32  `json:"min_replicas"`
+	MaxReplicas     int32  `json:"max_replicas"`
+	CurrentReplicas int32  `json:"current_replicas"`
+	DesiredReplicas int32  `json:"desired_replicas"`
 }
 type RecentEvent struct {
 	Timestamp          time.Time `json:"timestamp"`
@@ -63,11 +78,12 @@ type PodObservation struct {
 	OwningWorkload string `json:"owning_workload,omitempty"`
 }
 type Observation struct {
-	Timestamp    time.Time             `json:"timestamp"`
-	Workloads    []WorkloadObservation `json:"workloads"`
-	Pods         []PodObservation      `json:"pods"`
-	Metrics      map[string]any        `json:"metrics"`
-	RecentEvents []RecentEvent         `json:"recent_events"`
+	Timestamp    time.Time               `json:"timestamp"`
+	Workloads    []WorkloadObservation   `json:"workloads"`
+	Pods         []PodObservation        `json:"pods"`
+	Autoscalers  []AutoscalerObservation `json:"autoscalers,omitempty"`
+	Metrics      map[string]any          `json:"metrics"`
+	RecentEvents []RecentEvent           `json:"recent_events"`
 }
 type Request struct {
 	ProtocolVersion  string          `json:"protocol_version"`

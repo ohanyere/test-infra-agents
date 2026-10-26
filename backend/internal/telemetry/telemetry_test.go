@@ -98,6 +98,18 @@ func TestQuerySnapshotAndUnavailableValues(t *testing.T) {
 		t.Fatalf("empty fabricated: %+v %v", snapshot, e)
 	}
 }
+
+func TestRatioQueriesRepresentAbsentStatusClassAsZero(t *testing.T) {
+	for _, name := range []string{"error", "availability"} {
+		query := queries[name]
+		if !strings.Contains(query, "or vector(0)") {
+			t.Fatalf("%s query treats an absent status-class series as unavailable: %s", name, query)
+		}
+		if !strings.Contains(query, `/ sum(rate(http_requests_total{route=~"root|work"}[30s]))`) {
+			t.Fatalf("%s query can fabricate a ratio without request traffic: %s", name, query)
+		}
+	}
+}
 func TestQueryFailuresAndTimeout(t *testing.T) {
 	for name, body := range map[string]string{"malformed": "{", "status": `{"status":"error","error":"bad"}`, "nan": `{"status":"success","data":{"resultType":"vector","result":[{"value":[1,"NaN"]}]}}`} {
 		t.Run(name, func(t *testing.T) {

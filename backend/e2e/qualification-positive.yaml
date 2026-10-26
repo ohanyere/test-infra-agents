@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qualification-positive
+  namespace: evalplane-e2e-harness
+spec:
+  serviceAccountName: qualification
+  restartPolicy: Never
+  activeDeadlineSeconds: 720
+  containers:
+    - name: harness
+      image: evalplane-harness:stage17
+      imagePullPolicy: Never
+      command: [/app/e2equalification]
+      env:
+        - {name: GOMAXPROCS, value: "2"}
+        - {name: E2E_GITOPS, value: "true"}
+        - {name: E2E_GITOPS_CONTROL, value: "positive"}
+        - {name: GITOPS_REPOSITORY_ROOT, value: "/git-fixture"}
+        - {name: GITOPS_REPOSITORY_URL, value: "git://git-fixture.evalplane-e2e-harness.svc/repo.git"}
+        - {name: GITOPS_REVISION, value: "main"}
+        - {name: GITOPS_STATE_URL, value: "http://git-fixture.evalplane-e2e-harness.svc:8080/cgi-bin/state"}
+        - {name: GITOPS_UPDATE_URL, value: "http://git-fixture.evalplane-e2e-harness.svc:8080/cgi-bin/remediate-v17"}
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef: {name: database, key: url}
+        - name: E2E_AUTH_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: e2e-auth, key: password}
+      volumeMounts:
+        - {name: criteria, mountPath: /criteria, readOnly: true}
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+  volumes:
+    - name: criteria
+      configMap: {name: calibrated-criteria}

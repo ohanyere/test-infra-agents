@@ -1,6 +1,9 @@
-# Evalplane Go API
+# Realverax Go API
 
-Go API for Evalplane. It provides process health, PostgreSQL readiness, and the first identity/workspace domain endpoints.
+Product decisions in this repository must follow the canonical doctrine in
+[`docs/PRODUCT_DOCTRINE.md`](../docs/PRODUCT_DOCTRINE.md).
+
+Go API for Realverax. It provides process health, PostgreSQL readiness, and the first identity/workspace domain endpoints.
 
 The API uses Argon2id password credentials and opaque, revocable server-side sessions. Only a SHA-256 digest of each session token is persisted; browsers receive the raw token in an HttpOnly, SameSite=Lax cookie.
 
@@ -9,7 +12,10 @@ Production login rate limiting, email verification, password reset, MFA, and OAu
 ## Prerequisites
 
 - Go 1.25+
-- Docker with Compose
+- PostgreSQL 16, either directly in WSL/Linux or through Docker with Compose
+
+For the lightweight native WSL setup, see
+[`../docs/local-wsl-development.md`](../docs/local-wsl-development.md).
 
 ## Configuration
 
@@ -86,12 +92,16 @@ Authenticated routes include:
 - `GET /v1/environment-components` (authenticated; server-owned `environment-component-catalog:v1`)
 - `GET /v1/environment-profiles` (authenticated; server-owned `environment-profile-catalog:v1`; only `kubernetes.namespace:v1` is active, the rest are planned/experimental)
 - `GET /v1/environment-providers` (authenticated; `kind-dev:v1` active development-only, never production; future providers planned with no fake health)
-- `GET /v1/workspaces/{workspaceID}/environments` and `GET /v1/workspaces/{workspaceID}/environments/{environmentID}` (workspace-scoped instances; opaque `provider_ref` only, never kubeconfigs/tokens/credentials)
+- `GET /v1/workspaces/{workspaceID}/environments`, `GET /v1/workspaces/{workspaceID}/environments/{environmentID}`, and `GET /v1/workspaces/{workspaceID}/environments/{environmentID}/components` (workspace-scoped aggregate and child instances; opaque `provider_ref` only, never kubeconfigs/tokens/credentials)
 - `POST /v1/workspaces/{workspaceID}/environment-selection/resolve` (diagnostic scheduler; accepts a ScenarioVersion reference, never arbitrary requirements)
 - `GET|PUT /v1/workspaces/{workspaceID}/scenarios/{scenarioID}/versions/{versionID}/environment` (read: any member with eligible profile; write: owner/admin/member sets server-reviewed requirements)
 - `GET /v1/workspaces/{workspaceID}/runs/{runID}/events` (any member; persisted run events, `event_type|limit|offset`)
 - `GET /v1/workspaces/{workspaceID}/runs/{runID}/actions` (any member; action lifecycle, `status|limit|offset`)
 - `GET /v1/workspaces/{workspaceID}/runs/{runID}/evaluation` (any member; deterministic evaluation with criteria + findings)
+- `GET /v1/workspaces/{workspaceID}/runs/{runID}/verification` (any member; immutable `infrastructure-verifier:v1` result with baseline, intent, action inspection, actual state diff, outcome, side effects, stability, forward risk, validity, and exact pins)
+- `GET /v1/workspaces/{workspaceID}/runs/{runID}/verification/actions|snapshots|forward-risks` (any member; focused safe projections from the same authoritative result; never credentials or Secret values)
+- `POST /v1/workspaces/{workspaceID}/evaluation-batches` accepts optional typed `source_metadata` (`provider`, `repository`, `commit_sha`, `pull_request`, `workflow`) and a workspace-scoped `idempotency_key`; repeated CI requests with the same key resolve to the original exact-version batch instead of creating duplicate authoritative runs. Source metadata is context only, never verification evidence.
+- Customer-hosted read-only Kubernetes observations use `POST|GET /v1/workspaces/{workspaceID}/customer-kubernetes-environments`, `POST /v1/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/rotate`, `DELETE` on that environment route, `POST /v1/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions`, then collector-authenticated `POST /v1/collector/observation-sessions/{sessionID}/evidence`. Environment creation returns the collector credential once; only its SHA-256 digest is stored. The v1 collector contract accepts scoped Deployment/Pod snapshots only and produces observation-only runs. Authenticated workspace members can submit and retrieve `customer-agent-action-claim:v1` records at `POST|GET /v1/workspaces/{workspaceID}/customer-kubernetes-environments/{environmentID}/observation-sessions/{sessionID}/action-claims`. These are explicitly `UNVERIFIED_AGENT_CLAIM` supporting evidence, are not canonical executor actions, and cannot establish attribution or VERIFIED. Missing independent attribution or required telemetry therefore remains INCONCLUSIVE. See `deploy/customer-collector/README.md` for the customer-hosted install path and claim trust boundary.
 - `GET /v1/workspaces/{workspaceID}/runs/{runID}/trajectory` (any member; deterministic observable trajectory under `trajectory-evidence-contract:v1`: ordered events with provenance, outcome summary, durations, reproducibility pins; `phase|event_type|actor|status|limit|offset`; `?compare_with={runID}` adds a summary-level comparison of two trials; read-only)
 - `GET /v1/workspaces/{workspaceID}/runs/{runID}/evidence/{evidenceID}` (any member; bounded safe evidence detail with preview, truncation flag, byte size, content hash, provenance)
 - `GET /v1/workspaces/{workspaceID}/suite-executions/{executionID}/trajectory-summary` (any member; per-trial outcome/actions/safety/recovery rows linking to trial trajectories; read-only)

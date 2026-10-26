@@ -1,6 +1,47 @@
 "use client";
+
 import { useEffect, useState } from "react";
-import { APIError, getUsage, listAgents, listBatches, listSuites, type Agent, type EvaluationBatch, type QualificationSuite, type UsageResponse } from "../../lib/api";
+import { APIError, getVerification, listAgents, listBatches, listBatchTrials, type Agent, type EvaluationBatch, type Trial, type VerificationResult } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import styles from "../product.module.css";
-export default function WorkspacePage(){const{workspace}=useAuth();const[agents,setAgents]=useState<Agent[]>([]);const[batches,setBatches]=useState<EvaluationBatch[]>([]);const[suites,setSuites]=useState<QualificationSuite[]>([]);const[usage,setUsage]=useState<UsageResponse>();const[loading,setLoading]=useState(true);const[error,setError]=useState("");useEffect(()=>{if(!workspace)return;setLoading(true);Promise.all([listAgents(workspace.id),listBatches(workspace.id,8),listSuites(workspace.id),getUsage(workspace.id)]).then(([a,b,s,u])=>{setAgents(a.items);setBatches(b.items);setSuites(s.items.slice(0,5));setUsage(u)}).catch((reason:unknown)=>setError(reason instanceof APIError?reason.message:"Workspace state could not be loaded.")).finally(()=>setLoading(false))},[workspace]);return <main className={styles.page}><header className={styles.header}><div><p className={styles.eyebrow}>WORKSPACE</p><h1>{workspace?.name}</h1><p>Connect an infrastructure agent, test its claimed capabilities against realistic tasks, and collect reproducible qualification evidence.</p></div><div className={styles.actions}><a href="/agents/new">Connect agent</a><a className={styles.secondary} href="/qualification">Qualification</a></div></header>{loading&&<p className={styles.state} role="status">Loading workspace state…</p>}{error&&<p className={styles.error} role="alert">{error}</p>}{!loading&&!error&&<><section className={styles.section}><h2>Current state</h2><div className={styles.metrics}><div><span>Connected agents</span><strong>{agents.length}</strong></div><div><span>Qualification Suites</span><strong>{suites.length}</strong></div><div><span>Recent trial batches</span><strong>{batches.length}</strong></div><div><span>Credits available</span><strong>{usage?.usage.unlimited?"Custom":usage?.usage.available??"—"}</strong></div></div></section>{agents.length===0?<section className={styles.empty}><h2>Connect your first infrastructure agent.</h2><p>Register an exact AgentVersion, verify its connection, and declare what it claims to operate.</p><div className={styles.actions}><a href="/agents/new">Connect agent</a></div></section>:<section className={styles.section}><h2>Agents</h2><ul className={styles.list}>{agents.slice(0,5).map(agent=><li key={agent.id}><div><strong>{agent.name}</strong><p>{agent.latest_version?`Version ${agent.latest_version.version_label}`:"No version"}</p></div><span>{agent.latest_version?.claimed_capabilities.length??0} capability claims</span><a href={`/agents/${agent.id}`}>Open</a></li>)}</ul></section>}<section className={styles.section}><h2>Recent activity</h2>{batches.length===0?<div className={styles.empty}><p>No evaluations have run yet. Build a Qualification Suite from an AgentVersion’s capability claims.</p><a href="/qualification">Open qualification</a></div>:<div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Evaluation Task</th><th>Status</th><th>Trials</th><th>Created</th><th/></tr></thead><tbody>{batches.map(batch=><tr key={batch.id}><td>{batch.scenario.name}</td><td><span className={styles.status}>{batch.status}</span></td><td>{batch.run_count}</td><td>{new Date(batch.created_at).toLocaleString()}</td><td><a href={`/runs?batch=${batch.id}`}>View</a></td></tr>)}</tbody></table></div>}</section></>}</main>}
+
+type VerificationRow = { batch: EvaluationBatch; trial: Trial; verification?: VerificationResult };
+function status(row: VerificationRow) { if (row.verification) return row.verification.overall_status; if (["completed", "failed", "stopped"].includes(row.trial.status)) return "LEGACY"; return row.trial.status.toUpperCase(); }
+function statusClass(result: string) { if (result === "VERIFIED") return styles.verifiedStatus; if (result === "FAILED") return styles.failedStatus; return styles.inconclusiveStatus; }
+
+export default function WorkspacePage() {
+  const { workspace } = useAuth();
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [rows, setRows] = useState<VerificationRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!workspace) return;
+    Promise.all([listAgents(workspace.id), listBatches(workspace.id, 8)]).then(async ([agentPage, batchPage]) => {
+      setAgents(agentPage.items);
+      const pages = await Promise.all(batchPage.items.map(async (batch) => ({ batch, trials: (await listBatchTrials(workspace.id, batch.id)).items })));
+      const recent = pages.flatMap((item) => item.trials.map((trial) => ({ batch: item.batch, trial }))).sort((a, b) => Date.parse(b.trial.created_at) - Date.parse(a.trial.created_at)).slice(0, 8);
+      const hydrated = await Promise.all(recent.map(async (row) => {
+        if (!["completed", "failed", "stopped"].includes(row.trial.status)) return row;
+        try { return { ...row, verification: await getVerification(workspace.id, row.trial.id) }; } catch { return row; }
+      }));
+      setRows(hydrated);
+    }).catch((reason: unknown) => setError(reason instanceof APIError ? reason.message : "Workspace state could not be loaded.")).finally(() => setLoading(false));
+  }, [workspace]);
+  const authoritative = rows.filter((row) => row.verification);
+  const counts = Object.fromEntries(["VERIFIED", "WARNING", "FAILED", "INCONCLUSIVE"].map((result) => [result, authoritative.filter((row) => status(row) === result).length]));
+  const issues = authoritative.filter((row) => ["WARNING", "FAILED", "INCONCLUSIVE"].includes(status(row))).flatMap((row) => {
+    const verification = row.verification!;
+    return [...verification.infrastructure_diff.filter((change) => change.classification !== "EXPECTED").map((change) => `${change.classification}: ${change.resource}`), ...verification.side_effects.findings.map((finding) => finding.summary), ...(verification.stability.status !== "STABLE" ? [verification.stability.reason] : []), ...verification.forward_risks.map((risk) => risk.reason)];
+  }).slice(0, 6);
+  return <main className={styles.page}>
+    <header className={styles.header}><div><p className={styles.eyebrow}>INDEPENDENT VERIFICATION</p><h1>{workspace?.name}</h1><p>Review persisted evidence about the infrastructure state autonomous changes left behind.</p></div><div className={styles.actions}><a href="/qualification">Build a suite</a><a className={styles.secondary} href="/agents/new">Connect agent</a><a className={styles.secondary} href="/verifications">History</a></div></header>
+    {loading && <p className={styles.state}>Loading workspace…</p>}{error && <p className={styles.error} role="alert">{error}</p>}
+    {!loading && !error && <>
+      <section className={styles.section}><h2>Verification results</h2>{authoritative.length === 0 ? <p className={styles.muted}>No authoritative VerificationResult records are available yet. Legacy runs are not counted as verified.</p> : <div className={styles.metrics}>{["VERIFIED", "WARNING", "FAILED", "INCONCLUSIVE"].map((result) => <div key={result}><span>{result}</span><strong className={statusClass(result)} style={result === "WARNING" ? { color: "#9a6818" } : undefined}>{counts[result]}</strong></div>)}</div>}</section>
+      <section className={styles.section}><h2>Resulting-state issues</h2>{issues.length === 0 ? <p className={styles.muted}>No supported issue was found in the loaded authoritative results.</p> : <ul className={styles.list}>{issues.map((issue, index) => <li key={`${issue}-${index}`}><div><strong>{issue}</strong></div></li>)}</ul>}</section>
+      <section className={styles.section}><h2>Recent verifications</h2>{rows.length === 0 ? <div className={styles.empty}><h2>No verifications yet.</h2><p>Connect an agent and run a controlled infrastructure test to inspect the resulting state.</p><a href="/agents">Open agents</a></div> : <div className={styles.tableWrap}><table className={styles.table}><thead><tr><th>Result</th><th>Agent</th><th>Version</th><th>Objective / test</th><th>Created</th><th /></tr></thead><tbody>{rows.map((row) => { const result = status(row); return <tr key={row.trial.id}><td><span className={`${styles.status} ${statusClass(result)}`} style={result === "WARNING" ? { color: "#9a6818" } : undefined}>{result}</span></td><td>{row.trial.agent.name}</td><td>{row.trial.agent.version_label}</td><td>{row.verification?.intent.objective || row.trial.scenario?.name || row.batch.scenario.name}</td><td>{new Date(row.trial.created_at).toLocaleString()}</td><td><a href={`/verifications/${row.trial.id}`}>View</a></td></tr>; })}</tbody></table></div>}</section>
+      <section className={styles.section}><h2>Agents</h2>{agents.length === 0 ? <p className={styles.muted}>No agents connected.</p> : <ul className={styles.list}>{agents.slice(0, 5).map((agent) => <li key={agent.id}><div><strong>{agent.name}</strong><p>{agent.latest_version ? `Version ${agent.latest_version.version_label}` : "No registered version"}</p></div><span>Inspect resulting-state history</span><a href={`/agents/${agent.id}`}>Open</a></li>)}</ul>}</section>
+    </>}
+  </main>;
+}

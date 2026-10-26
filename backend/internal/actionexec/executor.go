@@ -6,28 +6,41 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
+	"strings"
+	"time"
 
+	"github.com/evalplane/evalplane/backend/internal/actionattribution"
 	"github.com/evalplane/evalplane/backend/internal/agentgateway"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/observation"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
 const MaxActionsPerStep = 10
 
 var ErrTooManyActions = errors.New("too many actions")
+var imageReferencePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}$`)
 
 type ActionResult struct {
-	Code       string `json:"code,omitempty"`
-	ActionType string `json:"action_type"`
-	Authorized bool   `json:"authorized"`
-	Executed   bool   `json:"executed"`
-	Status     string `json:"status"`
-	Summary    string `json:"summary"`
+	Code        string                      `json:"code,omitempty"`
+	ActionType  string                      `json:"action_type"`
+	Authorized  bool                        `json:"authorized"`
+	Executed    bool                        `json:"executed"`
+	Status      string                      `json:"status"`
+	Summary     string                      `json:"summary"`
+	Attribution *actionattribution.Evidence `json:"attribution,omitempty"`
+	Cause       error                       `json:"-"`
 }
+
+const AttributionContractVersion = actionattribution.ContractVersion
+
+type AttributionEvidence = actionattribution.Evidence
+type ResourceIdentity = actionattribution.ResourceIdentity
 type Config struct{ MaxReplicas int32 }
 
 func DefaultConfig() Config { return Config{MaxReplicas: 20} }
@@ -43,6 +56,7 @@ type Executor struct {
 	verifier EnvironmentVerifier
 	config   Config
 	events   EventSink
+	now      func() time.Time
 }
 
 func New(client kubernetes.Interface, verifier EnvironmentVerifier, config Config, events EventSink) (*Executor, error) {
@@ -52,7 +66,7 @@ func New(client kubernetes.Interface, verifier EnvironmentVerifier, config Confi
 	if config.MaxReplicas < 1 {
 		return nil, errors.New("max replicas must be positive")
 	}
-	return &Executor{client: client, verifier: verifier, config: config, events: events}, nil
+	return &Executor{client: client, verifier: verifier, config: config, events: events, now: time.Now}, nil
 }
 
 func (e *Executor) Execute(ctx context.Context, env observation.EnvironmentContext, actions []agentgateway.ProposedAction) ([]ActionResult, error) {
@@ -88,7 +102,7 @@ func (e *Executor) executeOne(ctx context.Context, env observation.EnvironmentCo
 	if ctx.Err() != nil {
 		return failed(action.Type, "action cancelled")
 	}
-	if action.Type != "inspect" && action.Type != "no_op" && action.Type != "scale_workload" && action.Type != "restart_pod" {
+	if action.Type != "inspect" && action.Type != "no_op" && action.Type != "scale_workload" && action.Type != "restart_pod" && action.Type != "set_workload_image" && action.Type != "set_live_workload_image" && action.Type != "set_desired_workload_image" {
 		return deny("unsupported_action", "unsupported action denied")
 	}
 	verified, err := e.verifier.GetEnvironment(ctx, env.Identity.RunID)
@@ -116,7 +130,64 @@ func (e *Executor) executeOne(ctx context.Context, env observation.EnvironmentCo
 	if action.Type == "scale_workload" {
 		return e.scale(ctx, env, action, deny, dryRun)
 	}
+	if action.Type == "set_workload_image" || action.Type == "set_live_workload_image" {
+		return e.setImage(ctx, env, action, deny, dryRun)
+	}
+	if action.Type == "set_desired_workload_image" {
+		// Fail closed: desired-state mutation requires a Git executor. The live
+		// Kubernetes executor must never silently perform it.
+		return deny("unsupported_action", "desired-state image mutation requires a Git executor")
+	}
 	return e.restart(ctx, env, action, deny, dryRun)
+}
+
+// setImage mutates the live Kubernetes workload directly. The legacy
+// set_workload_image identifier keeps exactly this live-mutation contract;
+// desired-state mutation is never performed here.
+func (e *Executor) setImage(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction, deny func(string, string) ActionResult, dryRun bool) ActionResult {
+	if action.Target.Kind != "Deployment" || action.Target.Name != scenariorunner.ReferenceDeploymentName {
+		return deny("disallowed_resource", "only the reference Deployment image may be changed")
+	}
+	image, ok := action.Parameters["image"].(string)
+	if !ok || !imageReferencePattern.MatchString(image) || strings.Contains(image, "://") {
+		return deny("invalid_action_parameters", "image reference is invalid")
+	}
+	started := e.now().UTC()
+	attribution := &actionattribution.Evidence{ContractVersion: actionattribution.ContractVersion, Executor: "kubernetes-client-go", ActionType: action.Type, Target: *action.Target, Field: "spec.template.spec.containers[0].image", RequestedValue: image, AttemptedValue: image, ExecutionStartedAt: started}
+	d, err := e.client.AppsV1().Deployments(env.Environment.Namespace).Get(ctx, action.Target.Name, metav1.GetOptions{})
+	if err != nil {
+		result := failed(action.Type, "Kubernetes deployment lookup failed")
+		result.Cause = fmt.Errorf("get Deployment %s/%s: %w", env.Environment.Namespace, action.Target.Name, err)
+		result.Attribution = attribution
+		return result
+	}
+	if !ownedReference(d.Labels, env.Identity) || len(d.Spec.Template.Spec.Containers) == 0 {
+		return deny("unmanaged_resource", "deployment ownership verification failed")
+	}
+	if dryRun {
+		return ActionResult{ActionType: action.Type, Authorized: true, Status: "allowed"}
+	}
+	old := d.Spec.Template.Spec.Containers[0].Image
+	attribution.PreMutation = resourceIdentity(d.UID, d.ResourceVersion, d.Generation, old, e.now().UTC())
+	d.Spec.Template.Spec.Containers[0].Image = image
+	updated, err := e.client.AppsV1().Deployments(env.Environment.Namespace).Update(ctx, d, metav1.UpdateOptions{})
+	attribution.ExecutionCompletedAt = e.now().UTC()
+	if err != nil {
+		result := failed(action.Type, "Kubernetes deployment update failed")
+		result.Cause = fmt.Errorf("update Deployment %s/%s: %w", env.Environment.Namespace, action.Target.Name, err)
+		result.Attribution = attribution
+		return result
+	}
+	newValue := ""
+	if len(updated.Spec.Template.Spec.Containers) > 0 {
+		newValue = updated.Spec.Template.Spec.Containers[0].Image
+	}
+	attribution.PostMutation = resourceIdentity(updated.UID, updated.ResourceVersion, updated.Generation, newValue, attribution.ExecutionCompletedAt)
+	return ActionResult{ActionType: action.Type, Authorized: true, Executed: true, Status: "executed", Summary: fmt.Sprintf("changed %s image from %s to %s", d.Name, old, image), Attribution: attribution}
+}
+
+func resourceIdentity(uid types.UID, resourceVersion string, generation int64, value string, observedAt time.Time) *actionattribution.ResourceIdentity {
+	return &actionattribution.ResourceIdentity{UID: string(uid), ResourceVersion: resourceVersion, Generation: generation, Value: value, ObservedAt: observedAt}
 }
 
 func (e *Executor) scale(ctx context.Context, env observation.EnvironmentContext, action agentgateway.ProposedAction, deny func(string, string) ActionResult, dryRun bool) ActionResult {

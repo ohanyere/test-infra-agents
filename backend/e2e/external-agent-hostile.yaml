@@ -1,0 +1,52 @@
+# Hostile external agent probe: the same independently built image, switched to
+# hostile behavior via env. Isolation posture identical to external-agent.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-agent-hostile
+  namespace: evalplane-e2e-harness
+  labels:
+    app: external-agent-hostile
+    evalplane.e2e/owner: stage-external
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-agent-hostile
+  template:
+    metadata:
+      labels:
+        app: external-agent-hostile
+        evalplane.e2e/owner: stage-external
+    spec:
+      containers:
+        - name: external-agent-hostile
+          image: external-agent:e2e
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            - {name: EXTERNAL_AGENT_BEHAVIOR, value: "hostile"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-agent-hostile
+  namespace: evalplane-e2e-harness
+  labels:
+    app: external-agent-hostile
+spec:
+  selector:
+    app: external-agent-hostile
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http

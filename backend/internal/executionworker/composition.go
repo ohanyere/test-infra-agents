@@ -14,6 +14,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/mcpserver"
 	"github.com/evalplane/evalplane/backend/internal/scenariorunner"
+	"github.com/evalplane/evalplane/backend/internal/verification"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/client-go/kubernetes"
 	"net/http"
@@ -64,6 +65,7 @@ func NewPostgresWorkerWithHTTPClient(pool *pgxpool.Pool, client kubernetes.Inter
 		Runtime:   runtime, Actions: actions, Gateway: agentgateway.NewHTTPGateway(httpClient, nil), Connection: resolve, OnError: onError,
 		Environments: runEnvs,
 		Billing:      billingService,
+		Verification: verificationProjector{service: verification.NewService(pool, verification.NewRepository(), roles)},
 	}
 	worker, err := New(config, dependencies)
 	if err != nil {
@@ -83,6 +85,13 @@ func NewPostgresWorkerWithHTTPClient(pool *pgxpool.Pool, client kubernetes.Inter
 		worker.mcpHandler = service.Handler()
 	}
 	return worker, nil
+}
+
+type verificationProjector struct{ service *verification.Service }
+
+func (v verificationProjector) DeriveRun(ctx context.Context, workspaceID, runID string) error {
+	_, err := v.service.DeriveRun(ctx, workspaceID, runID)
+	return err
 }
 
 type mcpBridge struct {

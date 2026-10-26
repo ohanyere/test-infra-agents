@@ -10,6 +10,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/agent"
 	"github.com/evalplane/evalplane/backend/internal/auth"
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -31,13 +32,14 @@ type agentHandlers struct {
 	logger  *slog.Logger
 }
 type versionRequest struct {
-	VersionLabel         string          `json:"version_label"`
-	InterfaceKind        string          `json:"interface_kind"`
-	ToolAccessMode       string          `json:"tool_access_mode"`
-	EndpointURL          string          `json:"endpoint_url"`
-	Capabilities         []string        `json:"capabilities"`
-	ClaimedCapabilityIDs []string        `json:"claimed_capability_ids"`
-	Metadata             json.RawMessage `json:"metadata"`
+	VersionLabel           string                                 `json:"version_label"`
+	InterfaceKind          string                                 `json:"interface_kind"`
+	ToolAccessMode         string                                 `json:"tool_access_mode"`
+	EndpointURL            string                                 `json:"endpoint_url"`
+	Capabilities           []string                               `json:"capabilities"`
+	ClaimedCapabilityIDs   []string                               `json:"claimed_capability_ids"`
+	ImplementationIdentity provenance.AgentImplementationIdentity `json:"implementation_identity"`
+	Metadata               json.RawMessage                        `json:"metadata"`
 }
 type createAgentRequest struct {
 	Name           string         `json:"name"`
@@ -204,7 +206,7 @@ func agentPathIDs(w http.ResponseWriter, r *http.Request) (string, string, bool)
 	return workspaceID, agentID, ok
 }
 func versionInput(request versionRequest) agent.VersionInput {
-	return agent.VersionInput{VersionLabel: request.VersionLabel, InterfaceKind: request.InterfaceKind, ToolAccessMode: request.ToolAccessMode, EndpointURL: request.EndpointURL, Capabilities: request.Capabilities, ClaimedCapabilityIDs: request.ClaimedCapabilityIDs, Metadata: request.Metadata}
+	return agent.VersionInput{VersionLabel: request.VersionLabel, InterfaceKind: request.InterfaceKind, ToolAccessMode: request.ToolAccessMode, EndpointURL: request.EndpointURL, Capabilities: request.Capabilities, ClaimedCapabilityIDs: request.ClaimedCapabilityIDs, ImplementationIdentity: request.ImplementationIdentity, Metadata: request.Metadata}
 }
 func (h agentHandlers) handleError(w http.ResponseWriter, err error) bool {
 	if err == nil {

@@ -1,13 +1,13 @@
-# Using Evalplane with an MCP-capable agent
+# Using Realverax with an MCP-capable agent
 
-Evalplane continues to invoke every automated agent through its registered HTTP
+Realverax continues to invoke every automated agent through its registered HTTP
 Agent API endpoint. MCP is the tool-access plane used during that invocation; it
 does not launch the agent.
 
 1. Register an exact AgentVersion with an HTTP invocation endpoint.
 2. Select `mcp` as that version's immutable tool-access mode and declare its
    supported capabilities.
-3. Start an evaluation normally. Evalplane invokes the pinned version.
+3. Start an evaluation normally. Realverax invokes the pinned version.
 4. The invocation includes an evaluation-scoped `tool_access` object containing
    a Streamable HTTP endpoint, bearer grant, and expiry.
 5. Connect with an MCP `2026-07-28` client and discover the server.
@@ -15,7 +15,7 @@ does not launch the agent.
    permissions is returned.
 7. Observe or act through those tools, then return an action-free completion
    response to the HTTP invocation.
-8. Evalplane revokes the grant when the run completes, stops, fails, times out,
+8. Realverax revokes the grant when the run completes, stops, fails, times out,
    is cancelled, or is recovered after worker abandonment.
 
 The invocation fragment is shaped like this:
@@ -57,7 +57,7 @@ The HTTP client helper must set `Authorization: Bearer <grant>` without logging
 it. Do not persist the grant. A tool may disappear between listing and calling;
 every call is independently authenticated and authorized.
 
-The server implements only MCP Tools over stateless Streamable HTTP. Evalplane
+The server implements only MCP Tools over stateless Streamable HTTP. Realverax
 does not newly use legacy HTTP+SSE, Roots, Sampling, Logging, Tasks, or MCP Apps.
 Ground truth, criteria, hidden variants, qualification results, and other
 evaluator-only data are not available through this interface.

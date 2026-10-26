@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -24,10 +25,10 @@ type Repository struct{}
 func NewRepository() *Repository { return &Repository{} }
 
 const agentColumns = `a.id,a.owner_workspace_id,a.slug,a.name,a.description,a.visibility,a.status,a.created_at,a.updated_at,
- v.id,v.version_label,v.interface_kind,v.tool_access_mode,v.endpoint_url,v.capabilities,v.metadata,v.created_at`
+ v.id,v.version_label,v.interface_kind,v.tool_access_mode,v.endpoint_url,v.capabilities,v.implementation_identity,v.metadata,v.created_at`
 
 const latestVersionJoin = `LEFT JOIN LATERAL (
-	SELECT id,version_label,interface_kind,tool_access_mode,endpoint_url,capabilities,metadata,created_at
+	SELECT id,version_label,interface_kind,tool_access_mode,endpoint_url,capabilities,implementation_identity,metadata,created_at
 	FROM agent_versions WHERE agent_id=a.id ORDER BY created_at DESC,id DESC LIMIT 1
 ) v ON true`
 
@@ -41,9 +42,9 @@ func (r *Repository) Create(ctx context.Context, db DBTX, workspaceID string, in
 
 func (r *Repository) CreateVersion(ctx context.Context, db DBTX, agentID string, in VersionInput) (Version, error) {
 	var value Version
-	err := db.QueryRow(ctx, `INSERT INTO agent_versions (agent_id,version_label,interface_kind,tool_access_mode,endpoint_url,capabilities,metadata)
-		VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,version_label,interface_kind,tool_access_mode,COALESCE(endpoint_url,''),capabilities,metadata,created_at`,
-		agentID, in.VersionLabel, in.InterfaceKind, in.ToolAccessMode, nullableEndpoint(in.EndpointURL), in.Capabilities, in.Metadata).Scan(&value.ID, &value.VersionLabel, &value.InterfaceKind, &value.ToolAccessMode, &value.EndpointURL, &value.Capabilities, &value.Metadata, &value.CreatedAt)
+	err := db.QueryRow(ctx, `INSERT INTO agent_versions (agent_id,version_label,interface_kind,tool_access_mode,endpoint_url,capabilities,implementation_identity,metadata)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,version_label,interface_kind,tool_access_mode,COALESCE(endpoint_url,''),capabilities,implementation_identity,metadata,created_at`,
+		agentID, in.VersionLabel, in.InterfaceKind, in.ToolAccessMode, nullableEndpoint(in.EndpointURL), in.Capabilities, in.ImplementationIdentity, in.Metadata).Scan(&value.ID, &value.VersionLabel, &value.InterfaceKind, &value.ToolAccessMode, &value.EndpointURL, &value.Capabilities, &value.ImplementationIdentity, &value.Metadata, &value.CreatedAt)
 	if err != nil {
 		return value, mapDatabaseError(err)
 	}
@@ -154,7 +155,7 @@ func (r *Repository) Update(ctx context.Context, db DBTX, workspaceID, agentID s
 }
 
 func (r *Repository) ListVersions(ctx context.Context, db DBTX, workspaceID, agentID string, page identity.Pagination) ([]Version, error) {
-	rows, err := db.Query(ctx, `SELECT v.id,v.version_label,v.interface_kind,v.tool_access_mode,COALESCE(v.endpoint_url,''),v.capabilities,v.metadata,v.created_at
+	rows, err := db.Query(ctx, `SELECT v.id,v.version_label,v.interface_kind,v.tool_access_mode,COALESCE(v.endpoint_url,''),v.capabilities,v.implementation_identity,v.metadata,v.created_at
 		FROM agent_versions v JOIN agents a ON a.id=v.agent_id WHERE v.agent_id=$1 AND a.owner_workspace_id=$2
 		ORDER BY v.created_at DESC,v.id DESC LIMIT $3 OFFSET $4`, agentID, workspaceID, page.Limit, page.Offset)
 	if err != nil {
@@ -164,7 +165,7 @@ func (r *Repository) ListVersions(ctx context.Context, db DBTX, workspaceID, age
 	items := make([]Version, 0)
 	for rows.Next() {
 		var value Version
-		if err := rows.Scan(&value.ID, &value.VersionLabel, &value.InterfaceKind, &value.ToolAccessMode, &value.EndpointURL, &value.Capabilities, &value.Metadata, &value.CreatedAt); err != nil {
+		if err := rows.Scan(&value.ID, &value.VersionLabel, &value.InterfaceKind, &value.ToolAccessMode, &value.EndpointURL, &value.Capabilities, &value.ImplementationIdentity, &value.Metadata, &value.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, value)
@@ -180,10 +181,10 @@ func (r *Repository) ListVersions(ctx context.Context, db DBTX, workspaceID, age
 
 func (r *Repository) GetVersion(ctx context.Context, db DBTX, workspaceID, agentID, versionID string) (Version, error) {
 	var value Version
-	err := db.QueryRow(ctx, `SELECT v.id,v.version_label,v.interface_kind,v.tool_access_mode,COALESCE(v.endpoint_url,''),v.capabilities,v.metadata,v.created_at
+	err := db.QueryRow(ctx, `SELECT v.id,v.version_label,v.interface_kind,v.tool_access_mode,COALESCE(v.endpoint_url,''),v.capabilities,v.implementation_identity,v.metadata,v.created_at
 		FROM agent_versions v JOIN agents a ON a.id=v.agent_id
 		WHERE v.id=$1 AND v.agent_id=$2 AND a.owner_workspace_id=$3`, versionID, agentID, workspaceID).
-		Scan(&value.ID, &value.VersionLabel, &value.InterfaceKind, &value.ToolAccessMode, &value.EndpointURL, &value.Capabilities, &value.Metadata, &value.CreatedAt)
+		Scan(&value.ID, &value.VersionLabel, &value.InterfaceKind, &value.ToolAccessMode, &value.EndpointURL, &value.Capabilities, &value.ImplementationIdentity, &value.Metadata, &value.CreatedAt)
 	if err != nil {
 		return value, mapDatabaseError(err)
 	}
@@ -202,10 +203,11 @@ func scanAgent(row rowScanner) (Agent, error) {
 	var versionID, versionLabel, interfaceKind, toolAccessMode *string
 	var endpointURL *string
 	var capabilities []string
+	var implementationIdentity []byte
 	var metadata []byte
 	var versionCreatedAt *time.Time
 	err := row.Scan(&value.ID, &value.OwnerWorkspaceID, &value.Slug, &value.Name, &value.Description, &value.Visibility, &value.Status, &value.CreatedAt, &value.UpdatedAt,
-		&versionID, &versionLabel, &interfaceKind, &toolAccessMode, &endpointURL, &capabilities, &metadata, &versionCreatedAt)
+		&versionID, &versionLabel, &interfaceKind, &toolAccessMode, &endpointURL, &capabilities, &implementationIdentity, &metadata, &versionCreatedAt)
 	if err != nil {
 		return value, mapDatabaseError(err)
 	}
@@ -214,6 +216,9 @@ func scanAgent(row rowScanner) (Agent, error) {
 			capabilities = []string{}
 		}
 		value.LatestVersion = &Version{ID: *versionID, VersionLabel: *versionLabel, InterfaceKind: *interfaceKind, ToolAccessMode: stringValue(toolAccessMode), EndpointURL: stringValue(endpointURL), Capabilities: capabilities, ClaimedCapabilities: []string{}, Metadata: metadata, CreatedAt: *versionCreatedAt}
+		if err := json.Unmarshal(implementationIdentity, &value.LatestVersion.ImplementationIdentity); err != nil {
+			return value, fmt.Errorf("decode agent implementation identity: %w", err)
+		}
 	}
 	return value, nil
 }

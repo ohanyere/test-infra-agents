@@ -24,3 +24,11 @@ func TestAgentViewDoesNotLeakEvaluatorFields(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentViewResolvesHistoricalObservableAliases(t *testing.T) {
+	version := Version{Observables: []string{"kubernetes_workloads", "request_rate", "cpu"}}
+	got := version.AgentView().AllowedObservations
+	if len(got) != 2 || got[0] != "kubernetes-workloads" || got[1] != "request-rate" {
+		t.Fatalf("historical aliases did not resolve to supported agent observations: %v", got)
+	}
+}

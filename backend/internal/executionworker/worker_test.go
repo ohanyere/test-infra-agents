@@ -60,6 +60,8 @@ type fixture struct {
 	desiredReplicas                                     int32
 	preparedVariant                                     execution.HiddenVariant
 	mcpCreated, mcpRevoked                              int
+	verificationEnabled                                 bool
+	verified                                            int
 }
 
 func newFixture() *fixture {
@@ -86,16 +88,28 @@ func testConfig() Config {
 }
 func (f *fixture) worker(t *testing.T, c Config) *Worker {
 	t.Helper()
-	w, e := New(c, Dependencies{Lifecycle: f, Runtime: f, Actions: f, Evidence: f, Evaluator: f, Gateway: f, MCP: f, Connection: func(_ context.Context, w string, av agent.Version) (agentgateway.Connection, error) {
+	deps := Dependencies{Lifecycle: f, Runtime: f, Actions: f, Evidence: f, Evaluator: f, Gateway: f, MCP: f, Connection: func(_ context.Context, w string, av agent.Version) (agentgateway.Connection, error) {
 		if w != workspaceID || av.ID != "agent-pinned" {
 			return agentgateway.Connection{}, errors.New("wrong pinned version")
 		}
 		return agentgateway.Connection{EndpointURL: "https://example.test", BearerToken: "secret-token"}, nil
-	}})
+	}}
+	if f.verificationEnabled {
+		deps.Verification = f
+	}
+	w, e := New(c, deps)
 	if e != nil {
 		t.Fatal(e)
 	}
 	return w
+}
+func (f *fixture) DeriveRun(_ context.Context, workspace, run string) error {
+	if workspace != workspaceID || run != runID {
+		return errors.New("wrong verification scope")
+	}
+	f.verified++
+	f.add("verification")
+	return nil
 }
 func (f *fixture) CreateGrant(_ context.Context, scope mcpserver.Scope) (mcpserver.Access, error) {
 	f.mcpCreated++
@@ -386,8 +400,8 @@ func assertOrder(t *testing.T, trace []string, items ...string) {
 func TestMaxStepsFreshObservationsAndActionLifecycle(t *testing.T) {
 	f := newFixture()
 	f.response = []agentgateway.ProposedAction{{Type: "inspect"}}
-	if e := f.worker(t, testConfig()).ExecuteRun(context.Background(), f.run); e != nil {
-		t.Fatal(e)
+	if e := f.worker(t, testConfig()).ExecuteRun(context.Background(), f.run); !errors.Is(e, ErrAgentStepLimitReached) {
+		t.Fatalf("error=%v", e)
 	}
 	if len(f.requests) != 3 || f.observes != 7 {
 		t.Fatalf("calls=%d observations=%d", len(f.requests), f.observes)
@@ -402,13 +416,27 @@ func TestMaxStepsFreshObservationsAndActionLifecycle(t *testing.T) {
 		t.Fatal(f.transitions)
 	}
 }
+func TestVerificationLifecycleCapturesBaselineStabilityAndProjection(t *testing.T) {
+	f := newFixture()
+	f.verificationEnabled = true
+	c := testConfig()
+	c.StabilityWindow = time.Microsecond
+	c.StabilityInterval = time.Microsecond
+	if err := f.worker(t, c).ExecuteRun(context.Background(), f.run); err != nil {
+		t.Fatal(err)
+	}
+	if f.verified != 1 {
+		t.Fatalf("verified=%d", f.verified)
+	}
+	assertOrder(t, f.trace, "prepare", "verification_baseline_captured", "start", "finish", "stability_observation_collected", "final_observation_collected", "evaluate", "verification")
+}
 func TestDenialPersistsAndReachesEvaluator(t *testing.T) {
 	f := newFixture()
 	f.response = []agentgateway.ProposedAction{{Type: "scale_workload", Target: &agentgateway.ActionTarget{Kind: "Deployment", Namespace: "production", Name: "app"}}}
 	c := testConfig()
 	c.MaxAgentSteps = 1
-	if e := f.worker(t, c).ExecuteRun(context.Background(), f.run); e != nil {
-		t.Fatal(e)
+	if e := f.worker(t, c).ExecuteRun(context.Background(), f.run); !errors.Is(e, ErrAgentStepLimitReached) {
+		t.Fatalf("error=%v", e)
 	}
 	if f.executed != 0 || len(f.actions) != 1 {
 		t.Fatal("denied action executed")
@@ -438,8 +466,43 @@ func TestNoOpStopsDecisions(t *testing.T) {
 	if e := f.worker(t, testConfig()).ExecuteRun(context.Background(), f.run); e != nil {
 		t.Fatal(e)
 	}
-	if len(f.requests) != 1 {
-		t.Fatal("no_op did not terminate loop")
+	if len(f.requests) != 1 || f.status != "completed" || len(f.results) != 1 || f.results[0].Status != evaluator.StatusPass {
+		t.Fatalf("legitimate no_op completion changed: requests=%d status=%s results=%+v", len(f.requests), f.status, f.results)
+	}
+}
+
+func TestAgentStepLimitIsPersistedAndInconclusive(t *testing.T) {
+	f := newFixture()
+	f.response = []agentgateway.ProposedAction{{Type: "inspect"}}
+	c := testConfig()
+	c.MaxAgentSteps = 2
+	err := f.worker(t, c).ExecuteRun(context.Background(), f.run)
+	if !errors.Is(err, ErrAgentStepLimitReached) {
+		t.Fatalf("error=%v", err)
+	}
+	if f.status != "failed" || len(f.requests) != c.MaxAgentSteps || !hasEvent(f, "agent_step_limit_reached") {
+		t.Fatalf("status=%s requests=%d events=%+v", f.status, len(f.requests), f.events)
+	}
+	if len(f.results) != 1 || f.results[0].Status != evaluator.StatusInconclusive {
+		t.Fatalf("step exhaustion must be inconclusive without blocking evidence: %+v", f.results)
+	}
+}
+
+func TestPersistActionBindsExecutorAttributionToRunAndAction(t *testing.T) {
+	f := newFixture()
+	f.actions["action-1"] = evidence.AgentAction{ID: "action-1", RunID: runID, Status: "allowed"}
+	result := actionexec.ActionResult{ActionType: "set_workload_image", Authorized: true, Executed: true, Status: "executed", Attribution: &actionexec.AttributionEvidence{ContractVersion: actionexec.AttributionContractVersion}}
+	if err := f.worker(t, testConfig()).persistAction(context.Background(), runID, "action-1", result); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Attribution actionexec.AttributionEvidence `json:"attribution"`
+	}
+	if err := json.Unmarshal(f.actions["action-1"].ResultPayload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Attribution.RunID != runID || payload.Attribution.ActionID != "action-1" {
+		t.Fatalf("attribution was not server-bound: %+v", payload.Attribution)
 	}
 }
 func TestAgentTimeoutAndRunTimeout(t *testing.T) {
@@ -522,6 +585,55 @@ func TestProvisionFailureClassifiedAndCleanupPreservesPrimary(t *testing.T) {
 			t.Fatal("secret error persisted")
 		}
 	}
+}
+func TestPrimaryFailureReportedBeforeSuccessfulFailurePersistence(t *testing.T) {
+	f := newFixture()
+	primary := errors.New("initial convergence unavailable")
+	f.provisionErr = &StageFailure{Stage: "initial_desired_live_convergence", Err: primary}
+	w := f.worker(t, testConfig())
+	var trace []string
+	w.deps.OnStage = func(stage, status string) { trace = append(trace, stage+":"+status) }
+	w.deps.OnFailure = func(kind, stage string, err error) {
+		if !errors.Is(err, primary) {
+			t.Fatalf("diagnostic lost primary error: %v", err)
+		}
+		trace = append(trace, kind+":"+stage)
+	}
+	err := w.ExecuteRun(context.Background(), f.run)
+	if !errors.Is(err, primary) || f.status != "failed" || f.evaluated != 1 {
+		t.Fatalf("err=%v status=%s evaluated=%d", err, f.status, f.evaluated)
+	}
+	assertOrder(t, trace, "worker_failure:initial_desired_live_convergence", "persistence:started", "persistence:completed", "cleanup:started")
+	for _, item := range trace {
+		if strings.HasPrefix(item, "persistence_failure:") || item == "persistence:failed" {
+			t.Fatalf("primary execution error was mislabeled as persistence failure: %v", trace)
+		}
+	}
+}
+
+func TestPersistenceFailureDoesNotOverwritePrimaryDiagnostic(t *testing.T) {
+	f := newFixture()
+	primary := errors.New("initial convergence unavailable")
+	secondary := errors.New("evaluation store unavailable")
+	f.provisionErr = primary
+	f.evaluationErr = secondary
+	w := f.worker(t, testConfig())
+	var trace []string
+	w.deps.OnStage = func(stage, status string) { trace = append(trace, stage+":"+status) }
+	w.deps.OnFailure = func(kind, stage string, err error) {
+		trace = append(trace, kind+":"+stage)
+		if kind == "worker_failure" && !errors.Is(err, primary) {
+			t.Fatalf("primary diagnostic changed: %v", err)
+		}
+		if kind == "persistence_failure" && !errors.Is(err, secondary) {
+			t.Fatalf("secondary diagnostic changed: %v", err)
+		}
+	}
+	err := w.ExecuteRun(context.Background(), f.run)
+	if !errors.Is(err, primary) || !errors.Is(err, secondary) {
+		t.Fatalf("joined error lost primary or secondary failure: %v", err)
+	}
+	assertOrder(t, trace, "worker_failure:environment_setup", "persistence:started", "persistence_failure:evaluation_or_verification", "persistence:failed")
 }
 func TestCancellationCleansAndStops(t *testing.T) {
 	f := newFixture()
@@ -646,4 +758,21 @@ func hasEvent(f *fixture, code string) bool {
 		}
 	}
 	return false
+}
+
+func TestSafeActionTypePreservesTypedImageContracts(t *testing.T) {
+	for _, actionType := range []string{"inspect", "no_op", "scale_workload", "restart_pod", "set_workload_image", "set_live_workload_image", "set_desired_workload_image"} {
+		if got := safeActionType(actionType); got != actionType {
+			t.Fatalf("type %q became %q", actionType, got)
+		}
+		proposal := safeProposal(agentgateway.ProposedAction{Type: actionType, Parameters: map[string]any{"image": "evalplane-reference:v17"}})
+		if actionType == "set_workload_image" || actionType == "set_live_workload_image" || actionType == "set_desired_workload_image" {
+			if proposal["image"] != "evalplane-reference:v17" {
+				t.Fatalf("type %q lost image parameter: %+v", actionType, proposal)
+			}
+		}
+	}
+	if got := safeActionType("teleport_workload_image"); got != "unsupported_action" {
+		t.Fatalf("unknown type became %q", got)
+	}
 }

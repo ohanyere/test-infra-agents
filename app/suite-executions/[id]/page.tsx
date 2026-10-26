@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Providers } from "../../providers";
 import { SuiteTrajectoryView } from "./suite-view";
 
-export const metadata: Metadata = { title: "Suite execution trajectory — Evalplane", description: "Concise per-trial evidence summaries for a suite execution." };
+export const metadata: Metadata = { title: "Suite execution trajectory — Realverax", description: "Concise per-trial evidence summaries for a suite execution." };
 
 type PageProps = { params: Promise<{ id: string }> };
 

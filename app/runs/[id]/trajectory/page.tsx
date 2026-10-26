@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Providers } from "../../../providers";
 import { TrajectoryView } from "./trajectory-view";
 
-export const metadata: Metadata = { title: "Trial trajectory — Evalplane", description: "Deterministic observable trajectory reconstructed from persisted trial evidence." };
+export const metadata: Metadata = { title: "Trial trajectory — Realverax", description: "Deterministic observable trajectory reconstructed from persisted trial evidence." };
 
 type PageProps = { params: Promise<{ id: string }> };
 

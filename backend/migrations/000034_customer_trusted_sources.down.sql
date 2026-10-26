@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS customer_attribution_decisions_immutable ON customer_attribution_decisions;
+DROP TRIGGER IF EXISTS customer_execution_receipts_immutable ON customer_execution_receipts;
+DROP TRIGGER IF EXISTS customer_authenticated_audit_events_immutable ON customer_authenticated_audit_events;
+DROP FUNCTION IF EXISTS prevent_customer_trust_history_change();
+DROP TABLE IF EXISTS customer_attribution_decisions;
+DROP TABLE IF EXISTS customer_execution_receipts;
+DROP TABLE IF EXISTS customer_execution_issuers;
+DROP TABLE IF EXISTS customer_authenticated_audit_events;
+DROP TABLE IF EXISTS customer_audit_mtls_sources;
+ALTER TABLE customer_action_evidence DROP CONSTRAINT IF EXISTS customer_action_evidence_trusted_scope_key;

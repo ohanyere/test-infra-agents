@@ -6,7 +6,10 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/evalplane/evalplane/backend/internal/evaluationmetric"
+	"github.com/evalplane/evalplane/backend/internal/evidencecontract"
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/observablecatalog"
 )
 
 var kebabPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -91,6 +94,12 @@ func ValidateVersion(in VersionInput) (VersionInput, error) {
 	if err := validateJSONObject(in.SourceMetadata, "source_metadata"); err != nil {
 		return in, err
 	}
+	if in.EvidenceRequirements.IsZero() {
+		in.EvidenceRequirements = evidencecontract.DefaultRequirements()
+	}
+	if err := in.EvidenceRequirements.Validate(); err != nil {
+		return in, invalid(err.Error())
+	}
 	if in.AllowedActions, err = validateAllowedActions(in.AllowedActions); err != nil {
 		return in, err
 	}
@@ -100,7 +109,7 @@ func ValidateVersion(in VersionInput) (VersionInput, error) {
 	if err := validateJSONArray(in.Conditions, "conditions"); err != nil {
 		return in, err
 	}
-	if in.Observables, err = validateIdentifiers(in.Observables, "observables", 64); err != nil {
+	if in.Observables, err = validateObservables(in.Observables); err != nil {
 		return in, err
 	}
 	if in.ExpectedBehaviors, err = validateTextItems(in.ExpectedBehaviors, "expected_behaviors", 64); err != nil {
@@ -118,6 +127,10 @@ func ValidateVersion(in VersionInput) (VersionInput, error) {
 		if _, exists := keys[criterion.Key]; exists {
 			return in, invalid("criteria keys must be unique")
 		}
+		definition, _ := evaluationmetric.Lookup(criterion.MetricKey)
+		if definition.Telemetry && in.EvidenceRequirements.Telemetry != evidencecontract.Required {
+			return in, invalid("telemetry evidence must be REQUIRED when a criterion uses a telemetry metric")
+		}
 		keys[criterion.Key] = struct{}{}
 		in.Criteria[i] = criterion
 	}
@@ -129,7 +142,7 @@ func validateAllowedActions(values []string) ([]string, error) {
 	}
 	seen := map[string]bool{}
 	for _, v := range values {
-		if v != "inspect" && v != "scale_workload" && v != "restart_pod" && v != "no_op" {
+		if v != "inspect" && v != "scale_workload" && v != "restart_pod" && v != "set_workload_image" && v != "set_live_workload_image" && v != "set_desired_workload_image" && v != "no_op" {
 			return values, invalid("allowed_actions contains an unsupported action")
 		}
 		if seen[v] {
@@ -185,6 +198,9 @@ func validateCriterion(in CriterionInput) (CriterionInput, error) {
 	if len(in.MetricKey) > 200 || !metricPattern.MatchString(in.MetricKey) {
 		return in, invalid("criterion metric_key is invalid")
 	}
+	if _, supported := evaluationmetric.Lookup(in.MetricKey); !supported {
+		return in, invalid("criterion metric_key is unsupported by the deterministic evaluator")
+	}
 	switch in.Operator {
 	case "gt", "gte", "lt", "lte", "eq", "neq", "required":
 	default:
@@ -218,24 +234,30 @@ func validateJSONArray(raw json.RawMessage, label string) error {
 	}
 	return nil
 }
-func validateIdentifiers(values []string, label string, max int) ([]string, error) {
-	seen := map[string]struct{}{}
+func validateObservables(values []string) ([]string, error) {
+	seen := map[observablecatalog.ID]struct{}{}
 	if values == nil {
 		values = []string{}
 	}
-	if len(values) > max {
-		return values, invalid(label + " contains too many values")
+	if len(values) > 64 {
+		return values, invalid("observables contains too many values")
 	}
-	for _, v := range values {
-		if len(v) > 100 || !kebabPattern.MatchString(v) {
-			return values, invalid(label + " must contain lowercase kebab-case values")
+	canonical := make([]string, 0, len(values))
+	for _, value := range values {
+		id, err := observablecatalog.Parse(value)
+		if err != nil {
+			if err == observablecatalog.ErrMalformed {
+				return values, invalid("observables must contain lowercase kebab-case values or known legacy aliases")
+			}
+			return values, invalid("observables contains an unsupported value")
 		}
-		if _, ok := seen[v]; ok {
-			return values, invalid(label + " must not contain duplicates")
+		if _, ok := seen[id]; ok {
+			return values, invalid("observables must not contain duplicates")
 		}
-		seen[v] = struct{}{}
+		seen[id] = struct{}{}
+		canonical = append(canonical, string(id))
 	}
-	return values, nil
+	return canonical, nil
 }
 func validateTextItems(values []string, label string, max int) ([]string, error) {
 	if values == nil {

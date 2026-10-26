@@ -23,11 +23,13 @@ type evaluationBatchHandlers struct {
 	logger  *slog.Logger
 }
 type createBatchRequest struct {
-	ScenarioVersionID string          `json:"scenario_version_id"`
-	AgentVersionIDs   []string        `json:"agent_version_ids"`
-	RunsPerAgent      int             `json:"runs_per_agent"`
-	EnvironmentMode   string          `json:"environment_mode"`
-	Config            json.RawMessage `json:"config"`
+	ScenarioVersionID string                         `json:"scenario_version_id"`
+	AgentVersionIDs   []string                       `json:"agent_version_ids"`
+	RunsPerAgent      int                            `json:"runs_per_agent"`
+	EnvironmentMode   string                         `json:"environment_mode"`
+	Config            json.RawMessage                `json:"config"`
+	SourceMetadata    evaluationbatch.SourceMetadata `json:"source_metadata"`
+	IdempotencyKey    string                         `json:"idempotency_key"`
 }
 
 func (h evaluationBatchHandlers) create(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +43,7 @@ func (h evaluationBatchHandlers) create(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	p, _ := auth.PrincipalFromContext(r.Context())
-	v, e := h.service.Create(r.Context(), p, wid, evaluationbatch.CreateInput{ScenarioVersionID: q.ScenarioVersionID, AgentVersionIDs: q.AgentVersionIDs, RunsPerAgent: q.RunsPerAgent, EnvironmentMode: q.EnvironmentMode, Config: q.Config})
+	v, e := h.service.Create(r.Context(), p, wid, evaluationbatch.CreateInput{ScenarioVersionID: q.ScenarioVersionID, AgentVersionIDs: q.AgentVersionIDs, RunsPerAgent: q.RunsPerAgent, EnvironmentMode: q.EnvironmentMode, Config: q.Config, SourceMetadata: q.SourceMetadata, IdempotencyKey: q.IdempotencyKey})
 	if h.handle(w, e) {
 		return
 	}

@@ -11,8 +11,10 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/coverage"
 	"github.com/evalplane/evalplane/backend/internal/environment"
 	"github.com/evalplane/evalplane/backend/internal/evaluator"
+	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/identity"
 	"github.com/evalplane/evalplane/backend/internal/scenario"
+	"github.com/evalplane/evalplane/backend/internal/telemetry"
 	"github.com/google/uuid"
 )
 
@@ -165,6 +167,24 @@ func TestKnownBadFailsEvaluator(t *testing.T) {
 	}
 	if result.Status != evaluator.StatusFail {
 		t.Fatalf("known-bad must fail, got %q", result.Status)
+	}
+}
+
+func TestEvaluationFixtureProvidesAdmissiblePostActionTelemetry(t *testing.T) {
+	input := BuildEvaluationInput(testVersion(), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", true, []evidence.AgentAction{{
+		ID: "fixture-scale", ActionType: "scale_workload", Status: "executed", Authorized: true,
+	}})
+	if len(input.Events) != 2 || input.Run.StartedAt == nil || input.Run.CompletedAt == nil {
+		t.Fatalf("fixture must contain baseline and terminal events: events=%d run=%+v", len(input.Events), input.Run)
+	}
+	actionAt := input.Actions[0].CreatedAt
+	eligibleAt := actionAt.Add(telemetry.RateWindow)
+	if input.Events[0].OccurredAt.After(*input.Run.StartedAt) || input.Events[1].OccurredAt.Before(eligibleAt) || input.Events[1].OccurredAt.After(*input.Run.CompletedAt) {
+		t.Fatalf("fixture evidence does not cover the full post-action lookback: action=%s eligible=%s events=%+v run=%+v", actionAt, eligibleAt, input.Events, input.Run)
+	}
+	result, err := evaluator.Evaluate(input)
+	if err != nil || result.Status != evaluator.StatusPass {
+		t.Fatalf("complete fixture evidence must pass the canonical evaluator: status=%q err=%v findings=%+v", result.Status, err, result.Findings)
 	}
 }
 

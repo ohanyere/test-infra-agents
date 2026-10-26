@@ -1,0 +1,52 @@
+# External infrastructure agent for the Realverax independence proof.
+# A genuinely separate deployment: own pod, own container image, no
+# serviceAccount privileges, no secret volumes, no credential env. It speaks
+# only the external direct-HTTP agent protocol on :8081.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-agent
+  namespace: evalplane-e2e-harness
+  labels:
+    app: external-agent
+    evalplane.e2e/owner: stage-external
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-agent
+  template:
+    metadata:
+      labels:
+        app: external-agent
+        evalplane.e2e/owner: stage-external
+    spec:
+      containers:
+        - name: external-agent
+          image: external-agent:e2e
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8081
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-agent
+  namespace: evalplane-e2e-harness
+  labels:
+    app: external-agent
+spec:
+  selector:
+    app: external-agent
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http

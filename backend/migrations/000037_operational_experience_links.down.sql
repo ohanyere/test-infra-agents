@@ -1,0 +1,7 @@
+DROP TABLE operational_guidance_operation_links;
+ALTER TABLE operational_guidance_requests DROP CONSTRAINT operational_guidance_requests_link_scope_key;
+DROP INDEX operational_lessons_one_successor;
+ALTER TABLE operational_lessons DROP CONSTRAINT operational_lessons_supersedes_scope_fkey;
+ALTER TABLE operational_lessons DROP COLUMN supersedes_lesson_id;
+ALTER TABLE operational_lesson_decisions DROP CONSTRAINT operational_lesson_decisions_decision_check;
+ALTER TABLE operational_lesson_decisions ADD CONSTRAINT operational_lesson_decisions_decision_check CHECK (decision IN ('approved','revoked'));

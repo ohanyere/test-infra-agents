@@ -28,6 +28,8 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
   const [competencyContract, setCompetencyContract] = useState("infrastructure-capability-catalog:v1");
   const [name, setName] = useState("");
   const [version, setVersion] = useState("");
+	const [implementationKind, setImplementationKind] = useState<"artifact_digest" | "source_revision" | "deployment_revision" | "model_provider" | "declared">("source_revision");
+	const [implementationIdentifier, setImplementationIdentifier] = useState("");
   const [description, setDescription] = useState("");
   const [endpoint, setEndpoint] = useState("");
   const [toolAccessMode, setToolAccessMode] = useState<"direct" | "mcp">("direct");
@@ -120,12 +122,12 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
 	  let versionID: string | undefined;
 	  if (existingAgentID) {
 		const createdVersion = await apiRequest<AgentVersion>("/v1/workspaces/" + workspace.id + "/agents/" + existingAgentID + "/versions", {
-		  method: "POST", body: JSON.stringify({ version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, metadata: {} }),
+		  method: "POST", body: JSON.stringify({ version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, implementation_identity: { contract_version: "agent-implementation-identity:v1", kind: implementationKind, identifier: implementationIdentifier, provenance_level: "declared" }, metadata: {} }),
 		});
 		versionID = createdVersion.id;
 	  } else {
 		const created = await apiRequest<Agent>("/v1/workspaces/" + workspace.id + "/agents", {
-		  method: "POST", body: JSON.stringify({ name, slug: slugify(name), description, visibility: "workspace", initial_version: { version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, metadata: {} } }),
+		  method: "POST", body: JSON.stringify({ name, slug: slugify(name), description, visibility: "workspace", initial_version: { version_label: version, interface_kind: "http", tool_access_mode: toolAccessMode, endpoint_url: endpoint, capabilities: selected, claimed_capability_ids: claimed, implementation_identity: { contract_version: "agent-implementation-identity:v1", kind: implementationKind, identifier: implementationIdentifier, provenance_level: "declared" }, metadata: {} } }),
 		});
 		agentID = created.id;
 		versionID = created.latest_version?.id;
@@ -148,7 +150,7 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
   if (authError || !workspace) return <main className={styles.page}><div className={styles.state}><p>{authError || "A workspace is required."}</p><button onClick={retry}>Try again</button></div></main>;
 
   return <main className={styles.page}>
-    <header className={styles.nav}><a href="/">evalplane</a><a href="/agents">Agents</a></header>
+    <header className={styles.nav}><a href="/">Realverax</a><a href="/agents">Agents</a></header>
     <div className={styles.shell}>
 	  <p className={styles.eyebrow}>{existingAgentID ? "REGISTER VERSION" : "CONNECT AN AGENT"}</p>
 	  <h1>{existingAgentID ? "Register a new agent version." : "Connect an infrastructure agent."}</h1>
@@ -158,6 +160,9 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
           <h2>Identity and version</h2>
 		  {!existingAgentID && <label>Agent name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} /></label>}
           <label>Version<input required maxLength={100} placeholder="1.0.0" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+		  <label>Implementation identity type<select value={implementationKind} onChange={(event) => setImplementationKind(event.target.value as typeof implementationKind)}><option value="source_revision">Source revision</option><option value="artifact_digest">Artifact/image digest</option><option value="deployment_revision">Deployment revision</option><option value="model_provider">Model/provider identifier</option><option value="declared">Other declared identity</option></select></label>
+		  <label>Immutable implementation identifier<input required maxLength={500} placeholder="sha256:… or source commit" value={implementationIdentifier} onChange={(event) => setImplementationIdentifier(event.target.value)} /></label>
+		  <p className={styles.explanation}>This declared identity is pinned to the version and every run. Realverax does not attest it cryptographically.</p>
 		  {!existingAgentID && <label>Description <span>Optional</span><textarea maxLength={4000} value={description} onChange={(event) => setDescription(event.target.value)} /></label>}
 		</section>
         <section>
@@ -175,15 +180,15 @@ export function AgentForm({ existingAgentID }: { existingAgentID: string | null 
           <button className={styles.secondary} type="button" onClick={testConnection} disabled={testing || !endpoint || (authType === "bearer" && !token)}>{testing ? "Testing…" : "Test connection"}</button>
           {check && <p className={check.status === "healthy" ? styles.healthy : styles.check}>{checkCopy[check.status] || "Connection check completed."}</p>}
           <div className={styles.methods}>
-            <label><input type="radio" checked={toolAccessMode === "direct"} onChange={() => setToolAccessMode("direct")} /> Direct Evalplane action protocol</label>
+            <label><input type="radio" checked={toolAccessMode === "direct"} onChange={() => setToolAccessMode("direct")} /> Direct Realverax action protocol</label>
             <label><input type="radio" checked={toolAccessMode === "mcp"} onChange={() => setToolAccessMode("mcp")} /> MCP <strong>Available</strong></label>
           </div>
-          {toolAccessMode === "mcp" && <p className={styles.explanation}>Evalplane invokes your agent over its registered endpoint and provides a short-lived MCP connection for evaluation-scoped observations and actions.</p>}
+          {toolAccessMode === "mcp" && <p className={styles.explanation}>Realverax invokes your agent over its registered endpoint and provides a short-lived MCP connection for evaluation-scoped observations and actions.</p>}
           {Object.entries(grouped).map(([group, items]) => <fieldset className={styles.capabilities} key={group}><legend>{group}</legend>{items.map((item) => <label key={item.id}><input type="checkbox" checked={selected.includes(item.id)} onChange={() => toggle(item.id)} /><span>{item.label}</span><code>{item.id}</code></label>)}</fieldset>)}
         </section>
         <section>
           <h2>Claimed capabilities</h2>
-          <p className={styles.explanation}>What can this agent operate? Select what this exact version CLAIMS it can do. Claims are not qualifications. Evalplane must test them before they become qualified. Catalog: <code>{competencyContract}</code>.</p>
+          <p className={styles.explanation}>What can this agent operate? Select what this exact version CLAIMS it can do. Claims are not qualifications. Realverax must test them before they become qualified. Catalog: <code>{competencyContract}</code>.</p>
           {claimedHierarchy.length === 0 && <p className={styles.explanation}>Claimed-capability catalog could not be loaded yet. Runtime capabilities above can still be registered; claims stay empty.</p>}
           {claimedHierarchy.map((domain) => <div key={domain.domain}>
             <h3>{domain.domain}</h3>

@@ -1,0 +1,113 @@
+name: Customer collector PostgreSQL integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: customer-collector-postgres-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  customer-collector-postgres:
+    name: Customer collector canonical ingestion
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: collector_test
+          POSTGRES_PASSWORD: collector_test
+          POSTGRES_DB: infra_agents_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U collector_test -d infra_agents_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://collector_test:collector_test@127.0.0.1:5432/infra_agents_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://collector_test:collector_test@127.0.0.1:5432/infra_agents_test?sslmode=disable
+      GOMAXPROCS: "2"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Wait for disposable PostgreSQL
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -p 5432 -U collector_test -d infra_agents_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready" >&2
+          exit 1
+
+      - name: Apply all migrations and verify schema version
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go run ./cmd/migrate up
+          shopt -s nullglob
+          migration_files=(migrations/*.up.sql)
+          if (( ${#migration_files[@]} == 0 )); then
+            echo "No migration files found" >&2
+            exit 1
+          fi
+          expected_version=0
+          for migration_path in "${migration_files[@]}"; do
+            migration_file="${migration_path##*/}"
+            if [[ ! "$migration_file" =~ ^([0-9]{6})_[a-z0-9]+(_[a-z0-9]+)*\.up\.sql$ ]]; then
+              echo "Invalid migration filename: $migration_file" >&2
+              exit 1
+            fi
+            version="$((10#${BASH_REMATCH[1]}))"
+            if (( version > expected_version )); then
+              expected_version="$version"
+            fi
+          done
+          migration_state="$(psql "$DATABASE_URL" -Atc 'SELECT version || chr(32) || dirty FROM schema_migrations')"
+          if [[ "$migration_state" != "$expected_version false" ]]; then
+            echo "Unexpected migration state: expected '$expected_version false', got '$migration_state'" >&2
+            exit 1
+          fi
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT to_regclass('public.customer_kubernetes_environments'), to_regclass('public.customer_kubernetes_collectors'), to_regclass('public.customer_observation_sessions'), to_regclass('public.customer_observation_batches'), to_regclass('public.customer_agent_action_claims'), to_regclass('public.customer_action_evidence'), to_regclass('public.operational_contract_versions'), to_regclass('public.customer_service_metric_samples'), to_regclass('public.operational_assessment_reports'), to_regclass('public.operational_approval_records'), to_regclass('public.operational_finding_history'), to_regclass('public.assurance_notification_events'), to_regclass('public.assurance_notification_deliveries'), to_regclass('public.assurance_evaluation_jobs')" | grep -F 'customer_kubernetes_environments|customer_kubernetes_collectors|customer_observation_sessions|customer_observation_batches|customer_agent_action_claims|customer_action_evidence|operational_contract_versions|customer_service_metric_samples|operational_assessment_reports|operational_approval_records|operational_finding_history|assurance_notification_events|assurance_notification_deliveries|assurance_evaluation_jobs'
+          echo "Applied migration version $migration_state"
+
+      - name: Run collector, reconciliation, operational report, and authenticated audit integration tests
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_file="$(mktemp)"
+          if ! go test -v -count=1 ./internal/customercollector -run '^(TestCustomerCollectorCanonicalIngestionIntegration|TestAuthenticatedAuditAndExecutionReceiptIntegration)$' 2>&1 | tee "$output_file"; then
+            rm -f "$output_file"
+            exit 1
+          fi
+          for test_name in TestCustomerCollectorCanonicalIngestionIntegration TestAuthenticatedAuditAndExecutionReceiptIntegration; do
+            if grep -Fq -- "--- SKIP: $test_name" "$output_file"; then
+              echo "Database integration test $test_name was skipped; this job requires a real execution" >&2
+              rm -f "$output_file"
+              exit 1
+            fi
+            if ! grep -Fq -- "--- PASS: $test_name" "$output_file"; then
+              echo "Database integration test $test_name did not report PASS" >&2
+              rm -f "$output_file"
+              exit 1
+            fi
+          done
+          rm -f "$output_file"

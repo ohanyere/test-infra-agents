@@ -1,0 +1,10 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: Metadata
+    verbs: [patch, update]
+    resources:
+      - group: apps
+        resources: [deployments]
+    omitStages: [RequestReceived, ResponseStarted]
+  - level: None

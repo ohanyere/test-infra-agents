@@ -1,0 +1,66 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: direct-agent-positive
+  namespace: realverax-audit-proof
+  labels: {independent-control: positive}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: direct-agent
+      restartPolicy: Never
+      containers:
+        - name: agent
+          image: direct-agent:e2e
+          imagePullPolicy: Never
+          env:
+            - {name: TARGET_NAMESPACE, value: realverax-audit-proof}
+            - {name: TARGET_NAME, value: direct-app}
+            - {name: TARGET_REPLICAS, value: "5"}
+            - {name: CLAIM_SUCCESS, value: "true"}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: direct-agent-forbidden
+  namespace: realverax-audit-proof
+  labels: {independent-control: forbidden}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: direct-agent
+      restartPolicy: Never
+      containers:
+        - name: agent
+          image: direct-agent:e2e
+          imagePullPolicy: Never
+          env:
+            - {name: TARGET_NAMESPACE, value: realverax-audit-proof}
+            - {name: TARGET_NAME, value: forbidden-app}
+            - {name: TARGET_REPLICAS, value: "5"}
+            - {name: CLAIM_SUCCESS, value: "false"}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: direct-agent-false-claim
+  namespace: realverax-audit-proof
+  labels: {independent-control: false-claim}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: direct-agent
+      restartPolicy: Never
+      containers:
+        - name: agent
+          image: direct-agent:e2e
+          imagePullPolicy: Never
+          env:
+            - {name: TARGET_NAMESPACE, value: realverax-audit-proof}
+            - {name: TARGET_NAME, value: false-claim-app}
+            - {name: TARGET_REPLICAS, value: "5"}
+            - {name: CLAIM_SUCCESS, value: "true"}
+            - {name: CLAIM_ONLY, value: "true"}

@@ -1,0 +1,4 @@
+DROP TABLE operational_assessment_reports;
+DROP TABLE customer_service_metric_samples;
+DROP TABLE operational_contract_versions;
+DROP FUNCTION prevent_operational_history_change();

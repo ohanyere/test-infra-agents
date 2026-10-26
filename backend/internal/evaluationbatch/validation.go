@@ -4,9 +4,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"regexp"
+	"strings"
 )
 
 func ValidateCreate(in CreateInput) (CreateInput, error) {
+	in.IdempotencyKey = strings.TrimSpace(in.IdempotencyKey)
+	if len(in.IdempotencyKey) > 200 {
+		return in, invalid("idempotency_key must be at most 200 characters")
+	}
+	for _, value := range []string{in.SourceMetadata.Provider, in.SourceMetadata.Repository, in.SourceMetadata.CommitSHA, in.SourceMetadata.PullRequest, in.SourceMetadata.Workflow} {
+		if len(value) > 500 {
+			return in, invalid("source_metadata values must be at most 500 characters")
+		}
+	}
+	if in.SourceMetadata.CommitSHA != "" && !regexp.MustCompile(`^[0-9A-Fa-f]{7,64}$`).MatchString(in.SourceMetadata.CommitSHA) {
+		return in, invalid("source_metadata.commit_sha must be a hexadecimal commit identifier")
+	}
 	if identity.ValidateUUID(in.ScenarioVersionID) != nil {
 		return in, invalid("scenario_version_id must be a valid UUID")
 	}

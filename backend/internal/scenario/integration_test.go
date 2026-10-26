@@ -69,7 +69,7 @@ func TestScenarioIntegration(t *testing.T) {
 	if _, e = svc.Create(ctx, p, one.ID, input); !errors.Is(e, identity.ErrConflict) {
 		t.Fatalf("duplicate=%v", e)
 	}
-	v2, e := svc.CreateVersion(ctx, p, one.ID, created.ID, VersionInput{Description: "Second", Category: "traffic", Difficulty: "hard", DurationSeconds: 700, Environment: json.RawMessage(`{}`), Conditions: json.RawMessage(`[]`), Criteria: []CriterionInput{{Key: "slo", Name: "SLO", MetricKey: "application.slo_restored", Operator: "required", TargetValue: json.RawMessage(`true`)}}})
+	v2, e := svc.CreateVersion(ctx, p, one.ID, created.ID, VersionInput{Description: "Second", Category: "traffic", Difficulty: "hard", DurationSeconds: 700, Environment: json.RawMessage(`{}`), Conditions: json.RawMessage(`[]`), Criteria: []CriterionInput{{Key: "availability", Name: "Availability", MetricKey: "application.availability_pct", Operator: "gte", TargetValue: json.RawMessage(`99.9`)}}})
 	if e != nil || v2.Version != 2 || len(v2.Criteria) != 1 {
 		t.Fatalf("v2=%+v error=%v", v2, e)
 	}

@@ -95,6 +95,20 @@ type ProviderCapabilities struct {
 	SupportedProfiles []string `json:"supported_profiles"`
 	RuntimeContracts  []string `json:"runtime_contracts"`
 	Production        bool     `json:"production"`
+	// ComponentAdapters are optional Stage 39A planning truth. Existing
+	// providers remain valid with an empty list and current scheduling is
+	// unchanged.
+	ComponentAdapters []AdapterCapabilities `json:"component_adapters,omitempty"`
+}
+
+// AdapterCapabilities declares component-aware planning truth without
+// requiring a provider to implement a monolithic world lifecycle.
+type AdapterCapabilities struct {
+	AdapterID       string   `json:"adapter_id"`
+	ContractVersion string   `json:"contract_version"`
+	ComponentTypes  []string `json:"component_types"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	MaximumFidelity string   `json:"maximum_fidelity"`
 }
 
 // ProviderHealth is observed liveness, never fabricated for planned providers.

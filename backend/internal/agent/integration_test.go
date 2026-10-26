@@ -9,6 +9,7 @@ import (
 
 	"github.com/evalplane/evalplane/backend/internal/auth"
 	"github.com/evalplane/evalplane/backend/internal/identity"
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -75,7 +76,7 @@ func TestAgentIntegration(t *testing.T) {
 	if _, err = service.GetPublic(ctx, "catalog-archived"); !errors.Is(err, identity.ErrNotFound) {
 		t.Fatalf("archived public-detail error=%v", err)
 	}
-	input := CreateInput{Name: "Checkout", Slug: "checkout", InitialVersion: VersionInput{VersionLabel: "v1", InterfaceKind: "http", EndpointURL: "https://agent.example/v1/decide", Capabilities: []string{"kubernetes"}, Metadata: json.RawMessage(`{}`)}}
+	input := CreateInput{Name: "Checkout", Slug: "checkout", InitialVersion: VersionInput{VersionLabel: "v1", InterfaceKind: "http", EndpointURL: "https://agent.example/v1/decide", Capabilities: []string{"kubernetes"}, ImplementationIdentity: declaredIdentity(), Metadata: json.RawMessage(`{}`)}}
 	created, err := service.Create(ctx, p, workspace.ID, input)
 	if err != nil || created.LatestVersion == nil {
 		t.Fatalf("create=%+v err=%v", created, err)
@@ -86,7 +87,7 @@ func TestAgentIntegration(t *testing.T) {
 	if _, err = service.CreateVersion(ctx, p, workspace.ID, created.ID, input.InitialVersion); !errors.Is(err, identity.ErrConflict) {
 		t.Fatalf("duplicate version error=%v", err)
 	}
-	second, err := service.CreateVersion(ctx, p, workspace.ID, created.ID, VersionInput{VersionLabel: "v2", Metadata: json.RawMessage(`{}`)})
+	second, err := service.CreateVersion(ctx, p, workspace.ID, created.ID, VersionInput{VersionLabel: "v2", ImplementationIdentity: provenance.AgentImplementationIdentity{ContractVersion: provenance.AgentIdentityContractV1, Kind: provenance.KindDeploymentRevision, Identifier: "deployment-2", ProvenanceLevel: provenance.LevelDeclared}, Metadata: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestAgentIntegration(t *testing.T) {
 	if _, err = service.Update(ctx, p, workspace.ID, created.ID, UpdateInput{Status: &archived}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.CreateVersion(ctx, p, workspace.ID, created.ID, VersionInput{VersionLabel: "v3", Metadata: json.RawMessage(`{}`)}); !errors.Is(err, identity.ErrConflict) {
+	if _, err = service.CreateVersion(ctx, p, workspace.ID, created.ID, VersionInput{VersionLabel: "v3", ImplementationIdentity: declaredIdentity(), Metadata: json.RawMessage(`{}`)}); !errors.Is(err, identity.ErrConflict) {
 		t.Fatalf("archived version error=%v", err)
 	}
 	if _, err = service.GetWorkspace(ctx, p, other.ID, created.ID); !errors.Is(err, identity.ErrNotFound) {

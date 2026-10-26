@@ -11,6 +11,7 @@ import (
 	"github.com/evalplane/evalplane/backend/internal/evaluator"
 	"github.com/evalplane/evalplane/backend/internal/evidence"
 	"github.com/evalplane/evalplane/backend/internal/execution"
+	"github.com/evalplane/evalplane/backend/internal/gitops"
 	"github.com/evalplane/evalplane/backend/internal/kubeenv"
 	"github.com/evalplane/evalplane/backend/internal/mcpserver"
 	"github.com/evalplane/evalplane/backend/internal/observation"
@@ -36,16 +37,18 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	RecoveryInterval  time.Duration
 	RecoveryGrace     time.Duration
+	StabilityWindow   time.Duration
+	StabilityInterval time.Duration
 	MCPPublicEndpoint string
 	MCPGrantTTL       time.Duration
 	MCPMaxToolCalls   int
 }
 
 func DefaultConfig() Config {
-	return Config{PollInterval: time.Second, MaxConcurrentRuns: 1, RunTimeout: 10 * time.Minute, AgentStepTimeout: 30 * time.Second, MaxAgentSteps: 8, StepInterval: 5 * time.Second, StopPollInterval: 250 * time.Millisecond, FinalizeTimeout: 30 * time.Second, CleanupTimeout: time.Minute, LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second, RecoveryInterval: time.Minute, RecoveryGrace: 15 * time.Second, MCPGrantTTL: 10 * time.Minute, MCPMaxToolCalls: 64}
+	return Config{PollInterval: time.Second, MaxConcurrentRuns: 1, RunTimeout: 10 * time.Minute, AgentStepTimeout: 30 * time.Second, MaxAgentSteps: 8, StepInterval: 5 * time.Second, StopPollInterval: 250 * time.Millisecond, FinalizeTimeout: 30 * time.Second, CleanupTimeout: time.Minute, LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second, RecoveryInterval: time.Minute, RecoveryGrace: 15 * time.Second, StabilityWindow: 15 * time.Second, StabilityInterval: 5 * time.Second, MCPGrantTTL: 10 * time.Minute, MCPMaxToolCalls: 64}
 }
 func (c Config) validate() error {
-	if c.PollInterval <= 0 || c.MaxConcurrentRuns < 1 || c.MaxConcurrentRuns > 16 || c.RunTimeout <= 0 || c.AgentStepTimeout <= 0 || c.MaxAgentSteps < 1 || c.MaxAgentSteps > 100 || c.StepInterval <= 0 || c.StopPollInterval <= 0 || c.FinalizeTimeout <= 0 || c.CleanupTimeout <= 0 || c.LeaseDuration <= 0 || c.HeartbeatInterval <= 0 || c.HeartbeatInterval >= c.LeaseDuration || c.RecoveryInterval <= 0 || c.RecoveryGrace < 0 {
+	if c.PollInterval <= 0 || c.MaxConcurrentRuns < 1 || c.MaxConcurrentRuns > 16 || c.RunTimeout <= 0 || c.AgentStepTimeout <= 0 || c.MaxAgentSteps < 1 || c.MaxAgentSteps > 100 || c.StepInterval <= 0 || c.StopPollInterval <= 0 || c.FinalizeTimeout <= 0 || c.CleanupTimeout <= 0 || c.LeaseDuration <= 0 || c.HeartbeatInterval <= 0 || c.HeartbeatInterval >= c.LeaseDuration || c.RecoveryInterval <= 0 || c.RecoveryGrace < 0 || c.StabilityWindow <= 0 || c.StabilityInterval <= 0 || c.StabilityInterval > c.StabilityWindow {
 		return errors.New("worker limits must be positive; concurrency <=16 and steps <=100")
 	}
 	if c.MCPPublicEndpoint != "" && (c.MCPGrantTTL <= 0 || c.MCPMaxToolCalls < 1 || c.MCPMaxToolCalls > 1000) {
@@ -79,6 +82,9 @@ type Runtime interface {
 	Observe(context.Context, observation.EnvironmentContext) (agentgateway.Observation, error)
 	Cleanup(context.Context, kubeenv.RunIdentity) error
 }
+type GitOpsObserver interface {
+	ObserveGitOps(context.Context, observation.EnvironmentContext) (gitops.Evidence, error)
+}
 type Actions interface {
 	Authorize(context.Context, observation.EnvironmentContext, agentgateway.ProposedAction) actionexec.ActionResult
 	ExecuteAction(context.Context, observation.EnvironmentContext, agentgateway.ProposedAction) actionexec.ActionResult
@@ -99,20 +105,26 @@ type MCPAccess interface {
 type BillingSettlement interface {
 	SettlePersistedRun(context.Context, string, string) error
 }
+type VerificationProjector interface {
+	DeriveRun(context.Context, string, string) error
+}
 
 // ConnectionResolver obtains secrets from trusted configuration, keyed to the
 // pinned version. Its output is never included in evidence or agent request JSON.
 type ConnectionResolver func(context.Context, string, agent.Version) (agentgateway.Connection, error)
 type Dependencies struct {
-	Lifecycle  Lifecycle
-	Runtime    Runtime
-	Actions    Actions
-	Evidence   Evidence
-	Evaluator  Evaluator
-	Gateway    agentgateway.Gateway
-	Connection ConnectionResolver
-	MCP        MCPAccess
-	Billing    BillingSettlement
+	Lifecycle    Lifecycle
+	Runtime      Runtime
+	Actions      Actions
+	Evidence     Evidence
+	Evaluator    Evaluator
+	Gateway      agentgateway.Gateway
+	Connection   ConnectionResolver
+	MCP          MCPAccess
+	Billing      BillingSettlement
+	Verification VerificationProjector
+	Wait         func(context.Context, time.Duration) error
+	Now          func() time.Time
 	// Environments wires the Stage-29 run lifecycle (requirements →
 	// scheduler → run-owned EnvironmentInstance → provider provision →
 	// ready → cleanup). It depends on the environment service/provider
@@ -122,11 +134,25 @@ type Dependencies struct {
 	Environments RunEnvironments
 	// OnError receives sanitized classification only, never arbitrary remote errors.
 	OnError func(runID string, err error)
+	// OnStage reports coarse execution boundaries without exposing run data.
+	OnStage func(stage, status string)
+	// OnFailure is for trusted diagnostics. Callers must redact error details before logging.
+	OnFailure func(kind, stage string, err error)
 }
+
+// StageFailure identifies the operation that failed without changing its error.
+type StageFailure struct {
+	Stage string
+	Err   error
+}
+
+func (e *StageFailure) Error() string { return e.Err.Error() }
+func (e *StageFailure) Unwrap() error { return e.Err }
 
 var ErrStopped = errors.New("run stopped")
 var ErrLeaseLost = errors.New("worker lease lost")
 var ErrUnsupported = errors.New("scenario unsupported by current runtime")
+var ErrAgentStepLimitReached = errors.New("agent step limit reached")
 
 type Failure struct {
 	Code, Class string

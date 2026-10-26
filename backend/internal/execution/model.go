@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/evalplane/evalplane/backend/internal/provenance"
 )
 
 var ErrNoRunAvailable = errors.New("no run available")
@@ -25,12 +27,13 @@ type ScenarioDescription struct {
 }
 
 type AgentDescription struct {
-	ID            string          `json:"agent_id"`
-	VersionID     string          `json:"agent_version_id"`
-	VersionLabel  string          `json:"version_label"`
-	InterfaceKind string          `json:"interface_kind"`
-	Capabilities  []string        `json:"capabilities"`
-	Metadata      json.RawMessage `json:"metadata"`
+	ID                     string                                 `json:"agent_id"`
+	VersionID              string                                 `json:"agent_version_id"`
+	VersionLabel           string                                 `json:"version_label"`
+	InterfaceKind          string                                 `json:"interface_kind"`
+	Capabilities           []string                               `json:"capabilities"`
+	Metadata               json.RawMessage                        `json:"metadata"`
+	ImplementationIdentity provenance.AgentImplementationIdentity `json:"implementation_identity"`
 }
 
 type BatchDescription struct {
