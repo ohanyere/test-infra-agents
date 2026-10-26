@@ -47,7 +47,11 @@ func (f FileMonitorCredentials) Load(ctx context.Context, id string) ([]byte, st
 // that cycle. At most six bounded HTTPS requests run sequentially. The optional
 // external vantage is set only in the separately operated probe deployment.
 func ProcessNextMonitoring(ctx context.Context, pool *pgxpool.Pool, service *Service, credentials MonitorCredentialProvider, probeVantage ...string) (bool, error) {
-	_, err := pool.Exec(ctx, `UPDATE assurance_monitoring_plans SET state='completed',updated_at=now() WHERE state='active' AND current_cycle_id IS NULL AND ends_at<=now()`)
+	_, err := pool.Exec(ctx, `UPDATE assurance_monitoring_plans SET state='completed',updated_at=now() WHERE state IN ('active','initializing','degraded') AND current_cycle_id IS NULL AND ends_at<=now()`)
+	if err != nil {
+		return false, err
+	}
+	_, err = pool.Exec(ctx, `UPDATE assurance_monitoring_plans p SET state='degraded',next_due_at=now(),last_error='registered direct or authenticated audit source unavailable',updated_at=now() WHERE p.mode='deployment_audit' AND p.state IN ('initializing','active') AND (NOT EXISTS(SELECT 1 FROM customer_outcome_sources o WHERE o.id=p.deployment_source_id AND o.revoked_at IS NULL AND o.expires_at>now()) OR NOT EXISTS(SELECT 1 FROM customer_audit_mtls_sources a WHERE a.workspace_id=p.workspace_id AND a.environment_id=p.environment_id AND a.revoked_at IS NULL AND a.expires_at>now()))`)
 	if err != nil {
 		return false, err
 	}
@@ -60,10 +64,10 @@ func ProcessNextMonitoring(ctx context.Context, pool *pgxpool.Pool, service *Ser
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	var session, w, e, cycle string
+	var session, w, e, cycle, mode, baselineID string
 	var number, attempt, cadence int
 	var ends time.Time
-	err = tx.QueryRow(ctx, `SELECT session_id,workspace_id,environment_id,COALESCE(current_cycle_id::text,''),cycle_number,attempts,cadence_seconds,ends_at FROM assurance_monitoring_plans WHERE next_due_at<=now() AND attempts<5 AND (state='active' AND (ends_at>now() OR current_cycle_id IS NOT NULL) OR state='running' AND lease_until<now()) ORDER BY next_due_at,session_id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&session, &w, &e, &cycle, &number, &attempt, &cadence, &ends)
+	err = tx.QueryRow(ctx, `SELECT session_id,workspace_id,environment_id,COALESCE(current_cycle_id::text,''),cycle_number,attempts,cadence_seconds,ends_at,mode,COALESCE(baseline_observation_id::text,'') FROM assurance_monitoring_plans WHERE next_due_at<=now() AND attempts<5 AND (state IN ('active','initializing','degraded') AND (ends_at>now() OR current_cycle_id IS NOT NULL) OR state='running' AND lease_until<now()) ORDER BY next_due_at,session_id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&session, &w, &e, &cycle, &number, &attempt, &cadence, &ends, &mode, &baselineID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -109,6 +113,7 @@ func ProcessNextMonitoring(ctx context.Context, pool *pgxpool.Pool, service *Ser
 		return true, err
 	}
 	var failure error
+	var deploymentObservation DirectObservation
 	for _, source := range sources {
 		var observation DirectObservation
 		var loadErr error
@@ -135,10 +140,24 @@ func ProcessNextMonitoring(ctx context.Context, pool *pgxpool.Pool, service *Ser
 				failure = loadErr
 			}
 		}
+		if mode == "deployment_audit" && loadErr == nil {
+			deploymentObservation = observation
+		}
 		_, err = pool.Exec(ctx, `INSERT INTO assurance_monitoring_events(workspace_id,environment_id,session_id,cycle_id,cycle_number,attempt,source_id,status,observation_id,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,'')::uuid,$10) ON CONFLICT(cycle_id,source_id,attempt) DO NOTHING`, w, e, session, cycle, number, attempt, source.id, status, observationID, reason)
 		if err != nil {
 			return true, err
 		}
+	}
+	sourceReady := true
+	if mode == "deployment_audit" {
+		err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer_outcome_sources o JOIN assurance_monitoring_plans p ON p.deployment_source_id=o.id WHERE p.session_id=$1 AND o.revoked_at IS NULL AND o.expires_at>now()) AND EXISTS(SELECT 1 FROM customer_audit_mtls_sources a WHERE a.workspace_id=$2 AND a.environment_id=$3 AND a.revoked_at IS NULL AND a.expires_at>now())`, session, w, e).Scan(&sourceReady)
+		if err != nil {
+			return true, err
+		}
+	}
+	if mode == "deployment_audit" && failure == nil && deploymentObservation.ID != "" && baselineID == "" {
+		_, err = pool.Exec(ctx, `UPDATE assurance_monitoring_plans SET baseline_observation_id=$2,baseline_acquired_at=$3,last_success_at=$3,next_due_at=CASE WHEN integrity_gap THEN now() WHEN NOT $5 THEN now()+make_interval(secs => $6::int) ELSE ends_at END,attempts=0,current_cycle_id=NULL,lease_until=NULL,state=CASE WHEN integrity_gap OR NOT $5 THEN 'degraded' ELSE 'initializing' END,last_error=CASE WHEN NOT $5 THEN 'registered direct or authenticated audit source unavailable' ELSE last_error END,updated_at=now() WHERE session_id=$1 AND current_cycle_id=$4 AND state='running' AND baseline_observation_id IS NULL`, session, deploymentObservation.ID, deploymentObservation.AcquiredAt, cycle, sourceReady, cadence)
+		return true, err
 	}
 	// An acquisition failure is source-health evidence, never service-health
 	// evidence. Assessment reads the events and preserves an append-only gap.
@@ -147,6 +166,31 @@ func ProcessNextMonitoring(ctx context.Context, pool *pgxpool.Pool, service *Ser
 		failure = assessmentErr
 	}
 	if failure == nil {
+		if mode == "deployment_audit" {
+			var lastAudit *time.Time
+			var gap bool
+			if err = pool.QueryRow(ctx, `SELECT last_audit_at,integrity_gap FROM assurance_monitoring_plans WHERE session_id=$1`, session).Scan(&lastAudit, &gap); err != nil {
+				return true, err
+			}
+			state := "initializing"
+			next := ends
+			if lastAudit != nil && !deploymentObservation.AcquiredAt.Before(*lastAudit) {
+				state = "active"
+				if gap || !sourceReady {
+					state = "degraded"
+				}
+			} else if lastAudit != nil {
+				next = time.Now().UTC()
+			}
+			if !sourceReady {
+				state = "degraded"
+			}
+			if !sourceReady && next.Equal(ends) {
+				next = time.Now().UTC().Add(time.Duration(cadence) * time.Second)
+			}
+			_, err = pool.Exec(ctx, `UPDATE assurance_monitoring_plans SET state=$3,attempts=0,current_cycle_id=NULL,lease_until=NULL,next_due_at=$4,last_error=CASE WHEN NOT $7 THEN 'registered direct or authenticated audit source unavailable' WHEN $3='degraded' THEN last_error ELSE '' END,last_success_at=$5,baseline_observation_id=CASE WHEN $3='active' THEN $6::uuid ELSE baseline_observation_id END,baseline_acquired_at=CASE WHEN $3='active' THEN $5 ELSE baseline_acquired_at END,updated_at=now() WHERE session_id=$1 AND current_cycle_id=$2 AND state='running'`, session, cycle, state, next, deploymentObservation.AcquiredAt, deploymentObservation.ID, sourceReady)
+			return true, err
+		}
 		state := "active"
 		next := time.Now().UTC().Add(time.Duration(cadence) * time.Second)
 		if !next.Before(ends) {
@@ -156,6 +200,9 @@ func ProcessNextMonitoring(ctx context.Context, pool *pgxpool.Pool, service *Ser
 		return true, err
 	}
 	state := "active"
+	if mode == "deployment_audit" {
+		state = "degraded"
+	}
 	if attempt >= 5 {
 		state = "failed"
 	}

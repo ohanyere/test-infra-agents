@@ -13,10 +13,10 @@ for deployment in direct-app forbidden-app false-claim-app; do
   kubectl -n "$namespace" rollout status "deployment/$deployment" --timeout=180s
 done
 
-test "$(kubectl auth can-i patch deployments --resource-name=direct-app -n "$namespace" --as="$agent_principal")" = yes
-test "$(kubectl auth can-i patch deployments --resource-name=forbidden-app -n "$namespace" --as="$agent_principal")" = no
-test "$(kubectl auth can-i patch deployments --resource-name=false-claim-app -n "$namespace" --as="$agent_principal")" = no
-test "$(kubectl auth can-i patch deployments --resource-name=direct-app -n "$namespace" --as="$observer_principal")" = no
+test "$(kubectl auth can-i patch deployments.apps/direct-app -n "$namespace" --as="$agent_principal")" = yes
+test "$(kubectl auth can-i patch deployments.apps/forbidden-app -n "$namespace" --as="$agent_principal")" = no
+test "$(kubectl auth can-i patch deployments.apps/false-claim-app -n "$namespace" --as="$agent_principal")" = no
+test "$(kubectl auth can-i patch deployments.apps/direct-app -n "$namespace" --as="$observer_principal")" = no
 test "$(kubectl auth can-i get deployments -n "$namespace" --as="$observer_principal")" = yes
 
 observer_config="$(mktemp)"

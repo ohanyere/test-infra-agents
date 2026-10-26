@@ -10,6 +10,7 @@ on:
           - full
           - external-agent
           - independent-agent
+          - customer-monitoring
         default: full
         required: true
   pull_request:
@@ -39,12 +40,13 @@ env:
 jobs:
   verification-e2e:
     name: Real runtime E2E with deterministic reference agent
-    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[verify-kind:external-agent]') || contains(github.event.head_commit.message, '[verify-kind:independent-agent]')
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[verify-kind:external-agent]') || contains(github.event.head_commit.message, '[verify-kind:independent-agent]') || contains(github.event.head_commit.message, '[verify-kind:customer-monitoring]')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       RUN_FULL_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'full') || (github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/infrastructure-agent-verification') }}
-      RUN_INDEPENDENT_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'independent-agent') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[verify-kind:independent-agent]')) }}
+      RUN_INDEPENDENT_CONTROLS: ${{ (github.event_name == 'workflow_dispatch' && (inputs.scenario == 'independent-agent' || inputs.scenario == 'customer-monitoring')) || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[verify-kind:independent-agent]') || contains(github.event.head_commit.message, '[verify-kind:customer-monitoring]'))) }}
+      RUN_CUSTOMER_MONITORING: ${{ (github.event_name == 'workflow_dispatch' && inputs.scenario == 'customer-monitoring') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[verify-kind:customer-monitoring]')) }}
     services:
       postgres:
         image: postgres:16
@@ -69,7 +71,7 @@ jobs:
           SELECTED_SCENARIO: ${{ inputs.scenario }}
         run: |
           case "$SELECTED_SCENARIO" in
-            full|external-agent|independent-agent) ;;
+            full|external-agent|independent-agent|customer-monitoring) ;;
             *) echo "Unsupported verification scenario: $SELECTED_SCENARIO" >&2; exit 1 ;;
           esac
 
@@ -504,9 +506,39 @@ jobs:
           docker build -t evalplane-reference:v17 -f e2e/independentreference.Dockerfile "$build_dir"
           docker build -t direct-agent:e2e -f e2e/directkubeagent.Dockerfile "$build_dir"
 
+      - name: Prepare authenticated customer audit webhook
+        if: env.RUN_CUSTOMER_MONITORING == 'true'
+        run: python3 backend/e2e/customer-monitoring-acceptance.py prepare
+
       - name: Create isolated Kind cluster
         run: |
           set -euo pipefail
+          audit_policy_path="$GITHUB_WORKSPACE/backend/internal/kubeaudit/audit-policy.yaml"
+          customer_mount=""
+          customer_arg=""
+          customer_volume=""
+          if [[ "$RUN_CUSTOMER_MONITORING" == true ]]; then
+            audit_policy_path="$GITHUB_WORKSPACE/backend/e2e/customer-monitoring-audit-policy.yaml"
+            customer_mount="$(cat <<'YAML'
+                - hostPath: /tmp/realverax-customer-monitoring-private/apiserver
+                  containerPath: /etc/kubernetes/realverax-audit
+                  readOnly: true
+          YAML
+          )"
+            customer_arg="$(cat <<'YAML'
+                  audit-webhook-config-file: /etc/kubernetes/realverax-audit/webhook.kubeconfig
+                  audit-webhook-mode: batch
+          YAML
+          )"
+            customer_volume="$(cat <<'YAML'
+                  - name: customer-audit-credentials
+                    hostPath: /etc/kubernetes/realverax-audit
+                    mountPath: /etc/kubernetes/realverax-audit
+                    readOnly: true
+                    pathType: Directory
+          YAML
+          )"
+          fi
           audit_dir="$ARTIFACT_DIR/kind-audit-source"
           mkdir -p "$audit_dir"
           chmod 700 "$audit_dir"
@@ -520,9 +552,10 @@ jobs:
                 - hostPath: $audit_dir
                   containerPath: /var/log/kubernetes/audit
                   readOnly: false
-                - hostPath: $GITHUB_WORKSPACE/backend/internal/kubeaudit/audit-policy.yaml
+                - hostPath: $audit_policy_path
                   containerPath: /etc/kubernetes/policies/audit-policy.yaml
                   readOnly: true
+          $customer_mount
           kubeadmConfigPatches:
             - |
               kind: ClusterConfiguration
@@ -535,6 +568,7 @@ jobs:
                   audit-log-maxage: "1"
                   audit-log-maxbackup: "2"
                   audit-log-maxsize: "20"
+          $customer_arg
                 extraVolumes:
                   - name: audit-policies
                     hostPath: /etc/kubernetes/policies/audit-policy.yaml
@@ -546,6 +580,7 @@ jobs:
                     mountPath: /var/log/kubernetes/audit
                     readOnly: false
                     pathType: DirectoryOrCreate
+          $customer_volume
           EOF
           kind create cluster --name evalplane-e2e --image "$KIND_NODE_IMAGE" --kubeconfig "$KUBECONFIG" --config "$kind_config" --wait 180s
           test "$(kubectl config current-context)" = "kind-evalplane-e2e"
@@ -565,8 +600,12 @@ jobs:
           fi
 
       - name: Prove independent direct Kubernetes agent controls
-        if: env.RUN_INDEPENDENT_CONTROLS == 'true'
+        if: env.RUN_INDEPENDENT_CONTROLS == 'true' && env.RUN_CUSTOMER_MONITORING != 'true'
         run: bash backend/e2e/run-independent-observer-control.sh
+
+      - name: Prove automatic customer Deployment monitoring
+        if: env.RUN_CUSTOMER_MONITORING == 'true'
+        run: python3 backend/e2e/customer-monitoring-acceptance.py run
 
       - name: Test Kubernetes audit adapter and runner repository
         if: env.RUN_FULL_CONTROLS == 'true'
@@ -1322,6 +1361,12 @@ jobs:
           timeout 30s docker stats --no-stream > "$ARTIFACT_DIR/docker-stats.txt" 2>&1
           timeout 30s kubectl get nodes -o wide > "$ARTIFACT_DIR/nodes.txt" 2>&1
           timeout 30s kubectl get pods -A -o wide > "$ARTIFACT_DIR/pods.txt" 2>&1
+          if [[ "$RUN_CUSTOMER_MONITORING" == true ]]; then
+            timeout 30s kubectl -n realverax-customer-proof get deployments,jobs,pods -o wide > "$ARTIFACT_DIR/customer-resources.txt" 2>&1
+            timeout 30s kubectl -n realverax-customer-proof get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/customer-events.txt" 2>&1
+            timeout 30s kubectl logs -n kube-system kube-apiserver-evalplane-e2e-control-plane --tail=150 2>&1 | grep -Ei 'audit|webhook|error' | tail -n 80 > "$ARTIFACT_DIR/customer-apiserver-audit-errors.txt"
+            exit 0
+          fi
           if [[ "$RUN_INDEPENDENT_CONTROLS" == true ]]; then
             timeout 30s kubectl -n realverax-audit-proof get deployments,jobs,pods -o wide > "$ARTIFACT_DIR/independent-resources-wide.txt" 2>&1
             timeout 30s kubectl -n realverax-audit-proof get events --sort-by=.lastTimestamp > "$ARTIFACT_DIR/independent-events.txt" 2>&1
@@ -1366,6 +1411,7 @@ jobs:
           timeout 60s kubectl delete -f backend/e2e/calibration.yaml --ignore-not-found --wait=false
           timeout 60s kubectl delete -f backend/e2e/harness-rbac.yaml --ignore-not-found --wait=false
           timeout 120s kind delete cluster --name evalplane-e2e
+          rm -rf /tmp/realverax-customer-monitoring-private
           audit_dir="$ARTIFACT_DIR/kind-audit-source"
           if [[ -d "$audit_dir" ]]; then
             sudo chown -R "$(id -u):$(id -g)" "$audit_dir"

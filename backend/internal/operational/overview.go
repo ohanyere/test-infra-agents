@@ -24,6 +24,8 @@ type SessionSummary struct {
 	ObservationBatches    int        `json:"observation_batches"`
 	AuditCandidates       int        `json:"audit_candidates"`
 	MonitoringState       string     `json:"monitoring_state"`
+	MonitoringMode        string     `json:"monitoring_mode"`
+	MonitoringBaselineAt  *time.Time `json:"monitoring_baseline_at,omitempty"`
 	MonitoringNextDueAt   *time.Time `json:"monitoring_next_due_at,omitempty"`
 	MonitoringLastSuccess *time.Time `json:"monitoring_last_success_at,omitempty"`
 	MonitoringLastError   string     `json:"monitoring_last_error"`
@@ -42,6 +44,8 @@ type EvidenceSourceStatus struct {
 type EnvironmentStatus struct {
 	WorkspaceID        string                 `json:"workspace_id"`
 	EnvironmentID      string                 `json:"environment_id"`
+	Name               string                 `json:"name"`
+	ClusterIdentifier  string                 `json:"cluster_identifier"`
 	ConnectionStatus   string                 `json:"connection_status"`
 	ActiveRequirements []Contract             `json:"active_requirements"`
 	Sessions           []SessionSummary       `json:"sessions"`
@@ -62,7 +66,7 @@ func (s *Service) ListSessions(ctx context.Context, p auth.Principal, w, e strin
 	if !exists {
 		return nil, auth.ErrForbidden
 	}
-	rows, err := s.pool.Query(ctx, `SELECT s.id,s.run_id,s.status,s.created_at,COALESCE(r.revision,0),COALESCE(r.report->>'canonical_overall_status',''),r.evaluated_at,COALESCE(j.state,'not_scheduled'),COALESCE(j.attempts,0),j.next_attempt_at,(SELECT count(*) FROM customer_observation_batches b WHERE b.session_id=s.id),(SELECT count(*) FROM customer_kubernetes_audit_records a WHERE a.session_id=s.id),COALESCE(m.state,'not_configured'),m.next_due_at,m.last_success_at,COALESCE(m.last_error,'') FROM customer_observation_sessions s LEFT JOIN LATERAL (SELECT revision,report,evaluated_at FROM operational_assessment_reports WHERE workspace_id=s.workspace_id AND run_id=s.run_id ORDER BY revision DESC LIMIT 1) r ON true LEFT JOIN assurance_evaluation_jobs j ON j.session_id=s.id LEFT JOIN assurance_monitoring_plans m ON m.session_id=s.id AND m.workspace_id=s.workspace_id AND m.environment_id=s.environment_id WHERE s.workspace_id=$1 AND s.environment_id=$2 ORDER BY s.created_at DESC,s.id DESC LIMIT 100`, w, e)
+	rows, err := s.pool.Query(ctx, `SELECT s.id,s.run_id,s.status,s.created_at,COALESCE(r.revision,0),COALESCE(r.report->>'canonical_overall_status',''),r.evaluated_at,COALESCE(j.state,'not_scheduled'),COALESCE(j.attempts,0),j.next_attempt_at,(SELECT count(*) FROM customer_observation_batches b WHERE b.session_id=s.id),(SELECT count(*) FROM customer_kubernetes_audit_records a WHERE a.session_id=s.id),COALESCE(m.state,'not_configured'),COALESCE(m.mode,'none'),m.baseline_acquired_at,m.next_due_at,m.last_success_at,COALESCE(m.last_error,'') FROM customer_observation_sessions s LEFT JOIN LATERAL (SELECT revision,report,evaluated_at FROM operational_assessment_reports WHERE workspace_id=s.workspace_id AND run_id=s.run_id ORDER BY revision DESC LIMIT 1) r ON true LEFT JOIN assurance_evaluation_jobs j ON j.session_id=s.id LEFT JOIN assurance_monitoring_plans m ON m.session_id=s.id AND m.workspace_id=s.workspace_id AND m.environment_id=s.environment_id WHERE s.workspace_id=$1 AND s.environment_id=$2 ORDER BY s.created_at DESC,s.id DESC LIMIT 100`, w, e)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +74,7 @@ func (s *Service) ListSessions(ctx context.Context, p auth.Principal, w, e strin
 	out := []SessionSummary{}
 	for rows.Next() {
 		var x SessionSummary
-		if err = rows.Scan(&x.ID, &x.RunID, &x.Status, &x.CreatedAt, &x.LatestRevision, &x.LatestCanonicalStatus, &x.LastAssessedAt, &x.EvaluationState, &x.EvaluationAttempts, &x.NextEvaluationAt, &x.ObservationBatches, &x.AuditCandidates, &x.MonitoringState, &x.MonitoringNextDueAt, &x.MonitoringLastSuccess, &x.MonitoringLastError); err != nil {
+		if err = rows.Scan(&x.ID, &x.RunID, &x.Status, &x.CreatedAt, &x.LatestRevision, &x.LatestCanonicalStatus, &x.LastAssessedAt, &x.EvaluationState, &x.EvaluationAttempts, &x.NextEvaluationAt, &x.ObservationBatches, &x.AuditCandidates, &x.MonitoringState, &x.MonitoringMode, &x.MonitoringBaselineAt, &x.MonitoringNextDueAt, &x.MonitoringLastSuccess, &x.MonitoringLastError); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -85,7 +89,7 @@ func (s *Service) EnvironmentStatus(ctx context.Context, p auth.Principal, w, e 
 	if identity.ValidateUUID(e) != nil {
 		return EnvironmentStatus{}, auth.ErrForbidden
 	}
-	err := s.pool.QueryRow(ctx, `SELECT connection_status FROM customer_kubernetes_environments WHERE workspace_id=$1 AND id=$2`, w, e).Scan(&out.ConnectionStatus)
+	err := s.pool.QueryRow(ctx, `SELECT name,cluster_identifier,connection_status FROM customer_kubernetes_environments WHERE workspace_id=$1 AND id=$2`, w, e).Scan(&out.Name, &out.ClusterIdentifier, &out.ConnectionStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EnvironmentStatus{}, auth.ErrForbidden
 	}

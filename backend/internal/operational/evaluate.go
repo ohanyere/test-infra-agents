@@ -87,6 +87,7 @@ type Finding struct {
 }
 type Action struct {
 	ID                  string    `json:"id"`
+	KubernetesPrincipal string    `json:"kubernetes_principal,omitempty"`
 	Operation           string    `json:"operation"`
 	Namespace           string    `json:"namespace"`
 	Kind                string    `json:"kind"`
@@ -835,7 +836,7 @@ func assessRule(in Input, service string, rule Rule) Finding {
 				match = match && rule.ResourceUID == a.UID
 			}
 			if rule.Type == "forbid_operation" && match && rule.Operation == a.Operation {
-				f.Evidence = []EvidenceRef{{Reference: a.ID, Provenance: a.Source}}
+				f.Evidence = []EvidenceRef{{Reference: "audit:" + strings.TrimPrefix(a.ID, "audit:"), Provenance: a.Source}}
 				if !a.OriginAuthenticated {
 					f.Code = "UNVERIFIED_FORBIDDEN_OPERATION_CANDIDATE"
 					f.Reason = "A forwarded audit candidate describes a forbidden operation, but API-server origin is unverified."
@@ -848,7 +849,7 @@ func assessRule(in Input, service string, rule Rule) Finding {
 				return f
 			}
 			if rule.Type == "allowed_mutation_scope" && !match {
-				f.Evidence = []EvidenceRef{{Reference: a.ID, Provenance: a.Source}}
+				f.Evidence = []EvidenceRef{{Reference: "audit:" + strings.TrimPrefix(a.ID, "audit:"), Provenance: a.Source}}
 				if !a.OriginAuthenticated {
 					f.Code = "UNVERIFIED_OUT_OF_SCOPE_CANDIDATE"
 					f.Reason = "A forwarded audit candidate describes an out-of-scope mutation, but API-server origin is unverified."

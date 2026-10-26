@@ -41,15 +41,17 @@ func Store(ctx context.Context, tx pgx.Tx, e Evidence) (PersistResult, error) {
 	}
 
 	var workspaceID, environmentID, runID, sessionStatus, collectorStatus string
-	var revokedAt, baselineAt *time.Time
+	var revokedAt, baselineAt, monitorBaselineAt *time.Time
+	var monitorState string
 	var databaseNow time.Time
 	err := tx.QueryRow(ctx, `SELECT s.workspace_id,s.environment_id,s.run_id,s.status,e.revoked_at,c.status,
-		(SELECT captured_at FROM customer_observation_batches WHERE session_id=s.id AND sequence=1 AND phase='baseline'),now()
+		(SELECT captured_at FROM customer_observation_batches WHERE session_id=s.id AND sequence=1 AND phase='baseline'),COALESCE(p.state,''),p.baseline_acquired_at,now()
 		FROM customer_observation_sessions s
 		JOIN customer_kubernetes_environments e ON e.id=s.environment_id AND e.workspace_id=s.workspace_id
 		JOIN customer_kubernetes_collectors c ON c.environment_id=e.id
+		LEFT JOIN assurance_monitoring_plans p ON p.session_id=s.id AND p.mode='deployment_audit'
 		WHERE s.id=$1 FOR UPDATE OF s,e,c`, e.Scope.SessionID).
-		Scan(&workspaceID, &environmentID, &runID, &sessionStatus, &revokedAt, &collectorStatus, &baselineAt, &databaseNow)
+		Scan(&workspaceID, &environmentID, &runID, &sessionStatus, &revokedAt, &collectorStatus, &baselineAt, &monitorState, &monitorBaselineAt, &databaseNow)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersistResult{}, auth.ErrForbidden
 	}
@@ -62,8 +64,12 @@ func Store(ctx context.Context, tx pgx.Tx, e Evidence) (PersistResult, error) {
 	if revokedAt != nil || collectorStatus != "active" {
 		return PersistResult{}, auth.ErrForbidden
 	}
-	if sessionStatus != "active" {
+	monitoring := sessionStatus == "completed" && (monitorState == "initializing" || monitorState == "active" || monitorState == "running" || monitorState == "degraded") && monitorBaselineAt != nil
+	if sessionStatus != "active" && !monitoring {
 		return PersistResult{}, identity.ErrConflict
+	}
+	if monitoring {
+		baselineAt = monitorBaselineAt
 	}
 	if baselineAt == nil || e.OccurredAt.IsZero() || e.ObservedAt.IsZero() || e.OccurredAt.Before(*baselineAt) || e.ObservedAt.Before(*baselineAt) || e.OccurredAt.After(databaseNow.Add(30*time.Second)) || e.ObservedAt.After(databaseNow.Add(30*time.Second)) || e.OccurredAt.After(e.ObservedAt.Add(30*time.Second)) {
 		return PersistResult{}, fmt.Errorf("%w: action evidence timestamps are outside the active observation window", identity.ErrValidation)

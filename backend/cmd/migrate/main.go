@@ -62,8 +62,8 @@ func run(args []string, logger *slog.Logger) error {
 			return fmt.Errorf("apply migrations: %w", err)
 		}
 		version, dirty, versionErr := migrator.Version()
-		if versionErr != nil || dirty || version != 39 {
-			return errors.New("migration did not reach clean version 39; inspect actual schema and migration state")
+		if versionErr != nil || dirty || version != 40 {
+			return errors.New("migration did not reach clean version 40; inspect actual schema and migration state")
 		}
 		if err := verifyReleaseSchema(databaseURL); err != nil {
 			return err

@@ -11,12 +11,12 @@ import (
 
 func TestOperationExplanationsKeepTrustStepsSeparate(t *testing.T) {
 	preflight := GatewayPreflight{ID: "preflight-1", ActionID: "action-1", AgentVersionID: "version-1", Namespace: "checkout", ResourceName: "api", Operation: "patch", Decision: "allowed"}
-	audit := Action{ID: "audit-1", Namespace: "checkout", Name: "api", Kind: "Deployment", Operation: "patch", OriginAuthenticated: true, Source: "kubernetes-api"}
+	audit := Action{ID: "audit-1", Namespace: "checkout", Name: "api", Kind: "Deployment", Operation: "patch", KubernetesPrincipal: "system:serviceaccount:checkout:external-agent", OriginAuthenticated: true, Source: "kubernetes-api"}
 	rule := Finding{RuleID: "contract-1:v2:rule:1", ContractID: "contract-1", ContractVersion: 2, Status: Fail, Code: "FORBIDDEN_OPERATION_OBSERVED", Evidence: []EvidenceRef{{Reference: "audit-1", Provenance: "kubernetes-api"}}}
 	report := Report{GatewayPreflights: []GatewayPreflight{preflight}, ObservedActions: []Action{audit}, Findings: []Finding{rule}}
 	binding := ExecutionBinding{ReceiptID: "receipt-1", ActionID: "action-1", PreflightID: "preflight-1", AgentVersionID: "version-1", AuditSourceID: "audit-1", DecisionID: "decision-1", DecisionStatus: "ATTRIBUTED", Operation: "patch", Namespace: "checkout", ResourceName: "api"}
 	out := explainOperations(report, []ExecutionBinding{binding})
-	if len(out) != 1 || !out[0].Attempted || out[0].GatewayDecision != "allowed" || out[0].AttributionStatus != "attributed" || out[0].ObservationStatus != "authenticated Kubernetes audit event observed" || len(out[0].RuleResults) != 1 || out[0].OutcomeStatus != "not established" {
+	if len(out) != 1 || !out[0].Attempted || out[0].GatewayDecision != "allowed" || out[0].AttributionStatus != "attributed" || out[0].ObservationStatus != "authenticated Kubernetes audit event observed" || out[0].KubernetesPrincipal != audit.KubernetesPrincipal || len(out[0].RuleResults) != 1 || out[0].OutcomeStatus != "not established" {
 		t.Fatalf("incorrect positive explanation: %+v", out)
 	}
 	binding.DecisionStatus = "INCONCLUSIVE"
@@ -29,6 +29,38 @@ func TestOperationExplanationsKeepTrustStepsSeparate(t *testing.T) {
 	if len(out) != 2 || out[0].AttributionStatus == "attributed" || len(out[0].RuleResults) != 0 || out[1].Key != "audit:audit-1" || len(out[1].RuleResults) != 1 {
 		t.Fatalf("conflicting attribution promoted: %+v", out[0])
 	}
+}
+
+func TestUnlinkedAuditExplainsPrincipalWithoutAgentAttribution(t *testing.T) {
+	audit := Action{ID: "audit-1", Namespace: "checkout", Name: "api", Kind: "Deployment", Operation: "patch", KubernetesPrincipal: "system:serviceaccount:checkout:external-agent", OriginAuthenticated: true, Source: "kubernetes-api"}
+	out := explainOperations(Report{ObservedActions: []Action{audit}}, nil)
+	if len(out) != 1 || out[0].KubernetesPrincipal != audit.KubernetesPrincipal || out[0].AttributionStatus != "not established" || out[0].OutcomeStatus != "not established" || out[0].GatewayDecision != "not linked" {
+		t.Fatalf("direct audit attribution exceeded evidence: %+v", out)
+	}
+	audit.OriginAuthenticated = false
+	out = explainOperations(Report{ObservedActions: []Action{audit}}, nil)
+	if len(out) != 1 || out[0].KubernetesPrincipal != "" || out[0].ExecutionStatus != "not established" {
+		t.Fatalf("forwarded candidate exposed an authenticated principal: %+v", out)
+	}
+}
+
+func TestForbiddenAuditFindingUsesScopedEvidenceReference(t *testing.T) {
+	now := time.Now().UTC()
+	report := Evaluate(Input{
+		Canonical:   verification.Result{},
+		Contracts:   []Contract{{ID: "customer-rule", Version: 1, Active: true, EffectiveAt: now.Add(-time.Minute), Rules: []Rule{{Type: "forbid_operation", Namespace: "checkout", ResourceKind: "Deployment", ResourceName: "api", Operation: "patch"}}}},
+		Actions:     []Action{{ID: "event-1", Namespace: "checkout", Name: "api", Kind: "Deployment", Operation: "patch", Source: "kubernetes-api", OriginAuthenticated: true}},
+		EvaluatedAt: now,
+	})
+	for _, finding := range report.Findings {
+		if finding.Code == "FORBIDDEN_OPERATION_OBSERVED" {
+			if len(finding.Evidence) != 1 || finding.Evidence[0].Reference != "audit:event-1" {
+				t.Fatalf("finding has no scoped audit evidence reference: %+v", finding.Evidence)
+			}
+			return
+		}
+	}
+	t.Fatal("forbidden operation finding missing")
 }
 
 func TestOperationExplanationsDenyAndUnlinkedEvidence(t *testing.T) {

@@ -28,22 +28,23 @@ type ExecutionBinding struct {
 // OperationExplanation records only exact identifier joins. State and service
 // findings remain session-level unless their evidence names this operation.
 type OperationExplanation struct {
-	Key               string        `json:"key"`
-	Requested         string        `json:"requested"`
-	Resource          string        `json:"resource,omitempty"`
-	Attempted         bool          `json:"attempted"`
-	GatewayDecision   string        `json:"gateway_decision"`
-	GatewayReason     string        `json:"gateway_reason,omitempty"`
-	ExecutionStatus   string        `json:"execution_status"`
-	ObservationStatus string        `json:"observation_status"`
-	AttributionStatus string        `json:"attribution_status"`
-	AgentVersionID    string        `json:"agent_version_id,omitempty"`
-	AttributionReason string        `json:"attribution_reason,omitempty"`
-	OutcomeStatus     string        `json:"outcome_status"`
-	ApprovalStatus    string        `json:"approval_status"`
-	Evidence          []EvidenceRef `json:"evidence"`
-	RuleResults       []Finding     `json:"rule_results"`
-	Unverified        []string      `json:"unverified"`
+	Key                 string        `json:"key"`
+	KubernetesPrincipal string        `json:"kubernetes_principal,omitempty"`
+	Requested           string        `json:"requested"`
+	Resource            string        `json:"resource,omitempty"`
+	Attempted           bool          `json:"attempted"`
+	GatewayDecision     string        `json:"gateway_decision"`
+	GatewayReason       string        `json:"gateway_reason,omitempty"`
+	ExecutionStatus     string        `json:"execution_status"`
+	ObservationStatus   string        `json:"observation_status"`
+	AttributionStatus   string        `json:"attribution_status"`
+	AgentVersionID      string        `json:"agent_version_id,omitempty"`
+	AttributionReason   string        `json:"attribution_reason,omitempty"`
+	OutcomeStatus       string        `json:"outcome_status"`
+	ApprovalStatus      string        `json:"approval_status"`
+	Evidence            []EvidenceRef `json:"evidence"`
+	RuleResults         []Finding     `json:"rule_results"`
+	Unverified          []string      `json:"unverified"`
 }
 
 func imageSuffix(image string) string {
@@ -119,6 +120,7 @@ func explainOperations(report Report, bindings []ExecutionBinding) []OperationEx
 		if b.AuditSourceID != "" {
 			for _, action := range report.ObservedActions {
 				if action.OriginAuthenticated && action.ID == b.AuditSourceID {
+					x.KubernetesPrincipal = action.KubernetesPrincipal
 					x.ObservationStatus = "authenticated audit event shares the receipt's Audit-ID; operation binding unresolved"
 					x.Evidence = append(x.Evidence, EvidenceRef{Reference: "audit:" + b.AuditSourceID, Provenance: action.Source})
 					if b.DecisionStatus == "ATTRIBUTED" {
@@ -148,7 +150,15 @@ func explainOperations(report Report, bindings []ExecutionBinding) []OperationEx
 		if a.OriginAuthenticated {
 			status = "authenticated Kubernetes audit event observed"
 		}
-		out = append(out, OperationExplanation{Key: "audit:" + a.ID, Requested: "No authenticated requested action linked", Resource: a.Namespace + "/" + a.Name, GatewayDecision: "not linked", ExecutionStatus: "not established", ObservationStatus: status, AttributionStatus: "not established", OutcomeStatus: "not established", ApprovalStatus: "not established", Evidence: []EvidenceRef{{Reference: "audit:" + a.ID, Provenance: a.Source}}})
+		execution := "not established"
+		principal := ""
+		heading := "Forwarded audit candidate reports "
+		if a.OriginAuthenticated {
+			execution = "successful mutation recorded by authenticated API-server audit"
+			principal = a.KubernetesPrincipal
+			heading = "Authenticated audit records "
+		}
+		out = append(out, OperationExplanation{Key: "audit:" + a.ID, Requested: heading + a.Operation + " " + a.Kind + " " + a.Namespace + "/" + a.Name, Resource: a.Namespace + "/" + a.Name, KubernetesPrincipal: principal, GatewayDecision: "not linked", ExecutionStatus: execution, ObservationStatus: status, AttributionStatus: "not established", OutcomeStatus: "not established", ApprovalStatus: "not established", Evidence: []EvidenceRef{{Reference: "audit:" + a.ID, Provenance: a.Source}}})
 	}
 	for i := range out {
 		x := &out[i]

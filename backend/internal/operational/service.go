@@ -333,7 +333,7 @@ func (s *Service) assessRun(ctx context.Context, p auth.Principal, w, e, session
 			rows.Close()
 			return zero, fmt.Errorf("stored direct audit event has unsupported target")
 		}
-		actions = append(actions, Action{ID: id, Source: "kubernetes-api", OriginAuthenticated: true, Operation: event.Verb, Kind: kind, Namespace: namespace, Name: event.ObjectRef.Name, UID: event.ObjectRef.UID, OccurredAt: occurred})
+		actions = append(actions, Action{ID: id, Source: "kubernetes-api", OriginAuthenticated: true, KubernetesPrincipal: event.User.Username, Operation: event.Verb, Kind: kind, Namespace: namespace, Name: event.ObjectRef.Name, UID: event.ObjectRef.UID, OccurredAt: occurred})
 	}
 	err = rows.Err()
 	rows.Close()
@@ -536,6 +536,41 @@ func (s *Service) assessRun(ctx context.Context, p auth.Principal, w, e, session
 		return zero, err
 	}
 	now := s.now().UTC()
+	monitorBaselineID := ""
+	monitorGap := false
+	monitorResource := ""
+	var monitorBaselineAt *time.Time
+	monitorErr := s.pool.QueryRow(ctx, `SELECT COALESCE(assessment_baseline_observation_id::text,baseline_observation_id::text,''),d.acquired_at,integrity_gap,COALESCE(o.namespace||'/'||o.resource_name,p.environment_id::text) FROM assurance_monitoring_plans p LEFT JOIN customer_direct_outcome_observations d ON d.id=COALESCE(p.assessment_baseline_observation_id,p.baseline_observation_id) LEFT JOIN customer_outcome_sources o ON o.id=p.deployment_source_id WHERE p.session_id=$1 AND p.mode='deployment_audit'`, sessionID).Scan(&monitorBaselineID, &monitorBaselineAt, &monitorGap, &monitorResource)
+	if monitorErr != nil && !errors.Is(monitorErr, pgx.ErrNoRows) {
+		return zero, monitorErr
+	}
+	if monitorErr == nil && monitorBaselineID != "" {
+		found := false
+		for _, direct := range directObservations {
+			if direct.ID != monitorBaselineID || direct.Kind != "kubernetes_state" {
+				continue
+			}
+			var value struct {
+				Observation agentgateway.Observation `json:"observation"`
+			}
+			if err = json.Unmarshal(direct.Payload, &value); err != nil || len(value.Observation.Workloads) != 1 {
+				return zero, fmt.Errorf("deployment monitor baseline is invalid")
+			}
+			canonical.Baseline = verification.Snapshot{Reference: "direct_outcome:" + direct.ID, CapturedAt: direct.AcquiredAt, SourceProvider: "direct-kubernetes-api:pinned-tls", Observation: value.Observation}
+			found = true
+			break
+		}
+		if !found {
+			return zero, fmt.Errorf("deployment monitor baseline observation is missing")
+		}
+		filtered := actions[:0]
+		for _, action := range actions {
+			if !action.OccurredAt.Before(*monitorBaselineAt) {
+				filtered = append(filtered, action)
+			}
+		}
+		actions = filtered
+	}
 	contractAt := canonical.Final.CapturedAt
 	if contractAt.IsZero() {
 		contractAt = canonical.CreatedAt
@@ -544,6 +579,10 @@ func (s *Service) assessRun(ctx context.Context, p auth.Principal, w, e, session
 	report := Evaluate(in)
 	report.MonitoringEvents = monitorEvents
 	report.Findings = append(report.Findings, assessSourceHealth(monitorEvents)...)
+	if monitorGap {
+		report.Findings = append(report.Findings, Finding{Dimension: "source_health", Status: Inconclusive, ProvenanceStatus: "AUTHENTICATED_AUDIT_MONITORING_GAP", Code: "MONITORING_EVIDENCE_UNAVAILABLE", Reason: "An authenticated Deployment event lacked a unique pre-action baseline or overlapped another operation. Causal outcome verification is inconclusive.", AffectedResource: monitorResource, Evidence: []EvidenceRef{{Reference: "monitoring_plan:" + sessionID, Provenance: "server_owned_monitoring_state"}}})
+		report.Limitations = append(report.Limitations, "The monitor recorded a baseline or event-order gap; a later healthy state cannot prove the outcome of each operation.")
+	}
 	report.CustomerAttribution = customerDecisions
 	report.EnvironmentID = e
 	report.OperationExplanations = explainOperations(report, bindings)
@@ -565,7 +604,9 @@ func (s *Service) assessRun(ctx context.Context, p auth.Principal, w, e, session
 		Reconciliations     []ReconciliationState
 		Contracts           []Contract
 		Observations        []verification.Snapshot
-	}{ContractVersion + ":explanations:v1", canonical.ID, claims, claimPayloads, actions, customerDecisions, bindings, metricSamples, directObservations, monitorEvents, approvals, preflights, reconciliations, in.Contracts, observations})
+		MonitorBaselineID   string
+		MonitorGap          bool
+	}{ContractVersion + ":explanations:v1", canonical.ID, claims, claimPayloads, actions, customerDecisions, bindings, metricSamples, directObservations, monitorEvents, approvals, preflights, reconciliations, in.Contracts, observations, monitorBaselineID, monitorGap})
 	if err != nil {
 		return zero, err
 	}

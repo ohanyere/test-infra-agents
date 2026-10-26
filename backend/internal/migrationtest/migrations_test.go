@@ -47,8 +47,12 @@ func TestMigrations(t *testing.T) {
 	if err := migrator.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migrate up: %v", err)
 	}
-	assertVersion(t, migrator, 39)
+	assertVersion(t, migrator, 40)
 	assertCoreTables(t, databaseURL)
+	if err := migrator.Steps(-1); err != nil {
+		t.Fatalf("migrate down 40: %v", err)
+	}
+	assertVersion(t, migrator, 39)
 	assertStage10HSourceKinds(t, databaseURL, true)
 	assertStage10H1Reachability(t, databaseURL, true)
 	if stage10H1HasProbeData(t, databaseURL) {
@@ -65,7 +69,7 @@ func TestMigrations(t *testing.T) {
 		if err := migrator.Up(); err != nil {
 			t.Fatalf("restore 39: %v", err)
 		}
-		assertVersion(t, migrator, 39)
+		assertVersion(t, migrator, 40)
 		return
 	}
 
@@ -86,7 +90,7 @@ func TestMigrations(t *testing.T) {
 	if err := migrator.Up(); err != nil {
 		t.Fatalf("migrate back up: %v", err)
 	}
-	assertVersion(t, migrator, 39)
+	assertVersion(t, migrator, 40)
 	assertCoreTables(t, databaseURL)
 	assertStage10HSourceKinds(t, databaseURL, true)
 	assertStage10H1Reachability(t, databaseURL, true)

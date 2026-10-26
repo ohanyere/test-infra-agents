@@ -228,6 +228,53 @@ func (s *Service) IngestAuthenticatedAuditEvent(ctx context.Context, peer *x509.
 	if err != nil {
 		return AuthenticatedAuditResult{}, err
 	}
+	// A deployment monitor retains one direct, pre-action state acquisition on
+	// its completed assurance session. Registration alone never supplies it.
+	monitored := false
+	monitorRows, err := tx.Query(ctx, `SELECT p.session_id,s.run_id,p.baseline_acquired_at FROM assurance_monitoring_plans p JOIN customer_observation_sessions s ON s.id=p.session_id AND s.workspace_id=p.workspace_id AND s.environment_id=p.environment_id JOIN customer_outcome_sources o ON o.id=p.deployment_source_id AND o.workspace_id=p.workspace_id AND o.environment_id=p.environment_id WHERE p.workspace_id=$1 AND p.environment_id=$2 AND p.mode='deployment_audit' AND p.state IN ('initializing','active','running','degraded') AND p.ends_at>now() AND o.revoked_at IS NULL AND o.expires_at>now() AND o.source_kind='kubernetes_state' AND o.namespace=$3 AND o.resource_name=$4 AND $5='Deployment' AND s.status='completed' ORDER BY p.session_id LIMIT 2 FOR UPDATE OF p,s`, w, e, namespace, event.ObjectRef.Name, kind)
+	if err != nil {
+		return AuthenticatedAuditResult{}, err
+	}
+	type monitorMatch struct {
+		session, run string
+		baseline     *time.Time
+	}
+	monitors := []monitorMatch{}
+	for monitorRows.Next() {
+		var m monitorMatch
+		if err = monitorRows.Scan(&m.session, &m.run, &m.baseline); err != nil {
+			monitorRows.Close()
+			return AuthenticatedAuditResult{}, err
+		}
+		monitors = append(monitors, m)
+	}
+	err = monitorRows.Err()
+	monitorRows.Close()
+	if err != nil {
+		return AuthenticatedAuditResult{}, err
+	}
+	if len(monitors) > 1 {
+		return AuthenticatedAuditResult{}, identity.ErrConflict
+	}
+	if len(monitors) == 1 {
+		m := monitors[0]
+		if m.baseline == nil || !m.baseline.Before(event.RequestAt) {
+			_, err = tx.Exec(ctx, `INSERT INTO customer_monitoring_audit_gaps(workspace_id,environment_id,session_id,source_id,source_event_id,source_event_digest,event_raw,event_at,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'no pre-action direct baseline') ON CONFLICT(workspace_id,environment_id,source_event_id) DO NOTHING`, w, e, m.session, sourceID, event.AuditID, digest[:], raw, event.RequestAt)
+			if err != nil {
+				return AuthenticatedAuditResult{}, err
+			}
+			_, err = tx.Exec(ctx, `UPDATE assurance_monitoring_plans SET integrity_gap=true,state=CASE WHEN state='running' THEN state ELSE 'degraded' END,last_error='authenticated audit arrived without a pre-action baseline',updated_at=now() WHERE session_id=$1`, m.session)
+			if err != nil {
+				return AuthenticatedAuditResult{}, err
+			}
+			if err = tx.Commit(ctx); err != nil {
+				return AuthenticatedAuditResult{}, err
+			}
+			return AuthenticatedAuditResult{}, ErrNoMatchingAuditSession
+		}
+		sessions = append(sessions, [2]string{m.session, m.run})
+		monitored = true
+	}
 	if len(sessions) == 0 {
 		return AuthenticatedAuditResult{}, ErrNoMatchingAuditSession
 	}
@@ -260,6 +307,12 @@ func (s *Service) IngestAuthenticatedAuditEvent(ctx context.Context, peer *x509.
 	}
 	if _, err = customerattribution.ReconcileAuthenticatedAuditTx(ctx, tx, out.ID, s.now().UTC()); err != nil {
 		return AuthenticatedAuditResult{}, err
+	}
+	if monitored {
+		_, err = tx.Exec(ctx, `UPDATE assurance_monitoring_plans SET assessment_baseline_observation_id=baseline_observation_id,integrity_gap=integrity_gap OR (last_audit_at IS NOT NULL AND baseline_acquired_at<=last_audit_at) OR (last_audit_at IS NOT NULL AND $2<last_audit_at),last_error=CASE WHEN last_audit_at IS NOT NULL AND (baseline_acquired_at<=last_audit_at OR $2<last_audit_at) THEN 'overlapping or out-of-order authenticated operations' ELSE last_error END,last_audit_at=GREATEST(COALESCE(last_audit_at,$2),$2),next_due_at=now(),updated_at=now() WHERE session_id=$1 AND mode='deployment_audit'`, out.SessionID, event.RequestAt)
+		if err != nil {
+			return AuthenticatedAuditResult{}, err
+		}
 	}
 	return out, tx.Commit(ctx)
 }
